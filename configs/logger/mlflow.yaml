@@ -1,0 +1,6 @@
+tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,file:./mlruns}
+experiment_name: embedding-training
+run_name: null
+log_model: false
+tags:
+  project: embedding-train

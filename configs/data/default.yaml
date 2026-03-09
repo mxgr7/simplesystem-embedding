@@ -1,0 +1,20 @@
+path: /Users/max/Clients/simplesystem/data/queries_offers_labeled.parquet
+positive_label: Exact
+batch_size: 16
+num_workers: 0
+pin_memory: false
+max_query_length: 32
+max_offer_length: 256
+val_fraction: 0.1
+clean_html: true
+limit_rows: null
+
+query_template: |-
+  {{ query_term }}
+
+offer_template: |-
+  {{ name }}
+  {% if manufacturer_name %} Brand: {{ manufacturer_name }}{% endif %}
+  {% if article_number %} Article: {{ article_number }}{% endif %}
+  {% if category_text %} Category: {{ category_text }}{% endif %}
+  {% if clean_description %} Description: {{ clean_description }}{% endif %}

@@ -1,0 +1,4 @@
+model_name: microsoft/mdeberta-v3-base
+pooling: mean
+similarity_scale: 20.0
+gradient_checkpointing: false

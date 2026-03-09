@@ -1,0 +1,11 @@
+.venv/
+.ruff_cache/
+__pycache__/
+*.pyc
+
+.pytest_cache/
+
+outputs/
+checkpoints/
+mlruns/
+mlruns-smoke/
