@@ -107,14 +107,16 @@ class EmbeddingModule(L.LightningModule):
         )
 
         cpu_scores = scores.detach().cpu().tolist()
-        cpu_labels = batch["labels"].detach().cpu().tolist()
+        raw_labels = batch["raw_labels"]
 
-        for query_id, score, label in zip(batch["query_ids"], cpu_scores, cpu_labels):
+        for query_id, score, raw_label in zip(
+            batch["query_ids"], cpu_scores, raw_labels
+        ):
             self.validation_rows.append(
                 {
                     "query_id": query_id,
                     "score": float(score),
-                    "label": int(label),
+                    "raw_label": raw_label,
                 }
             )
 
@@ -123,10 +125,9 @@ class EmbeddingModule(L.LightningModule):
     def on_validation_epoch_end(self):
         metrics = compute_ranking_metrics(self.validation_rows)
 
-        self.log("val/recall_at_1", metrics["recall@1"], prog_bar=True)
-        self.log("val/recall_at_5", metrics["recall@5"], prog_bar=True)
-        self.log("val/recall_at_10", metrics["recall@10"], prog_bar=False)
-        self.log("val/mrr_at_10", metrics["mrr@10"], prog_bar=True)
+        self.log("val/ndcg_at_1", metrics["ndcg@1"], prog_bar=True)
+        self.log("val/ndcg_at_5", metrics["ndcg@5"], prog_bar=True)
+        self.log("val/ndcg_at_10", metrics["ndcg@10"], prog_bar=False)
         self.log("val/eligible_queries", metrics["eligible_queries"], prog_bar=False)
 
     def configure_optimizers(self):
