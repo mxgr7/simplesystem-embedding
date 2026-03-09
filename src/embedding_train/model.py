@@ -8,11 +8,43 @@ from embedding_train.losses import cosine_bce_loss
 from embedding_train.metrics import compute_ranking_metrics
 
 
+def resolve_model_dtype(precision):
+    normalized = str(precision).strip().lower()
+
+    if normalized in {
+        "16",
+        "16-mixed",
+        "bf16",
+        "bf16-mixed",
+        "32",
+        "32-true",
+        "transformer-engine",
+        "transformer-engine-float16",
+        "transformer-engine-bfloat16",
+    }:
+        return torch.float32
+
+    if normalized == "16-true":
+        return torch.float16
+
+    if normalized == "bf16-true":
+        return torch.bfloat16
+
+    if normalized in {"64", "64-true"}:
+        return torch.float64
+
+    raise ValueError(f"Unsupported trainer precision: {precision}")
+
+
 class EmbeddingModule(L.LightningModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
-        self.encoder = AutoModel.from_pretrained(cfg.model.model_name)
+        self.model_dtype = resolve_model_dtype(cfg.trainer.precision)
+        self.encoder = AutoModel.from_pretrained(
+            cfg.model.model_name,
+            dtype=self.model_dtype,
+        )
         self.validation_rows = []
 
         self.save_hyperparameters(OmegaConf.to_container(cfg, resolve=True))
@@ -22,6 +54,7 @@ class EmbeddingModule(L.LightningModule):
         ):
             self.encoder.gradient_checkpointing_enable()
 
+        self.encoder = self.encoder.to(dtype=self.model_dtype)
         self.encoder.train()
 
     def forward(self, query_inputs, offer_inputs):
@@ -118,7 +151,8 @@ class EmbeddingModule(L.LightningModule):
         if self.cfg.model.pooling != "mean":
             raise ValueError(f"Unsupported pooling: {self.cfg.model.pooling}")
 
-        mask = attention_mask.unsqueeze(-1).expand(hidden_state.size()).float()
+        mask = attention_mask.unsqueeze(-1).to(hidden_state.dtype)
+        mask = mask.expand(hidden_state.size())
         masked_hidden_state = hidden_state * mask
         summed = masked_hidden_state.sum(dim=1)
         counts = mask.sum(dim=1).clamp(min=1e-9)
