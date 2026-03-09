@@ -32,11 +32,14 @@ class EmbeddingModule(L.LightningModule):
 
     def training_step(self, batch, batch_idx):
         _, _, scores = self(batch["query_inputs"], batch["offer_inputs"])
+        self.assert_finite(batch["labels"], "labels", batch_idx)
+        self.assert_finite(scores, "scores", batch_idx)
         loss = cosine_bce_loss(
             scores,
             batch["labels"],
             scale=float(self.cfg.model.similarity_scale),
         )
+        self.assert_finite(loss, "train_loss", batch_idx)
         self.log(
             "train/loss",
             loss,
@@ -52,11 +55,14 @@ class EmbeddingModule(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         _, _, scores = self(batch["query_inputs"], batch["offer_inputs"])
+        self.assert_finite(batch["labels"], "labels", batch_idx)
+        self.assert_finite(scores, "scores", batch_idx)
         loss = cosine_bce_loss(
             scores,
             batch["labels"],
             scale=float(self.cfg.model.similarity_scale),
         )
+        self.assert_finite(loss, "val_loss", batch_idx)
 
         self.log(
             "val/loss",
@@ -99,10 +105,14 @@ class EmbeddingModule(L.LightningModule):
 
     def encode(self, inputs):
         outputs = self.encoder(**inputs)
+        self.assert_finite(outputs.last_hidden_state, "last_hidden_state")
         pooled = self.pool_last_hidden_state(
             outputs.last_hidden_state, inputs["attention_mask"]
         )
-        return F.normalize(pooled, p=2, dim=1)
+        self.assert_finite(pooled, "pooled_embeddings")
+        normalized = F.normalize(pooled, p=2, dim=1)
+        self.assert_finite(normalized, "normalized_embeddings")
+        return normalized
 
     def pool_last_hidden_state(self, hidden_state, attention_mask):
         if self.cfg.model.pooling != "mean":
@@ -113,3 +123,12 @@ class EmbeddingModule(L.LightningModule):
         summed = masked_hidden_state.sum(dim=1)
         counts = mask.sum(dim=1).clamp(min=1e-9)
         return summed / counts
+
+    def assert_finite(self, tensor, name, batch_idx=None):
+        if torch.isfinite(tensor).all():
+            return
+
+        message = f"Non-finite tensor detected: {name}"
+        if batch_idx is not None:
+            message = f"{message} at batch {batch_idx}"
+        raise RuntimeError(message)
