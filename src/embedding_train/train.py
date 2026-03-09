@@ -2,6 +2,7 @@ from pathlib import Path
 
 import hydra
 import lightning as L
+import torch
 from dotenv import load_dotenv
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import MLFlowLogger
@@ -45,6 +46,7 @@ def build_callbacks(cfg):
 @hydra.main(version_base="1.3", config_path=str(CONFIG_DIR), config_name="config")
 def run(cfg):
     load_dotenv()
+    torch.set_float32_matmul_precision("high")
     L.seed_everything(int(cfg.seed), workers=True)
 
     print(OmegaConf.to_yaml(cfg, resolve=True))
@@ -64,6 +66,7 @@ def run(cfg):
         deterministic=bool(cfg.trainer.deterministic),
         limit_train_batches=cfg.trainer.limit_train_batches,
         limit_val_batches=cfg.trainer.limit_val_batches,
+        val_check_interval=cfg.trainer.val_check_interval,
         default_root_dir=str(Path.cwd()),
         logger=logger,
         callbacks=callbacks,
