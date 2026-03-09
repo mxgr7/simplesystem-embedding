@@ -5,7 +5,7 @@ num_workers: 0
 pin_memory: false
 max_query_length: 32
 max_offer_length: 256
-val_fraction: 0.1
+val_fraction: 0.05
 clean_html: true
 limit_rows: null
 
