@@ -4,7 +4,11 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 from transformers import AutoModel
 
-from embedding_train.losses import cosine_bce_loss, in_batch_contrastive_loss
+from embedding_train.losses import (
+    cosine_bce_loss,
+    in_batch_contrastive_loss,
+    in_batch_triplet_loss,
+)
 from embedding_train.metrics import compute_ranking_metrics
 
 
@@ -39,7 +43,7 @@ def resolve_model_dtype(precision):
 def resolve_loss_type(loss_type):
     normalized = str(loss_type).strip().lower()
 
-    if normalized in {"bce", "contrastive"}:
+    if normalized in {"bce", "contrastive", "triplet"}:
         return normalized
 
     raise ValueError(f"Unsupported loss type: {loss_type}")
@@ -186,6 +190,15 @@ class EmbeddingModule(L.LightningModule):
                 batch["query_ids"],
                 batch["labels"],
                 scale=scale,
+            )
+
+        if self.loss_type == "triplet":
+            return in_batch_triplet_loss(
+                query_embeddings,
+                offer_embeddings,
+                batch["query_ids"],
+                batch["labels"],
+                margin=float(self.cfg.model.triplet_margin),
             )
 
         raise RuntimeError(f"Unsupported loss type: {self.loss_type}")

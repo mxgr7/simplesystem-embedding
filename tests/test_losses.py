@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from embedding_train.losses import in_batch_contrastive_loss
+from embedding_train.losses import in_batch_contrastive_loss, in_batch_triplet_loss
 
 
 class InBatchContrastiveLossTests(unittest.TestCase):
@@ -66,6 +66,56 @@ class InBatchContrastiveLossTests(unittest.TestCase):
             query_ids,
             labels,
             scale=20.0,
+        )
+
+        self.assertEqual(loss.item(), 0.0)
+
+
+class InBatchTripletLossTests(unittest.TestCase):
+    def test_uses_hardest_in_batch_negative(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]])
+        offer_embeddings = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])
+        labels = torch.tensor([1.0, 0.0, 0.0])
+        query_ids = ["q1", "q2", "q3"]
+
+        loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+        )
+
+        self.assertTrue(torch.isclose(loss, torch.tensor(0.1), atol=1e-6))
+
+    def test_excludes_same_query_exact_offers_from_negatives(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+        offer_embeddings = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+        labels = torch.tensor([1.0, 1.0, 0.0])
+        query_ids = ["q1", "q1", "q2"]
+
+        loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+        )
+
+        self.assertEqual(loss.item(), 0.0)
+
+    def test_returns_zero_when_batch_has_no_valid_triplets(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        offer_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        labels = torch.tensor([0.0, 0.0])
+        query_ids = ["q1", "q2"]
+
+        loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
         )
 
         self.assertEqual(loss.item(), 0.0)

@@ -33,6 +33,31 @@ def in_batch_contrastive_loss(
     return losses.mean()
 
 
+def in_batch_triplet_loss(
+    query_embeddings, offer_embeddings, query_ids, labels, margin
+):
+    query_group_ids = _query_group_ids(query_ids, labels.device)
+    similarities = torch.matmul(query_embeddings, offer_embeddings.transpose(0, 1))
+
+    positive_anchors = labels > 0.5
+    positive_offers = positive_anchors.unsqueeze(0)
+    same_query = query_group_ids.unsqueeze(1) == query_group_ids.unsqueeze(0)
+    invalid_negative_mask = same_query & positive_offers
+    negative_mask = ~invalid_negative_mask
+    valid_rows = positive_anchors & negative_mask.any(dim=1)
+
+    if not valid_rows.any():
+        return similarities.sum() * 0.0
+
+    positive_scores = similarities.diagonal()
+    negative_scores = similarities.masked_fill(~negative_mask, float("-inf"))
+    hardest_negative_scores = negative_scores.max(dim=1).values
+    losses = F.relu(
+        hardest_negative_scores[valid_rows] - positive_scores[valid_rows] + margin
+    )
+    return losses.mean()
+
+
 def _query_group_ids(query_ids, device):
     query_index_by_id = {}
     query_group_ids = []

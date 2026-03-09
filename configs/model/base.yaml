@@ -2,4 +2,5 @@ model_name: microsoft/mdeberta-v3-base
 pooling: mean
 loss_type: bce
 similarity_scale: 20.0
+triplet_margin: 0.2
 gradient_checkpointing: false
