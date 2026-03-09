@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 from transformers import AutoModel
 
-from embedding_train.losses import cosine_bce_loss
+from embedding_train.losses import cosine_bce_loss, in_batch_contrastive_loss
 from embedding_train.metrics import compute_ranking_metrics
 
 
@@ -36,10 +36,20 @@ def resolve_model_dtype(precision):
     raise ValueError(f"Unsupported trainer precision: {precision}")
 
 
+def resolve_loss_type(loss_type):
+    normalized = str(loss_type).strip().lower()
+
+    if normalized in {"bce", "contrastive"}:
+        return normalized
+
+    raise ValueError(f"Unsupported loss type: {loss_type}")
+
+
 class EmbeddingModule(L.LightningModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.loss_type = resolve_loss_type(cfg.model.loss_type)
         self.model_dtype = resolve_model_dtype(cfg.trainer.precision)
         self.encoder = AutoModel.from_pretrained(
             cfg.model.model_name,
@@ -64,15 +74,26 @@ class EmbeddingModule(L.LightningModule):
         return query_embeddings, offer_embeddings, scores
 
     def training_step(self, batch, batch_idx):
-        _, _, scores = self(batch["query_inputs"], batch["offer_inputs"])
+        query_embeddings, offer_embeddings, scores = self(
+            batch["query_inputs"], batch["offer_inputs"]
+        )
         self.assert_finite(batch["labels"], "labels", batch_idx)
         self.assert_finite(scores, "scores", batch_idx)
-        loss = cosine_bce_loss(
+        loss = self.compute_loss(
+            batch,
+            query_embeddings,
+            offer_embeddings,
             scores,
-            batch["labels"],
-            scale=float(self.cfg.model.similarity_scale),
         )
         self.assert_finite(loss, "train_loss", batch_idx)
+        self.log(
+            f"train/{self.loss_type}_loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            batch_size=batch["labels"].size(0),
+        )
         self.log(
             "train/loss",
             loss,
@@ -87,16 +108,27 @@ class EmbeddingModule(L.LightningModule):
         self.validation_rows = []
 
     def validation_step(self, batch, batch_idx):
-        _, _, scores = self(batch["query_inputs"], batch["offer_inputs"])
+        query_embeddings, offer_embeddings, scores = self(
+            batch["query_inputs"], batch["offer_inputs"]
+        )
         self.assert_finite(batch["labels"], "labels", batch_idx)
         self.assert_finite(scores, "scores", batch_idx)
-        loss = cosine_bce_loss(
+        loss = self.compute_loss(
+            batch,
+            query_embeddings,
+            offer_embeddings,
             scores,
-            batch["labels"],
-            scale=float(self.cfg.model.similarity_scale),
         )
         self.assert_finite(loss, "val_loss", batch_idx)
 
+        self.log(
+            f"val/{self.loss_type}_loss",
+            loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            batch_size=batch["labels"].size(0),
+        )
         self.log(
             "val/loss",
             loss,
@@ -136,6 +168,27 @@ class EmbeddingModule(L.LightningModule):
             lr=float(self.cfg.optimizer.lr),
             weight_decay=float(self.cfg.optimizer.weight_decay),
         )
+
+    def compute_loss(self, batch, query_embeddings, offer_embeddings, scores):
+        scale = float(self.cfg.model.similarity_scale)
+
+        if self.loss_type == "bce":
+            return cosine_bce_loss(
+                scores,
+                batch["labels"],
+                scale=scale,
+            )
+
+        if self.loss_type == "contrastive":
+            return in_batch_contrastive_loss(
+                query_embeddings,
+                offer_embeddings,
+                batch["query_ids"],
+                batch["labels"],
+                scale=scale,
+            )
+
+        raise RuntimeError(f"Unsupported loss type: {self.loss_type}")
 
     def encode(self, inputs):
         outputs = self.encoder(**inputs)
