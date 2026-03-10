@@ -1,6 +1,10 @@
 path: /Users/max/Clients/simplesystem/data/queries_offers_labeled.parquet
 positive_label: Exact
 batch_size: 16
+train_batching_mode: random_pairs
+n_pos_samples_per_query: 2
+n_neg_samples_per_query: 2
+log_batch_stats: true
 num_workers: 0
 pin_memory: false
 max_query_length: 32

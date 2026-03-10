@@ -1,4 +1,5 @@
 import random
+from typing import cast
 
 import pandas as pd
 import torch
@@ -6,12 +7,28 @@ from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
+from embedding_train.batching import AnchorQueryBatchBuilder, AnchorQueryBatchDataset
 from embedding_train.text import (
     build_template,
     clean_html_text,
     flatten_category_paths,
     normalize_text,
 )
+
+VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query"}
+
+
+def resolve_train_batching_mode(train_batching_mode):
+    normalized = str(train_batching_mode).strip().lower()
+
+    if normalized in VALID_TRAIN_BATCHING_MODES:
+        return normalized
+
+    choices = "|".join(sorted(VALID_TRAIN_BATCHING_MODES))
+    raise ValueError(
+        "Unsupported train batching mode: "
+        f"{train_batching_mode}. Expected one of {choices}"
+    )
 
 
 class PairDataset(Dataset):
@@ -29,6 +46,9 @@ class EmbeddingDataModule(LightningDataModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.train_batching_mode = resolve_train_batching_mode(
+            cfg.data.train_batching_mode
+        )
         self.query_template = build_template(cfg.data.query_template)
         self.offer_template = build_template(cfg.data.offer_template)
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -37,9 +57,37 @@ class EmbeddingDataModule(LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
         self.dataset_stats = {}
+        self.positive_records_by_query = {}
+        self.negative_records_by_query = {}
+        self.eligible_query_ids = []
+        self.synthetic_negative_offer_pool = []
+        self._validate_batching_config()
 
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def _validate_batching_config(self):
+        n_pos_samples_per_query = int(self.cfg.data.n_pos_samples_per_query)
+        n_neg_samples_per_query = int(self.cfg.data.n_neg_samples_per_query)
+
+        if n_pos_samples_per_query < 1:
+            raise ValueError("n_pos_samples_per_query must be at least 1")
+
+        if n_neg_samples_per_query < 0:
+            raise ValueError("n_neg_samples_per_query must be at least 0")
+
+        if self.train_batching_mode != "anchor_query":
+            return
+
+        minimum_batch_size = n_pos_samples_per_query + n_neg_samples_per_query
+        batch_size = int(self.cfg.data.batch_size)
+
+        if batch_size < minimum_batch_size:
+            raise ValueError(
+                "batch_size must be at least "
+                f"n_pos_samples_per_query + n_neg_samples_per_query "
+                f"({minimum_batch_size}) when train_batching_mode=anchor_query"
+            )
 
     def setup(self, stage=None):
         if self.train_dataset is not None and self.val_dataset is not None:
@@ -86,19 +134,38 @@ class EmbeddingDataModule(LightningDataModule):
 
         self.train_dataset = PairDataset(train_records)
         self.val_dataset = PairDataset(val_records)
+        self._build_train_metadata(train_records)
         self.dataset_stats = {
             "train_rows": len(train_records),
             "val_rows": len(val_records),
             "train_queries": len({record["query_id"] for record in train_records}),
             "val_queries": len({record["query_id"] for record in val_records}),
             "skipped_rows": skipped_rows,
+            "eligible_train_queries": len(self.eligible_query_ids),
         }
 
         print("Loaded dataset:", self.dataset_stats)
 
     def train_dataloader(self):
+        if self.train_dataset is None:
+            raise RuntimeError("train_dataset is not initialized. Call setup() first.")
+
+        if self.train_batching_mode == "anchor_query":
+            train_batch_dataset = cast(
+                Dataset, self._build_anchor_query_train_dataset()
+            )
+            return DataLoader(
+                train_batch_dataset,
+                batch_size=None,
+                num_workers=int(self.cfg.data.num_workers),
+                pin_memory=bool(self.cfg.data.pin_memory),
+                collate_fn=self.collate_fn,
+            )
+
+        train_dataset = cast(Dataset, self.train_dataset)
+
         return DataLoader(
-            self.train_dataset,
+            train_dataset,
             batch_size=int(self.cfg.data.batch_size),
             shuffle=True,
             num_workers=int(self.cfg.data.num_workers),
@@ -107,8 +174,13 @@ class EmbeddingDataModule(LightningDataModule):
         )
 
     def val_dataloader(self):
+        if self.val_dataset is None:
+            raise RuntimeError("val_dataset is not initialized. Call setup() first.")
+
+        val_dataset = cast(Dataset, self.val_dataset)
+
         return DataLoader(
-            self.val_dataset,
+            val_dataset,
             batch_size=int(self.cfg.data.batch_size),
             shuffle=False,
             num_workers=int(self.cfg.data.num_workers),
@@ -117,8 +189,15 @@ class EmbeddingDataModule(LightningDataModule):
         )
 
     def collate_fn(self, batch):
-        query_texts = [item["query_text"] for item in batch]
-        offer_texts = [item["offer_text"] for item in batch]
+        batch_records = batch
+        batch_stats = None
+
+        if isinstance(batch, dict) and "records" in batch:
+            batch_records = batch["records"]
+            batch_stats = batch.get("batch_stats")
+
+        query_texts = [item["query_text"] for item in batch_records]
+        offer_texts = [item["offer_text"] for item in batch_records]
 
         query_inputs = self.tokenizer(
             query_texts,
@@ -136,16 +215,40 @@ class EmbeddingDataModule(LightningDataModule):
             return_tensors="pt",
         )
 
-        return {
+        collated_batch = {
             "query_inputs": dict(query_inputs),
             "offer_inputs": dict(offer_inputs),
             "labels": torch.tensor(
-                [item["label"] for item in batch], dtype=torch.float32
+                [item["label"] for item in batch_records], dtype=torch.float32
             ),
-            "query_ids": [item["query_id"] for item in batch],
-            "offer_ids": [item["offer_id"] for item in batch],
-            "raw_labels": [item["raw_label"] for item in batch],
+            "query_ids": [item["query_id"] for item in batch_records],
+            "offer_ids": [item["offer_id"] for item in batch_records],
+            "raw_labels": [item["raw_label"] for item in batch_records],
         }
+
+        if batch_stats is not None:
+            collated_batch["batch_stats"] = dict(batch_stats)
+
+        return collated_batch
+
+    def _build_anchor_query_train_dataset(self):
+        if self.train_dataset is None:
+            raise RuntimeError("train_dataset is not initialized. Call setup() first.")
+
+        batch_builder = AnchorQueryBatchBuilder(
+            positive_records_by_query=self.positive_records_by_query,
+            negative_records_by_query=self.negative_records_by_query,
+            eligible_query_ids=self.eligible_query_ids,
+            synthetic_negative_offer_pool=self.synthetic_negative_offer_pool,
+            batch_size=int(self.cfg.data.batch_size),
+            n_pos_samples_per_query=int(self.cfg.data.n_pos_samples_per_query),
+            n_neg_samples_per_query=int(self.cfg.data.n_neg_samples_per_query),
+            seed=int(self.cfg.seed),
+        )
+        train_rows = len(self.train_dataset)
+        batch_size = int(self.cfg.data.batch_size)
+        batches_per_epoch = max(1, (train_rows + batch_size - 1) // batch_size)
+        return AnchorQueryBatchDataset(batch_builder, batches_per_epoch)
 
     def _build_record(self, row):
         context = {}
@@ -176,11 +279,51 @@ class EmbeddingDataModule(LightningDataModule):
             "offer_id": normalize_text(context.get("offer_id_b64")),
             "query_text": query_text,
             "offer_text": offer_text,
-            "label": 1.0
-            if context.get("label") == self.cfg.data.positive_label
-            else 0.0,
+            "label": (
+                1.0 if context.get("label") == self.cfg.data.positive_label else 0.0
+            ),
             "raw_label": normalize_text(context.get("label")),
         }
+
+    def _build_train_metadata(self, train_records):
+        positive_records_by_query = {}
+        negative_records_by_query = {}
+        synthetic_negative_offer_pool = []
+
+        for record in train_records:
+            query_id = record["query_id"]
+
+            if record["label"] > 0.5:
+                positive_records_by_query.setdefault(query_id, []).append(record)
+            else:
+                negative_records_by_query.setdefault(query_id, []).append(record)
+
+            synthetic_negative_offer_pool.append(
+                {
+                    "offer_source_query_id": query_id,
+                    "offer_id": record["offer_id"],
+                    "offer_text": record["offer_text"],
+                }
+            )
+
+        n_pos_samples_per_query = int(self.cfg.data.n_pos_samples_per_query)
+        eligible_query_ids = [
+            query_id
+            for query_id, records in positive_records_by_query.items()
+            if len(records) >= n_pos_samples_per_query
+        ]
+        eligible_query_ids.sort()
+
+        self.positive_records_by_query = positive_records_by_query
+        self.negative_records_by_query = negative_records_by_query
+        self.eligible_query_ids = eligible_query_ids
+        self.synthetic_negative_offer_pool = synthetic_negative_offer_pool
+
+        if self.train_batching_mode == "anchor_query" and not self.eligible_query_ids:
+            raise ValueError(
+                "No train query has at least "
+                f"n_pos_samples_per_query={n_pos_samples_per_query} positive rows"
+            )
 
     def _safe_value(self, value):
         if value is None:

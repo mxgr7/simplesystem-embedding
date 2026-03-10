@@ -106,6 +106,7 @@ class EmbeddingModule(L.LightningModule):
             prog_bar=True,
             batch_size=batch["labels"].size(0),
         )
+        self.log_training_batch_stats(batch)
         return loss
 
     def on_validation_epoch_start(self):
@@ -172,6 +173,35 @@ class EmbeddingModule(L.LightningModule):
             lr=float(self.cfg.optimizer.lr),
             weight_decay=float(self.cfg.optimizer.weight_decay),
         )
+
+    def log_training_batch_stats(self, batch):
+        if not bool(self.cfg.data.log_batch_stats):
+            return
+
+        batch_stats = batch.get("batch_stats")
+        if not batch_stats:
+            return
+
+        batch_size = batch["labels"].size(0)
+        stats_to_log = {
+            "train/batch_positive_count": batch_stats["positive_count"],
+            "train/batch_same_query_negative_count": batch_stats[
+                "same_query_negative_count"
+            ],
+            "train/batch_cross_query_negative_count": batch_stats[
+                "cross_query_negative_count"
+            ],
+        }
+
+        for name, value in stats_to_log.items():
+            self.log(
+                name,
+                float(value),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                batch_size=batch_size,
+            )
 
     def compute_loss(self, batch, query_embeddings, offer_embeddings, scores):
         scale = float(self.cfg.model.similarity_scale)

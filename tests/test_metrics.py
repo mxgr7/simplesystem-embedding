@@ -29,6 +29,18 @@ class ComputeRankingMetricsTests(unittest.TestCase):
                 [{"query_id": "q1", "score": 1.0, "raw_label": "Unknown"}]
             )
 
+    def test_rejects_synthetic_negative_labels_if_they_reach_metrics(self):
+        with self.assertRaisesRegex(ValueError, "Unknown relevance label"):
+            compute_ranking_metrics(
+                [
+                    {
+                        "query_id": "q1",
+                        "score": 1.0,
+                        "raw_label": "SyntheticNegative",
+                    }
+                ]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
