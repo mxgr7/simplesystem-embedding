@@ -40,18 +40,31 @@ def in_batch_triplet_loss(
     similarities = torch.matmul(query_embeddings, offer_embeddings.transpose(0, 1))
 
     positive_anchors = labels > 0.5
-    positive_offers = positive_anchors.unsqueeze(0)
     same_query = query_group_ids.unsqueeze(1) == query_group_ids.unsqueeze(0)
-    invalid_negative_mask = same_query & positive_offers
-    negative_mask = ~invalid_negative_mask
-    valid_rows = positive_anchors & negative_mask.any(dim=1)
+    positive_offers = positive_anchors.unsqueeze(0)
+    same_query_negative_mask = same_query & ~positive_offers
+    cross_query_negative_mask = ~same_query
+    has_same_query_negative = same_query_negative_mask.any(dim=1)
+    has_cross_query_negative = cross_query_negative_mask.any(dim=1)
+    valid_rows = positive_anchors & (has_same_query_negative | has_cross_query_negative)
 
     if not valid_rows.any():
         return similarities.sum() * 0.0
 
     positive_scores = similarities.diagonal()
-    negative_scores = similarities.masked_fill(~negative_mask, float("-inf"))
-    hardest_negative_scores = negative_scores.max(dim=1).values
+    same_query_negative_scores = similarities.masked_fill(
+        ~same_query_negative_mask, float("-inf")
+    )
+    cross_query_negative_scores = similarities.masked_fill(
+        ~cross_query_negative_mask, float("-inf")
+    )
+    hardest_same_query_negative_scores = same_query_negative_scores.max(dim=1).values
+    hardest_cross_query_negative_scores = cross_query_negative_scores.max(dim=1).values
+    hardest_negative_scores = torch.where(
+        has_same_query_negative,
+        hardest_same_query_negative_scores,
+        hardest_cross_query_negative_scores,
+    )
     losses = F.relu(
         hardest_negative_scores[valid_rows] - positive_scores[valid_rows] + margin
     )

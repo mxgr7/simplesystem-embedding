@@ -68,11 +68,27 @@ class InBatchContrastiveLossTests(unittest.TestCase):
             scale=20.0,
         )
 
-        self.assertEqual(loss.item(), 0.0)
+        self.assertTrue(torch.isclose(loss, torch.tensor(0.0), atol=1e-6))
 
 
 class InBatchTripletLossTests(unittest.TestCase):
-    def test_uses_hardest_in_batch_negative(self):
+    def test_prefers_same_query_negative_over_cross_query_fallback(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+        offer_embeddings = torch.tensor([[1.0, 0.0], [0.8, 0.2], [0.95, 0.05]])
+        labels = torch.tensor([1.0, 0.0, 0.0])
+        query_ids = ["q1", "q1", "q2"]
+
+        loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+        )
+
+        self.assertTrue(torch.isclose(loss, torch.tensor(0.0), atol=1e-6))
+
+    def test_falls_back_to_hardest_cross_query_negative(self):
         query_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]])
         offer_embeddings = torch.tensor([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])
         labels = torch.tensor([1.0, 0.0, 0.0])

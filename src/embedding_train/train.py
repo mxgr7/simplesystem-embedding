@@ -34,8 +34,8 @@ def build_callbacks(cfg):
         ModelCheckpoint(
             dirpath=str(checkpoint_dir),
             filename="best",
-            monitor="val/loss",
-            mode="min",
+            monitor="val/ndcg_at_5",
+            mode="max",
             save_top_k=1,
             save_last=True,
         ),
