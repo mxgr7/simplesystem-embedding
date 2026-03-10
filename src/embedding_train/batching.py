@@ -43,17 +43,13 @@ class AnchorQueryBatchBuilder:
             for query_id, records in negative_records_by_query.items()
         }
         self.eligible_query_ids = list(eligible_query_ids)
-        self.synthetic_offer_pool_by_query = {}
+        self.synthetic_offer_pool = [
+            dict(record) for record in synthetic_negative_offer_pool
+        ]
         self.batch_size = int(batch_size)
         self.n_pos_samples_per_query = int(n_pos_samples_per_query)
         self.n_neg_samples_per_query = int(n_neg_samples_per_query)
         self.randomizer = random.Random(seed)
-
-        for record in synthetic_negative_offer_pool:
-            query_id = record["offer_source_query_id"]
-            self.synthetic_offer_pool_by_query.setdefault(query_id, []).append(
-                dict(record)
-            )
 
         self._validate_config()
 
@@ -70,6 +66,8 @@ class AnchorQueryBatchBuilder:
         anchor_negative_records = self._shuffled_copy(
             self.negative_records_by_query.get(anchor_query_id, [])
         )
+        anchor_query_text = self._resolve_anchor_query_text(anchor_query_id)
+        synthetic_offer_candidates = self._shuffled_copy(self.synthetic_offer_pool)
 
         if len(anchor_positive_records) < self.n_pos_samples_per_query:
             raise ValueError(
@@ -77,6 +75,7 @@ class AnchorQueryBatchBuilder:
             )
 
         batch = []
+        used_offer_ids = set()
         batch_stats = {
             "anchor_query_id": anchor_query_id,
             "positive_count": 0,
@@ -85,90 +84,102 @@ class AnchorQueryBatchBuilder:
         }
 
         for _ in range(self.n_pos_samples_per_query):
-            self._append_real_record(batch, batch_stats, anchor_positive_records.pop())
+            self._append_real_record(
+                batch, batch_stats, anchor_positive_records.pop(), used_offer_ids
+            )
 
         for _ in range(self.n_neg_samples_per_query):
             if anchor_negative_records:
                 self._append_real_record(
-                    batch, batch_stats, anchor_negative_records.pop()
+                    batch,
+                    batch_stats,
+                    anchor_negative_records.pop(),
+                    used_offer_ids,
                 )
                 continue
 
-            self._append_synthetic_negative(batch, batch_stats, anchor_query_id)
+            self._append_synthetic_negative(
+                batch,
+                batch_stats,
+                anchor_query_id,
+                anchor_query_text,
+                synthetic_offer_candidates,
+                used_offer_ids,
+            )
 
         while len(batch) < self.batch_size and (
             anchor_positive_records or anchor_negative_records
         ):
             if anchor_positive_records and len(batch) < self.batch_size:
                 self._append_real_record(
-                    batch, batch_stats, anchor_positive_records.pop()
+                    batch,
+                    batch_stats,
+                    anchor_positive_records.pop(),
+                    used_offer_ids,
                 )
 
             if anchor_negative_records and len(batch) < self.batch_size:
                 self._append_real_record(
-                    batch, batch_stats, anchor_negative_records.pop()
+                    batch,
+                    batch_stats,
+                    anchor_negative_records.pop(),
+                    used_offer_ids,
                 )
 
         while len(batch) < self.batch_size:
-            self._append_synthetic_negative(batch, batch_stats, anchor_query_id)
+            self._append_synthetic_negative(
+                batch,
+                batch_stats,
+                anchor_query_id,
+                anchor_query_text,
+                synthetic_offer_candidates,
+                used_offer_ids,
+            )
 
         return {"records": batch, "batch_stats": batch_stats}
 
-    def _append_real_record(self, batch, batch_stats, record):
+    def _append_real_record(self, batch, batch_stats, record, used_offer_ids):
         batch.append(dict(record))
+        used_offer_ids.add(record["offer_id"])
 
         if record["label"] > 0.5:
             batch_stats["positive_count"] += 1
         else:
             batch_stats["same_query_negative_count"] += 1
 
-    def _append_synthetic_negative(self, batch, batch_stats, anchor_query_id):
-        synthetic_offer = self._sample_synthetic_offer(anchor_query_id, batch)
-        anchor_query_text = self._resolve_anchor_query_text(anchor_query_id)
+    def _append_synthetic_negative(
+        self,
+        batch,
+        batch_stats,
+        anchor_query_id,
+        anchor_query_text,
+        synthetic_offer_candidates,
+        used_offer_ids,
+    ):
+        synthetic_offer = self._sample_synthetic_offer(
+            anchor_query_id,
+            synthetic_offer_candidates,
+            used_offer_ids,
+        )
 
         batch.append(
             build_synthetic_negative_record(
                 anchor_query_id, anchor_query_text, synthetic_offer
             )
         )
+        used_offer_ids.add(synthetic_offer["offer_id"])
         batch_stats["cross_query_negative_count"] += 1
 
-    def _sample_synthetic_offer(self, anchor_query_id, batch):
-        used_offer_ids = {record["offer_id"] for record in batch}
-        candidate_query_ids = [
-            query_id
-            for query_id, offers in self.synthetic_offer_pool_by_query.items()
-            if query_id != anchor_query_id and offers
-        ]
-
-        if not candidate_query_ids:
-            raise ValueError(
-                "No non-anchor query offers are available for synthetic negatives"
-            )
-
-        candidate_query_ids = self._shuffled_copy(candidate_query_ids)
-        synthetic_offer_candidates = {
-            query_id: self._shuffled_copy(self.synthetic_offer_pool_by_query[query_id])
-            for query_id in candidate_query_ids
-        }
-
-        while candidate_query_ids:
-            exhausted_query_ids = []
-
-            for query_id in candidate_query_ids:
-                next_offer = self._pop_next_unused_offer(
-                    synthetic_offer_candidates[query_id], used_offer_ids
-                )
-                if next_offer is not None:
-                    return next_offer
-
-                exhausted_query_ids.append(query_id)
-
-            candidate_query_ids = [
-                query_id
-                for query_id in candidate_query_ids
-                if query_id not in exhausted_query_ids
-            ]
+    def _sample_synthetic_offer(
+        self, anchor_query_id, synthetic_offer_candidates, used_offer_ids
+    ):
+        while synthetic_offer_candidates:
+            offer = synthetic_offer_candidates.pop()
+            if offer["offer_source_query_id"] == anchor_query_id:
+                continue
+            if offer["offer_id"] in used_offer_ids:
+                continue
+            return offer
 
         raise ValueError(
             "No unique non-anchor query offers remain for synthetic negatives"
@@ -184,15 +195,6 @@ class AnchorQueryBatchBuilder:
             return negative_records[0]["query_text"]
 
         raise ValueError(f"Anchor query has no records: {anchor_query_id}")
-
-    def _pop_next_unused_offer(self, offers, used_offer_ids):
-        while offers:
-            offer = offers.pop()
-            if offer["offer_id"] in used_offer_ids:
-                continue
-            return offer
-
-        return None
 
     def _shuffled_copy(self, items):
         shuffled = list(items)
