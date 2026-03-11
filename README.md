@@ -89,10 +89,17 @@ Build a FAISS inner-product index over offer embeddings rendered with the same `
 
 ```bash
 uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index
+uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index --index-type ivf_flat --nlist 4096 --train-sample-size 50000 --nprobe 32
+uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index-pq --index-type ivf_pq --nlist 4096 --train-sample-size 100000 --pq-m 16 --pq-bits 8 --nprobe 32
+uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index-hnsw --index-type hnsw --hnsw-m 32 --ef-construction 200 --ef-search 64
 ```
 
 Helpful flags:
 
+- `--index-type flat|ivf_flat|ivf_pq|hnsw` to choose exact or approximate ANN search
+- `--nlist`, `--train-sample-size`, and `--nprobe` to tune IVF indexes
+- `--pq-m` and `--pq-bits` to control `ivf_pq` compression quality and memory usage
+- `--hnsw-m`, `--ef-construction`, and `--ef-search` to tune HNSW graph accuracy and build cost
 - `--copy-columns offer_id_b64,name` to retain extra offer metadata alongside the index
 - `--read-batch-size 4096` and `--encode-batch-size 256` to tune throughput
 - `--limit-rows 10000` to build a smaller test index
@@ -105,10 +112,14 @@ Search a built index with either Parquet queries rendered through the same `quer
 ```bash
 uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index --input data/queries.parquet --output data/search_results.parquet --top-k 10
 uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index --query-text "hex bolt" --top-k 5
+uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index --input data/queries.parquet --output data/search_results.parquet --top-k 10 --nprobe 64
+uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index-hnsw --query-text "hex bolt" --top-k 5 --ef-search 128
 ```
 
 Helpful flags:
 
+- `--nprobe` to override the saved IVF probe count at query time
+- `--ef-search` to override the saved HNSW search breadth at query time
 - `--copy-columns query_id` to retain query metadata in Parquet search results
 - `--output data/search_results.parquet` to persist raw-text searches instead of printing them
 - `--limit-rows 1000` to search only part of a Parquet query file

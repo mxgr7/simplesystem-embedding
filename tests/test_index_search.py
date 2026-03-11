@@ -111,20 +111,22 @@ class IndexSearchCliTests(unittest.TestCase):
         )
         pq.write_table(table, path)
 
-    def build_index(self, tmp_dir):
+    def build_index(self, tmp_dir, extra_args=None):
         input_path = Path(tmp_dir) / "offers.parquet"
         index_path = Path(tmp_dir) / "offer-index"
         self.write_offer_table(input_path)
-        args = build_index_arg_parser().parse_args(
-            [
-                "--checkpoint",
-                str(Path(tmp_dir) / "model.ckpt"),
-                "--input",
-                str(input_path),
-                "--output",
-                str(index_path),
-            ]
-        )
+        cli_args = [
+            "--checkpoint",
+            str(Path(tmp_dir) / "model.ckpt"),
+            "--input",
+            str(input_path),
+            "--output",
+            str(index_path),
+        ]
+        if extra_args:
+            cli_args.extend(extra_args)
+
+        args = build_index_arg_parser().parse_args(cli_args)
         run_index_build(args)
         return index_path
 
@@ -210,6 +212,91 @@ class IndexSearchCliTests(unittest.TestCase):
         self.assertIn("FAISS Search Results", output)
         self.assertIn("bolt", output)
         self.assertIn("o1", output)
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.index_search.load_embedding_module_from_checkpoint")
+    @patch("embedding_train.index_build.load_embedding_module_from_checkpoint")
+    def test_search_supports_ann_index_types(
+        self,
+        build_load_checkpoint,
+        search_load_checkpoint,
+        from_pretrained,
+    ):
+        build_load_checkpoint.return_value = (_IndexModelStub(), build_cfg())
+        search_load_checkpoint.return_value = (_IndexModelStub(), build_cfg())
+        from_pretrained.return_value = _TokenizerStub()
+
+        cases = [
+            (
+                "ivf_flat",
+                [
+                    "--index-type",
+                    "ivf_flat",
+                    "--nlist",
+                    "1",
+                    "--train-sample-size",
+                    "3",
+                    "--nprobe",
+                    "1",
+                ],
+                ["--nprobe", "1"],
+            ),
+            (
+                "ivf_pq",
+                [
+                    "--index-type",
+                    "ivf_pq",
+                    "--nlist",
+                    "1",
+                    "--train-sample-size",
+                    "3",
+                    "--pq-m",
+                    "1",
+                    "--pq-bits",
+                    "1",
+                    "--nprobe",
+                    "1",
+                ],
+                ["--nprobe", "1"],
+            ),
+            (
+                "hnsw",
+                [
+                    "--index-type",
+                    "hnsw",
+                    "--hnsw-m",
+                    "4",
+                    "--ef-search",
+                    "8",
+                    "--ef-construction",
+                    "8",
+                ],
+                ["--ef-search", "8"],
+            ),
+        ]
+
+        for index_type, build_args, search_args in cases:
+            with self.subTest(index_type=index_type), TemporaryDirectory() as tmp_dir:
+                index_path = self.build_index(tmp_dir, extra_args=build_args)
+
+                cli_args = [
+                    "--checkpoint",
+                    str(Path(tmp_dir) / "model.ckpt"),
+                    "--index",
+                    str(index_path),
+                    "--query-text",
+                    "bolt",
+                    "--top-k",
+                    "1",
+                ]
+                cli_args.extend(search_args)
+
+                args = build_arg_parser().parse_args(cli_args)
+
+                result_rows = run_index_search(args)
+
+                self.assertEqual(len(result_rows), 1)
+                self.assertEqual(result_rows[0]["match_offer_id_b64"], "o1")
 
 
 if __name__ == "__main__":

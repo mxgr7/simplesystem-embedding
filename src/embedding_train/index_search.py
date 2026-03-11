@@ -10,6 +10,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from embedding_train.faiss_index import apply_search_parameters
 from embedding_train.index_artifact import read_manifest, resolve_index_paths
 from embedding_train.infer import (
     IncrementalParquetWriter,
@@ -61,6 +62,18 @@ def build_arg_parser():
         type=int,
         default=128,
         help="Texts to tokenize and encode per forward pass.",
+    )
+    parser.add_argument(
+        "--nprobe",
+        type=int,
+        default=None,
+        help="Override the IVF nprobe value for search.",
+    )
+    parser.add_argument(
+        "--ef-search",
+        type=int,
+        default=None,
+        help="Override the HNSW efSearch value for search.",
     )
     parser.add_argument(
         "--copy-columns",
@@ -245,6 +258,12 @@ def run_index_search(args):
 
     device = resolve_device(args.device)
     artifact_paths, manifest, index, metadata_by_id = load_index_artifact(args.index)
+    apply_search_parameters(
+        index,
+        manifest.get("index_config", {"index_type": manifest["index_type"]}),
+        nprobe=args.nprobe,
+        ef_search=args.ef_search,
+    )
 
     model, cfg = load_embedding_module_from_checkpoint(
         args.checkpoint, map_location="cpu"

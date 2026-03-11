@@ -94,6 +94,7 @@ class IndexBuildCliTests(unittest.TestCase):
         table = pa.Table.from_pylist(
             [
                 {"offer_id_b64": "o1", "name": "bolt", "label": "Exact"},
+                {"offer_id_b64": "o4", "name": "nut", "label": "Exact"},
                 {"offer_id_b64": "o2", "name": "", "label": "Irrelevant"},
                 {"offer_id_b64": "o3", "name": "screw", "label": "Exact"},
             ]
@@ -130,21 +131,65 @@ class IndexBuildCliTests(unittest.TestCase):
             manifest = json.loads((output_path / "manifest.json").read_text())
 
             self.assertTrue((output_path / "index.faiss").exists())
-            self.assertEqual(len(metadata_rows), 2)
-            self.assertEqual([row["faiss_id"] for row in metadata_rows], [0, 1])
-            self.assertEqual([row["row_number"] for row in metadata_rows], [0, 2])
+            self.assertEqual(len(metadata_rows), 3)
+            self.assertEqual([row["faiss_id"] for row in metadata_rows], [0, 1, 2])
+            self.assertEqual([row["row_number"] for row in metadata_rows], [0, 1, 3])
             self.assertEqual(
                 [row["offer_text"] for row in metadata_rows],
-                ["bolt", "screw"],
+                ["bolt", "nut", "screw"],
             )
             self.assertEqual(
                 [row["offer_id_b64"] for row in metadata_rows],
-                ["o1", "o3"],
+                ["o1", "o4", "o3"],
             )
             self.assertEqual(manifest["embedding_dim"], 3)
-            self.assertEqual(manifest["indexed_rows"], 2)
+            self.assertEqual(manifest["indexed_rows"], 3)
             self.assertEqual(manifest["skipped_rows"], 1)
+            self.assertEqual(manifest["index_type"], "flat")
             self.assertIn("Indexing", stderr.getvalue())
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.index_build.load_embedding_module_from_checkpoint")
+    def test_persists_ann_index_configuration(self, load_checkpoint, from_pretrained):
+        load_checkpoint.return_value = (_IndexModelStub(), build_cfg())
+        from_pretrained.return_value = _TokenizerStub()
+
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "offers.parquet"
+            output_path = Path(tmp_dir) / "offer-index"
+            self.write_offer_table(input_path)
+
+            args = build_arg_parser().parse_args(
+                [
+                    "--checkpoint",
+                    str(Path(tmp_dir) / "model.ckpt"),
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--index-type",
+                    "ivf_pq",
+                    "--nlist",
+                    "1",
+                    "--train-sample-size",
+                    "3",
+                    "--pq-m",
+                    "1",
+                    "--pq-bits",
+                    "1",
+                    "--nprobe",
+                    "1",
+                ]
+            )
+
+            run_index_build(args)
+            manifest = json.loads((output_path / "manifest.json").read_text())
+
+        self.assertEqual(manifest["index_type"], "ivf_pq")
+        self.assertEqual(manifest["index_config"]["nlist"], 1)
+        self.assertEqual(manifest["index_config"]["pq_m"], 1)
+        self.assertEqual(manifest["index_config"]["pq_bits"], 1)
+        self.assertEqual(manifest["index_config"]["nprobe"], 1)
 
 
 if __name__ == "__main__":
