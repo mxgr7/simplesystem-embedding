@@ -50,6 +50,17 @@ def resolve_loss_type(loss_type):
     raise ValueError(f"Unsupported loss type: {loss_type}")
 
 
+def resolve_output_dim(output_dim):
+    if output_dim is None:
+        return None
+
+    resolved_output_dim = int(output_dim)
+    if resolved_output_dim < 1:
+        raise ValueError(f"output_dim must be at least 1, got: {output_dim}")
+
+    return resolved_output_dim
+
+
 def load_embedding_module_from_checkpoint(checkpoint_path, map_location="cpu"):
     checkpoint = torch.load(
         checkpoint_path,
@@ -78,6 +89,9 @@ class EmbeddingModule(L.LightningModule):
             cfg.model.model_name,
             dtype=self.model_dtype,
         )
+        self.encoder_hidden_size = int(self.encoder.config.hidden_size)
+        self.output_dim = resolve_output_dim(cfg.model.output_dim)
+        self.projection = None
         self.validation_rows = []
 
         self.save_hyperparameters(OmegaConf.to_container(cfg, resolve=True))
@@ -86,6 +100,13 @@ class EmbeddingModule(L.LightningModule):
             self.encoder, "gradient_checkpointing_enable"
         ):
             self.encoder.gradient_checkpointing_enable()
+
+        if self.output_dim is not None:
+            self.projection = torch.nn.Linear(
+                self.encoder_hidden_size,
+                self.output_dim,
+                dtype=self.model_dtype,
+            )
 
         self.encoder = self.encoder.to(dtype=self.model_dtype)
         self.encoder.train()
@@ -259,9 +280,17 @@ class EmbeddingModule(L.LightningModule):
             outputs.last_hidden_state, inputs["attention_mask"]
         )
         self.assert_finite(pooled, "pooled_embeddings")
-        normalized = F.normalize(pooled, p=2, dim=1)
+        projected = self.project_embeddings(pooled)
+        self.assert_finite(projected, "projected_embeddings")
+        normalized = F.normalize(projected, p=2, dim=1)
         self.assert_finite(normalized, "normalized_embeddings")
         return normalized
+
+    def project_embeddings(self, embeddings):
+        if self.projection is None:
+            return embeddings
+
+        return self.projection(embeddings)
 
     def pool_last_hidden_state(self, hidden_state, attention_mask):
         if self.cfg.model.pooling != "mean":

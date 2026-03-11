@@ -55,7 +55,7 @@ class _InferenceModelStub:
 def build_cfg():
     return OmegaConf.create(
         {
-            "model": {"model_name": "stub-model"},
+            "model": {"model_name": "stub-model", "output_dim": None},
             "data": {
                 "query_template": "{{ query_term }}",
                 "offer_template": "{{ name }}",
