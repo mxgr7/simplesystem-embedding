@@ -1,5 +1,7 @@
+import io
 import math
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -114,7 +116,9 @@ class EvaluationCliTests(unittest.TestCase):
                 ]
             )
 
-            report = run_evaluation(args)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                report = run_evaluation(args)
 
         self.assertEqual(report["embedding_precision"], "binary")
         self.assertEqual(report["baseline_precision"], "float32")
@@ -125,6 +129,7 @@ class EvaluationCliTests(unittest.TestCase):
         self.assertTrue(math.isclose(report["metrics"]["ndcg@5"], 0.6309297535714575))
         self.assertTrue(math.isclose(report["baseline_metrics"]["ndcg@1"], 1.0))
         self.assertTrue(math.isclose(report["metric_deltas"]["ndcg@1"], -1.0))
+        self.assertIn("Evaluating", stderr.getvalue())
 
 
 if __name__ == "__main__":

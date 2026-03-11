@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 import pyarrow.parquet as pq
 import torch
@@ -60,6 +61,26 @@ def build_metric_deltas(metrics, baseline_metrics):
     return deltas
 
 
+def render_progress_bar(completed, total, width=24):
+    if total <= 0:
+        total = 1
+
+    ratio = min(max(completed / total, 0.0), 1.0)
+    filled = int(ratio * width)
+    return "=" * filled + "." * (width - filled)
+
+
+def print_progress(completed, total, evaluated_rows, skipped_rows):
+    bar = render_progress_bar(completed, total)
+    percent = (min(completed, total) / total) * 100.0 if total else 100.0
+    message = (
+        f"\rEvaluating [{bar}] {percent:5.1f}% "
+        f"({min(completed, total)}/{total} rows, "
+        f"evaluated={evaluated_rows}, skipped={skipped_rows})"
+    )
+    print(message, end="", file=sys.stderr, flush=True)
+
+
 def run_evaluation(args):
     device = resolve_device(args.device)
     embedding_precision = resolve_embedding_precision(args.embedding_precision)
@@ -73,12 +94,17 @@ def run_evaluation(args):
     tokenizer = build_tokenizer(cfg.model.model_name)
     renderer = RowTextRenderer(cfg.data)
     parquet_file = pq.ParquetFile(args.input)
+    total_rows = parquet_file.metadata.num_rows
+    if args.limit_rows is not None:
+        total_rows = min(total_rows, int(args.limit_rows))
 
     processed_rows = 0
     evaluated_rows = 0
     skipped_rows = 0
     selected_rows = []
     baseline_rows = []
+
+    print_progress(0, total_rows, evaluated_rows, skipped_rows)
 
     for batch in parquet_file.iter_batches(batch_size=int(args.read_batch_size)):
         rows = batch.to_pylist()
@@ -101,6 +127,7 @@ def run_evaluation(args):
             records.append(record)
 
         if not records:
+            print_progress(processed_rows, total_rows, evaluated_rows, skipped_rows)
             continue
 
         evaluated_rows += len(records)
@@ -136,6 +163,7 @@ def run_evaluation(args):
             )
 
         if embedding_precision == "float32":
+            print_progress(processed_rows, total_rows, evaluated_rows, skipped_rows)
             continue
 
         baseline_scores = score_embedding_pairs(
@@ -151,6 +179,10 @@ def run_evaluation(args):
                     "raw_label": record["raw_label"],
                 }
             )
+
+        print_progress(processed_rows, total_rows, evaluated_rows, skipped_rows)
+
+    print(file=sys.stderr, flush=True)
 
     metrics = compute_ranking_metrics(selected_rows)
     report = {
