@@ -19,6 +19,7 @@ TOKEN_IDS = {
     "bolt": 1,
     "screw": 2,
     "nut": 3,
+    "Search: bolt": 1,
 }
 
 
@@ -80,6 +81,22 @@ def build_cfg():
             "model": {"model_name": "stub-model", "output_dim": None},
             "data": {
                 "query_template": "{{ query_term }}",
+                "offer_template": "{{ name }}",
+                "clean_html": True,
+                "max_query_length": 32,
+                "max_offer_length": 64,
+                "positive_label": "Exact",
+            },
+        }
+    )
+
+
+def build_prefixed_query_cfg():
+    return OmegaConf.create(
+        {
+            "model": {"model_name": "stub-model", "output_dim": None},
+            "data": {
+                "query_template": "Search: {{ query_term }}",
                 "offer_template": "{{ name }}",
                 "clean_html": True,
                 "max_query_length": 32,
@@ -212,6 +229,45 @@ class IndexSearchCliTests(unittest.TestCase):
         self.assertIn("FAISS Search Results", output)
         self.assertIn("bolt", output)
         self.assertIn("o1", output)
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.index_search.load_embedding_module_from_checkpoint")
+    @patch("embedding_train.index_build.load_embedding_module_from_checkpoint")
+    def test_raw_query_text_uses_query_template(
+        self,
+        build_load_checkpoint,
+        search_load_checkpoint,
+        from_pretrained,
+    ):
+        build_load_checkpoint.return_value = (_IndexModelStub(), build_cfg())
+        search_load_checkpoint.return_value = (
+            _IndexModelStub(),
+            build_prefixed_query_cfg(),
+        )
+        from_pretrained.return_value = _TokenizerStub()
+
+        with TemporaryDirectory() as tmp_dir:
+            index_path = self.build_index(tmp_dir)
+
+            args = build_arg_parser().parse_args(
+                [
+                    "--checkpoint",
+                    str(Path(tmp_dir) / "model.ckpt"),
+                    "--index",
+                    str(index_path),
+                    "--query-text",
+                    "bolt",
+                    "--top-k",
+                    "1",
+                ]
+            )
+
+            result_rows = run_index_search(args)
+
+        self.assertEqual(len(result_rows), 1)
+        self.assertEqual(result_rows[0]["query_text"], "Search: bolt")
+        self.assertEqual(result_rows[0]["raw_query_term"], "bolt")
+        self.assertEqual(result_rows[0]["match_offer_id_b64"], "o1")
 
     @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
     @patch("embedding_train.index_search.load_embedding_module_from_checkpoint")

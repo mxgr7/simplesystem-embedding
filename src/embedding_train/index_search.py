@@ -140,24 +140,31 @@ def build_query_rows(rows, renderer, copy_columns, row_number):
     return prepared_rows, query_texts, row_number, skipped_rows
 
 
-def build_raw_query_rows(query_texts):
+def build_raw_query_rows(query_texts, renderer):
     prepared_rows = []
     normalized_queries = []
     skipped_rows = 0
 
     for index, query_text in enumerate(query_texts or []):
-        normalized_query = normalize_text(query_text)
-        if not normalized_query:
+        raw_query_term = normalize_text(query_text)
+        if not raw_query_term:
+            skipped_rows += 1
+            continue
+
+        query_row = {"query_term": raw_query_term}
+        rendered_query = renderer.render_query_text(query_row)
+        if not rendered_query:
             skipped_rows += 1
             continue
 
         prepared_rows.append(
             {
                 "query_row_number": index,
-                "query_text": normalized_query,
+                "query_text": rendered_query,
+                "raw_query_term": raw_query_term,
             }
         )
-        normalized_queries.append(normalized_query)
+        normalized_queries.append(rendered_query)
 
     return prepared_rows, normalized_queries, skipped_rows
 
@@ -276,7 +283,10 @@ def run_index_search(args):
     expected_dim = int(manifest["embedding_dim"])
 
     if args.query_text:
-        query_rows, query_texts, skipped_rows = build_raw_query_rows(args.query_text)
+        query_rows, query_texts, skipped_rows = build_raw_query_rows(
+            args.query_text,
+            renderer,
+        )
         if not query_rows:
             raise ValueError("No non-empty query text was provided")
 
