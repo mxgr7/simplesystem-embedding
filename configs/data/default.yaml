@@ -17,8 +17,11 @@ query_template: |-
   {{ query_term }}
 
 offer_template: |-
-  {{ name }}
-  {% if manufacturer_name %} Brand: {{ manufacturer_name }}{% endif %}
-  {% if article_number %} Article: {{ article_number }}{% endif %}
+  Article Name: {{ name }}
+  {% if ean %} EAN: {{ ean }}{% endif %}
+  {% if article_number %} Article Number: {{ article_number }}{% endif %}
+  {% if manufacturer_article_number %} Article Number (Manufacturer): {{ manufacturer_article_number }}{% endif %}
   {% if category_text %} Category: {{ category_text }}{% endif %}
+  {% if manufacturer_article_type %} Article Type: {{ manufacturer_article_type }}{% endif %}
+  {% if manufacturer_name %} Brand: {{ manufacturer_name }}{% endif %}
   {% if clean_description %} Description: {{ clean_description }}{% endif %}
