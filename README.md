@@ -58,11 +58,24 @@ Use the offline CLI to stream Parquet input, export embeddings in batches, and w
 uv run embedding-infer --checkpoint checkpoints/best.ckpt --input data/input.parquet --output data/offer_embeddings.parquet
 uv run embedding-infer --checkpoint checkpoints/best.ckpt --input data/input.parquet --output data/query_embeddings.parquet --mode query
 uv run embedding-infer --checkpoint checkpoints/best.ckpt --input data/input.parquet --output data/pair_scores.parquet --mode pair_score
+uv run embedding-infer --checkpoint checkpoints/best.ckpt --input data/input.parquet --output data/offer_embeddings_f16.parquet --embedding-precision float16
+uv run embedding-infer --checkpoint checkpoints/best.ckpt --input data/input.parquet --output data/offer_embeddings_binary.parquet --embedding-precision binary
 ```
 
 Helpful flags:
 
 - `--read-batch-size 4096` to stream larger Parquet chunks
 - `--encode-batch-size 256` to control model batch size independently
+- `--embedding-precision float32|float16|int8|sign|binary` to control storage precision; `binary` stores packed sign bits
 - `--include-text` to persist rendered query and/or offer text alongside outputs
 - `--copy-columns query_id,offer_id_b64,label` to keep additional join keys in the output
+
+## Evaluate
+
+Use the offline evaluator to compare lower-precision scoring against the float32 baseline with the same nDCG metrics used during validation.
+
+```bash
+uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parquet --embedding-precision float16
+uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parquet --embedding-precision int8
+uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parquet --embedding-precision binary
+```

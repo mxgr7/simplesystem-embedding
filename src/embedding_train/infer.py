@@ -8,6 +8,12 @@ from dotenv import load_dotenv
 from transformers import AutoTokenizer
 
 from embedding_train.model import load_embedding_module_from_checkpoint
+from embedding_train.precision import (
+    quantize_embeddings,
+    resolve_embedding_precision,
+    score_embedding_pairs,
+    serialize_embeddings,
+)
 from embedding_train.rendering import RowTextRenderer
 
 
@@ -74,6 +80,11 @@ def build_arg_parser():
         "--compression",
         default="zstd",
         help="Parquet compression codec.",
+    )
+    parser.add_argument(
+        "--embedding-precision",
+        default="float32",
+        help="Embedding export precision: float32, float16, int8, sign, or binary.",
     )
     parser.add_argument(
         "--limit-rows",
@@ -171,7 +182,31 @@ def encode_texts(model, tokenizer, texts, max_length, encode_batch_size, device)
     return torch.cat(encoded_batches, dim=0)
 
 
-def build_output_table(rows, output_column, output_values, mode, input_schema):
+def resolve_embedding_arrow_type(embedding_precision):
+    if embedding_precision == "float32":
+        return pa.list_(pa.float32())
+
+    if embedding_precision == "float16":
+        return pa.list_(pa.float16())
+
+    if embedding_precision in {"int8", "sign"}:
+        return pa.list_(pa.int8())
+
+    if embedding_precision == "binary":
+        return pa.binary()
+
+    raise ValueError(f"Unsupported embedding precision: {embedding_precision}")
+
+
+def build_output_table(
+    rows,
+    output_column,
+    output_values,
+    mode,
+    input_schema,
+    embedding_precision,
+    embedding_dim,
+):
     arrays = {}
 
     for name in rows[0]:
@@ -189,10 +224,48 @@ def build_output_table(rows, output_column, output_values, mode, input_schema):
 
     if mode == "pair_score":
         arrays[output_column] = pa.array(output_values, type=pa.float32())
-        return pa.table(arrays)
+        table = pa.table(arrays)
+        return attach_output_metadata(
+            table,
+            output_column,
+            mode,
+            embedding_precision,
+            embedding_dim,
+        )
 
-    arrays[output_column] = pa.array(output_values, type=pa.list_(pa.float32()))
-    return pa.table(arrays)
+    arrays[output_column] = pa.array(
+        output_values,
+        type=resolve_embedding_arrow_type(embedding_precision),
+    )
+    table = pa.table(arrays)
+    return attach_output_metadata(
+        table,
+        output_column,
+        mode,
+        embedding_precision,
+        embedding_dim,
+    )
+
+
+def attach_output_metadata(
+    table,
+    output_column,
+    mode,
+    embedding_precision,
+    embedding_dim,
+):
+    metadata = dict(table.schema.metadata or {})
+    metadata[b"output_column"] = str(output_column).encode("utf-8")
+
+    if mode == "pair_score":
+        metadata[b"scoring_embedding_precision"] = str(embedding_precision).encode(
+            "utf-8"
+        )
+    else:
+        metadata[b"embedding_precision"] = str(embedding_precision).encode("utf-8")
+        metadata[b"embedding_dim"] = str(embedding_dim).encode("utf-8")
+
+    return table.replace_schema_metadata(metadata)
 
 
 class IncrementalParquetWriter:
@@ -241,6 +314,7 @@ def process_rows(
     encode_batch_size,
     device,
     row_number,
+    embedding_precision,
 ):
     prepared_rows = []
     query_texts = []
@@ -299,23 +373,33 @@ def process_rows(
         return None, row_number, skipped_rows
 
     if mode == "query":
-        output_values = encode_texts(
+        embeddings = encode_texts(
             model,
             tokenizer,
             query_texts,
             query_max_length,
             encode_batch_size,
             device,
-        ).tolist()
+        )
+        output_values = serialize_embeddings(
+            quantize_embeddings(embeddings, embedding_precision),
+            embedding_precision,
+        )
+        embedding_dim = embeddings.size(1)
     elif mode == "offer":
-        output_values = encode_texts(
+        embeddings = encode_texts(
             model,
             tokenizer,
             offer_texts,
             offer_max_length,
             encode_batch_size,
             device,
-        ).tolist()
+        )
+        output_values = serialize_embeddings(
+            quantize_embeddings(embeddings, embedding_precision),
+            embedding_precision,
+        )
+        embedding_dim = embeddings.size(1)
     else:
         query_embeddings = encode_texts(
             model,
@@ -333,7 +417,12 @@ def process_rows(
             encode_batch_size,
             device,
         )
-        output_values = (query_embeddings * offer_embeddings).sum(dim=1).tolist()
+        output_values = score_embedding_pairs(
+            query_embeddings,
+            offer_embeddings,
+            embedding_precision,
+        ).tolist()
+        embedding_dim = query_embeddings.size(1)
 
     table = build_output_table(
         prepared_rows,
@@ -341,6 +430,8 @@ def process_rows(
         output_values,
         mode,
         input_schema,
+        embedding_precision,
+        embedding_dim,
     )
     return table, row_number, skipped_rows
 
@@ -349,6 +440,7 @@ def run_inference(args):
     mode = resolve_inference_mode(args.mode)
     output_column = resolve_output_column(mode, args.output_column)
     device = resolve_device(args.device)
+    embedding_precision = resolve_embedding_precision(args.embedding_precision)
 
     model, cfg = load_embedding_module_from_checkpoint(
         args.checkpoint, map_location="cpu"
@@ -396,6 +488,7 @@ def run_inference(args):
                 encode_batch_size=int(args.encode_batch_size),
                 device=device,
                 row_number=row_number,
+                embedding_precision=embedding_precision,
             )
             skipped_rows += batch_skipped_rows
 
@@ -415,6 +508,7 @@ def run_inference(args):
             "processed_rows": processed_rows,
             "written_rows": written_rows,
             "skipped_rows": skipped_rows,
+            "embedding_precision": embedding_precision,
             "output": str(args.output),
         },
     )

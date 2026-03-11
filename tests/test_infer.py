@@ -174,6 +174,117 @@ class InferenceCliTests(unittest.TestCase):
 
     @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
     @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
+    def test_exports_float16_embeddings(self, load_checkpoint, from_pretrained):
+        load_checkpoint.return_value = (_InferenceModelStub(), build_cfg())
+        from_pretrained.return_value = _TokenizerStub()
+
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.parquet"
+            output_path = Path(tmp_dir) / "float16.parquet"
+            self.write_input_table(input_path)
+
+            args = build_arg_parser().parse_args(
+                [
+                    "--checkpoint",
+                    str(Path(tmp_dir) / "model.ckpt"),
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--mode",
+                    "offer",
+                    "--embedding-precision",
+                    "float16",
+                ]
+            )
+
+            run_inference(args)
+            table = pq.read_table(output_path)
+
+        self.assertEqual(
+            str(table.schema.field("offer_embedding").type),
+            "list<element: halffloat>",
+        )
+        self.assertEqual(table.schema.metadata[b"embedding_precision"], b"float16")
+        self.assertEqual(table.schema.metadata[b"embedding_dim"], b"2")
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
+    def test_exports_binary_embeddings_as_packed_bytes(
+        self, load_checkpoint, from_pretrained
+    ):
+        load_checkpoint.return_value = (_InferenceModelStub(), build_cfg())
+        from_pretrained.return_value = _TokenizerStub()
+
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.parquet"
+            output_path = Path(tmp_dir) / "binary.parquet"
+            self.write_input_table(input_path)
+
+            args = build_arg_parser().parse_args(
+                [
+                    "--checkpoint",
+                    str(Path(tmp_dir) / "model.ckpt"),
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--mode",
+                    "offer",
+                    "--embedding-precision",
+                    "binary",
+                ]
+            )
+
+            run_inference(args)
+            table = pq.read_table(output_path)
+            output_rows = table.to_pylist()
+
+        self.assertEqual(str(table.schema.field("offer_embedding").type), "binary")
+        self.assertEqual(table.schema.metadata[b"embedding_precision"], b"binary")
+        self.assertEqual(table.schema.metadata[b"embedding_dim"], b"2")
+        self.assertEqual(output_rows[0]["offer_embedding"], b"\xc0")
+        self.assertEqual(output_rows[1]["offer_embedding"], b"\xc0")
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
+    def test_pair_score_mode_supports_binary_scoring(
+        self, load_checkpoint, from_pretrained
+    ):
+        load_checkpoint.return_value = (_InferenceModelStub(), build_cfg())
+        from_pretrained.return_value = _TokenizerStub()
+
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.parquet"
+            output_path = Path(tmp_dir) / "scores.parquet"
+            self.write_input_table(input_path)
+
+            args = build_arg_parser().parse_args(
+                [
+                    "--checkpoint",
+                    str(Path(tmp_dir) / "model.ckpt"),
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--mode",
+                    "pair_score",
+                    "--embedding-precision",
+                    "binary",
+                ]
+            )
+
+            run_inference(args)
+            table = pq.read_table(output_path)
+            output_rows = table.to_pylist()
+
+        self.assertEqual(
+            table.schema.metadata[b"scoring_embedding_precision"], b"binary"
+        )
+        self.assertEqual([row["pair_score"] for row in output_rows], [1.0, 1.0])
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
     def test_offer_mode_raises_for_missing_offer_template_column(
         self, load_checkpoint, from_pretrained
     ):
