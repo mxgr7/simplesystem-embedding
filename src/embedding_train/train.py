@@ -13,6 +13,7 @@ from embedding_train.model import EmbeddingModule
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
+MLFLOW_RUN_NAME_TAG = "mlflow.runName"
 
 
 def build_logger(cfg):
@@ -26,8 +27,21 @@ def build_logger(cfg):
     )
 
 
-def build_callbacks(cfg):
-    checkpoint_dir = Path(cfg.trainer.checkpoint_dir)
+def _sanitize_path_component(value):
+    value = str(value).strip().replace("/", "-").replace("\\", "-")
+    return value or "run"
+
+
+def _resolve_checkpoint_run_name(logger):
+    run = logger.experiment.get_run(logger.run_id)
+    run_name = run.data.tags.get(MLFLOW_RUN_NAME_TAG) or logger.run_id
+    return _sanitize_path_component(run_name)
+
+
+def build_callbacks(cfg, logger):
+    checkpoint_dir = Path(cfg.trainer.checkpoint_dir) / _resolve_checkpoint_run_name(
+        logger
+    )
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint_callback = ModelCheckpoint(
@@ -60,7 +74,7 @@ def run(cfg):
     datamodule = EmbeddingDataModule(cfg)
     model = EmbeddingModule(cfg)
     logger = build_logger(cfg)
-    callbacks = build_callbacks(cfg)
+    callbacks = build_callbacks(cfg, logger)
 
     trainer = L.Trainer(
         accelerator=cfg.trainer.accelerator,
