@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 embedding-train = "embedding_train.train:main"
+embedding-infer = "embedding_train.infer:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/embedding_train"]

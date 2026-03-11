@@ -6,6 +6,7 @@ import torch
 from omegaconf import OmegaConf
 
 from embedding_train.data import EmbeddingDataModule
+from embedding_train.rendering import RowTextRenderer
 
 
 class _TokenizerStub:
@@ -92,6 +93,56 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
         datamodule = EmbeddingDataModule(build_cfg())
 
         self.assertEqual(datamodule.train_batching_mode, "random_pairs")
+
+
+class RowTextRendererTests(unittest.TestCase):
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_datamodule_record_builder_matches_shared_renderer(self, from_pretrained):
+        from_pretrained.return_value = _TokenizerStub()
+        cfg = build_cfg(
+            query_template="Query: {{ query_term }}",
+            offer_template=(
+                "{{ name }}\n"
+                "{% if manufacturer_name %}Brand: {{ manufacturer_name }}\n{% endif %}"
+                "{% if article_number %}Article: {{ article_number }}\n{% endif %}"
+                "{% if category_text %}Category: {{ category_text }}\n{% endif %}"
+                "{% if clean_description %}Description: {{ clean_description }}{% endif %}"
+            ),
+        )
+        renderer = RowTextRenderer(cfg.data)
+        datamodule = EmbeddingDataModule(cfg)
+        row = {
+            "query_id": "q-1",
+            "offer_id_b64": "o-1",
+            "query_term": "  Metric Bolt  ",
+            "name": "  Hex Bolt  ",
+            "manufacturer_name": "  ACME  ",
+            "article_number": " AB-123 ",
+            "category_paths": [["Hardware", "Bolts"], ["Hardware", "Bolts"]],
+            "description": "<p>High&nbsp;strength<br>steel</p>",
+            "label": "Exact",
+        }
+
+        expected_record = renderer.build_training_record(row)
+
+        self.assertEqual(
+            expected_record,
+            {
+                "query_id": "q-1",
+                "offer_id": "o-1",
+                "query_text": "Query: Metric Bolt",
+                "offer_text": (
+                    "Hex Bolt\n"
+                    "Brand: ACME\n"
+                    "Article: AB-123\n"
+                    "Category: Hardware > Bolts\n"
+                    "Description: High strength steel"
+                ),
+                "label": 1.0,
+                "raw_label": "Exact",
+            },
+        )
+        self.assertEqual(datamodule._build_record(row), expected_record)
 
 
 class EmbeddingDataModuleMetadataTests(unittest.TestCase):

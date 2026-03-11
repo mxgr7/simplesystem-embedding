@@ -8,12 +8,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
 from embedding_train.batching import AnchorQueryBatchBuilder, AnchorQueryBatchDataset
-from embedding_train.text import (
-    build_template,
-    clean_html_text,
-    flatten_category_paths,
-    normalize_text,
-)
+from embedding_train.rendering import RowTextRenderer
 
 VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query"}
 
@@ -49,8 +44,7 @@ class EmbeddingDataModule(LightningDataModule):
         self.train_batching_mode = resolve_train_batching_mode(
             cfg.data.train_batching_mode
         )
-        self.query_template = build_template(cfg.data.query_template)
-        self.offer_template = build_template(cfg.data.offer_template)
+        self.row_renderer = RowTextRenderer(cfg.data)
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg.model.model_name, use_fast=True
         )
@@ -251,39 +245,7 @@ class EmbeddingDataModule(LightningDataModule):
         return AnchorQueryBatchDataset(batch_builder, batches_per_epoch)
 
     def _build_record(self, row):
-        context = {}
-
-        for key, value in row.items():
-            context[key] = self._safe_value(value)
-
-        context["query_term"] = normalize_text(context.get("query_term"))
-        context["name"] = normalize_text(context.get("name"))
-        context["manufacturer_name"] = normalize_text(context.get("manufacturer_name"))
-        context["article_number"] = normalize_text(context.get("article_number"))
-        context["category_text"] = flatten_category_paths(context.get("category_paths"))
-        description = context.get("description")
-
-        if self.cfg.data.clean_html:
-            context["clean_description"] = clean_html_text(description)
-        else:
-            context["clean_description"] = normalize_text(description)
-
-        query_text = normalize_text(self.query_template.render(**context))
-        offer_text = normalize_text(self.offer_template.render(**context))
-
-        if not query_text or not offer_text:
-            return None
-
-        return {
-            "query_id": normalize_text(context.get("query_id")),
-            "offer_id": normalize_text(context.get("offer_id_b64")),
-            "query_text": query_text,
-            "offer_text": offer_text,
-            "label": (
-                1.0 if context.get("label") == self.cfg.data.positive_label else 0.0
-            ),
-            "raw_label": normalize_text(context.get("label")),
-        }
+        return self.row_renderer.build_training_record(row)
 
     def _build_train_metadata(self, train_records):
         positive_records_by_query = {}
@@ -324,15 +286,3 @@ class EmbeddingDataModule(LightningDataModule):
                 "No train query has at least "
                 f"n_pos_samples_per_query={n_pos_samples_per_query} positive rows"
             )
-
-    def _safe_value(self, value):
-        if value is None:
-            return ""
-
-        try:
-            if pd.isna(value):
-                return ""
-        except Exception:
-            pass
-
-        return value

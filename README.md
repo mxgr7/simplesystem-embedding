@@ -47,3 +47,20 @@ uv run embedding-train data.limit_rows=2048 trainer.max_epochs=1
 uv run embedding-train model.loss_type=contrastive
 uv run embedding-train model.loss_type=triplet model.triplet_margin=0.2
 ```
+
+## Infer
+
+Use the offline CLI to stream Parquet input, export embeddings in batches, and write results incrementally.
+
+```bash
+uv run embedding-infer --checkpoint checkpoints/best.ckpt --input data/input.parquet --output data/offer_embeddings.parquet
+uv run embedding-infer --checkpoint checkpoints/best.ckpt --input data/input.parquet --output data/query_embeddings.parquet --mode query
+uv run embedding-infer --checkpoint checkpoints/best.ckpt --input data/input.parquet --output data/pair_scores.parquet --mode pair_score
+```
+
+Helpful flags:
+
+- `--read-batch-size 4096` to stream larger Parquet chunks
+- `--encode-batch-size 256` to control model batch size independently
+- `--include-text` to persist rendered query and/or offer text alongside outputs
+- `--copy-columns query_id,offer_id_b64,label` to keep additional join keys in the output

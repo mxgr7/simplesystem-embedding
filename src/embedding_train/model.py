@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from omegaconf import OmegaConf
 from transformers import AutoModel
 
+from embedding_train.config import build_config_from_hyperparameters
 from embedding_train.losses import (
     cosine_bce_loss,
     in_batch_contrastive_loss,
@@ -47,6 +48,24 @@ def resolve_loss_type(loss_type):
         return normalized
 
     raise ValueError(f"Unsupported loss type: {loss_type}")
+
+
+def load_embedding_module_from_checkpoint(checkpoint_path, map_location="cpu"):
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location=map_location,
+        weights_only=False,
+    )
+
+    state_dict = checkpoint.get("state_dict")
+    if state_dict is None:
+        raise ValueError(f"Checkpoint is missing state_dict: {checkpoint_path}")
+
+    cfg = build_config_from_hyperparameters(checkpoint.get("hyper_parameters"))
+    model = EmbeddingModule(cfg)
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model, cfg
 
 
 class EmbeddingModule(L.LightningModule):
