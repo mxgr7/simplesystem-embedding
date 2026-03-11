@@ -79,3 +79,34 @@ uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parq
 uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parquet --embedding-precision int8
 uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parquet --embedding-precision binary
 ```
+
+## Build Index
+
+Build a FAISS inner-product index over offer embeddings rendered with the same `offer_template` used for training and evaluation. The command writes an artifact directory containing `index.faiss`, `metadata.parquet`, and `manifest.json`.
+
+```bash
+uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index
+```
+
+Helpful flags:
+
+- `--copy-columns offer_id_b64,name` to retain extra offer metadata alongside the index
+- `--read-batch-size 4096` and `--encode-batch-size 256` to tune throughput
+- `--limit-rows 10000` to build a smaller test index
+- `--overwrite` to replace an existing artifact directory
+
+## Search Index
+
+Search a built index with either Parquet queries rendered through the same `query_template` used for training and evaluation, or with raw query text.
+
+```bash
+uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index --input data/queries.parquet --output data/search_results.parquet --top-k 10
+uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index --query-text "hex bolt" --top-k 5
+```
+
+Helpful flags:
+
+- `--copy-columns query_id` to retain query metadata in Parquet search results
+- `--output data/search_results.parquet` to persist raw-text searches instead of printing them
+- `--limit-rows 1000` to search only part of a Parquet query file
+- `--overwrite` to replace an existing search output Parquet file

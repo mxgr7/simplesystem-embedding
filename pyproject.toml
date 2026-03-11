@@ -10,10 +10,12 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "debugpy>=1.8.20",
+  "faiss-cpu>=1.11.0",
   "hydra-core>=1.3.2",
   "jinja2>=3.1.5",
   "lightning>=2.5.0",
   "mlflow>=2.20.0",
+  "numpy>=2.2.4",
   "pandas>=2.2.3",
   "pyarrow>=19.0.1",
   "python-dotenv>=1.0.1",
@@ -26,6 +28,8 @@ dependencies = [
 embedding-train = "embedding_train.train:main"
 embedding-infer = "embedding_train.infer:main"
 embedding-eval = "embedding_train.eval:main"
+embedding-index-build = "embedding_train.index_build:main"
+embedding-index-search = "embedding_train.index_search:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/embedding_train"]
