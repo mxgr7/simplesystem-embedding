@@ -3,6 +3,6 @@ default_project = "simplesystem"
 [projects.simplesystem]
 local_project_root = "../"
 remote_project_root = "~/workspaces/simplesystem/embedding"
-remote_workdir = "~/workspaces/simplesystem/embedding/setup"
+remote_workdir = "~/workspaces/simplesystem/embedding/main"
 local_env_file = "./.env"
 
