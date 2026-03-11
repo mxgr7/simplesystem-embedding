@@ -1,7 +1,7 @@
 import html
 import re
 
-from jinja2 import Environment
+from jinja2 import Environment, StrictUndefined
 
 
 _BR_RE = re.compile(r"(?i)<br\\s*/?>")
@@ -11,7 +11,12 @@ _MULTI_NL_RE = re.compile(r"\n{3,}")
 
 
 def build_template(template_string):
-    environment = Environment(autoescape=False, trim_blocks=True, lstrip_blocks=True)
+    environment = Environment(
+        autoescape=False,
+        trim_blocks=True,
+        lstrip_blocks=True,
+        undefined=StrictUndefined,
+    )
     return environment.from_string(template_string)
 
 

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from jinja2 import UndefinedError
 from omegaconf import OmegaConf
 
 from embedding_train.infer import build_arg_parser, run_inference
@@ -170,6 +171,41 @@ class InferenceCliTests(unittest.TestCase):
 
         self.assertEqual(len(output_rows), 2)
         self.assertEqual([row["pair_score"] for row in output_rows], [53.0, 116.0])
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
+    def test_offer_mode_raises_for_missing_offer_template_column(
+        self, load_checkpoint, from_pretrained
+    ):
+        cfg = build_cfg()
+        cfg.data.offer_template = "{{ manufacturer_article_numbero }}"
+        load_checkpoint.return_value = (_InferenceModelStub(), cfg)
+        from_pretrained.return_value = _TokenizerStub()
+
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.parquet"
+            output_path = Path(tmp_dir) / "output.parquet"
+            self.write_input_table(input_path)
+
+            args = build_arg_parser().parse_args(
+                [
+                    "--checkpoint",
+                    str(Path(tmp_dir) / "model.ckpt"),
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--mode",
+                    "offer",
+                    "--overwrite",
+                ]
+            )
+
+            with self.assertRaisesRegex(
+                UndefinedError,
+                "manufacturer_article_numbero",
+            ):
+                run_inference(args)
 
 
 if __name__ == "__main__":

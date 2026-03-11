@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pandas as pd
 import torch
+from jinja2 import UndefinedError
 from omegaconf import OmegaConf
 
 from embedding_train.data import EmbeddingDataModule
@@ -143,6 +144,33 @@ class RowTextRendererTests(unittest.TestCase):
             },
         )
         self.assertEqual(datamodule._build_record(row), expected_record)
+
+    @patch("embedding_train.data.pd.read_parquet")
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_datamodule_setup_raises_for_missing_offer_template_column(
+        self, from_pretrained, read_parquet
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        read_parquet.return_value = pd.DataFrame(
+            [
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "o1",
+                    "query_term": "query one",
+                    "name": "offer one",
+                    "label": "Exact",
+                }
+            ]
+        )
+        datamodule = EmbeddingDataModule(
+            build_cfg(offer_template="{{ manufacturer_article_numbero }}")
+        )
+
+        with self.assertRaisesRegex(
+            UndefinedError,
+            "manufacturer_article_numbero",
+        ):
+            datamodule.setup()
 
 
 class EmbeddingDataModuleMetadataTests(unittest.TestCase):
