@@ -48,7 +48,10 @@ uv run embedding-train logger.tracking_uri=http://localhost:5000 logger.experime
 uv run embedding-train data.limit_rows=2048 trainer.max_epochs=1
 uv run embedding-train model.loss_type=contrastive
 uv run embedding-train model.loss_type=triplet model.triplet_margin=0.2
+uv run embedding-train trainer.resume_from_checkpoint=checkpoints/<run-name>/last-step=<step>-val_ndcg_at_5=<score>.ckpt
 ```
+
+To continue training from an interrupted run, point `trainer.resume_from_checkpoint` at the saved `last-step=...ckpt` checkpoint so Lightning restores optimizer and loop state.
 
 ## Infer
 

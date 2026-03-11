@@ -93,7 +93,11 @@ def run(cfg):
     )
 
     logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
-    trainer.fit(model, datamodule=datamodule)
+    trainer.fit(
+        model,
+        datamodule=datamodule,
+        ckpt_path=cfg.trainer.resume_from_checkpoint,
+    )
 
     best_model_path = ""
     for callback in callbacks:

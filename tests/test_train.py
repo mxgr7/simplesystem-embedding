@@ -2,11 +2,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from omegaconf import OmegaConf
 
-from embedding_train.train import build_callbacks
+from embedding_train.train import build_callbacks, run
 
 
 class _LoggerStub:
@@ -85,6 +86,61 @@ class TrainCallbackTests(unittest.TestCase):
         self.assertEqual(
             Path(checkpoint_callback.dirpath).resolve(),
             (Path(tmp_dir) / "nested-run-name").resolve(),
+        )
+
+    @patch("embedding_train.train.load_dotenv")
+    @patch("embedding_train.train.L.seed_everything")
+    @patch("embedding_train.train.torch.set_float32_matmul_precision")
+    @patch("embedding_train.train.build_callbacks", return_value=[])
+    @patch("embedding_train.train.build_logger")
+    @patch("embedding_train.train.EmbeddingModule")
+    @patch("embedding_train.train.EmbeddingDataModule")
+    @patch("embedding_train.train.L.Trainer")
+    def test_run_passes_resume_checkpoint_to_trainer_fit(
+        self,
+        trainer_cls,
+        data_module_cls,
+        module_cls,
+        build_logger,
+        build_callbacks,
+        set_matmul_precision,
+        seed_everything,
+        load_dotenv,
+    ):
+        cfg = OmegaConf.create(
+            {
+                "seed": 42,
+                "trainer": {
+                    "accelerator": "cpu",
+                    "devices": 1,
+                    "max_epochs": 1,
+                    "precision": "32-true",
+                    "log_every_n_steps": 10,
+                    "accumulate_grad_batches": 1,
+                    "deterministic": False,
+                    "limit_train_batches": 1.0,
+                    "limit_val_batches": 1.0,
+                    "val_check_interval": 1000,
+                    "resume_from_checkpoint": "checkpoints/run-001/last.ckpt",
+                },
+            }
+        )
+        trainer = Mock()
+        logger = Mock()
+        datamodule = Mock()
+        model = Mock()
+
+        trainer_cls.return_value = trainer
+        build_logger.return_value = logger
+        data_module_cls.return_value = datamodule
+        module_cls.return_value = model
+
+        run.__wrapped__(cfg)
+
+        trainer.fit.assert_called_once_with(
+            model,
+            datamodule=datamodule,
+            ckpt_path="checkpoints/run-001/last.ckpt",
         )
 
 
