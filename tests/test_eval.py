@@ -1,7 +1,7 @@
 import io
 import math
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 import torch
 from omegaconf import OmegaConf
 
-from embedding_train.eval import build_arg_parser, run_evaluation
+from embedding_train.eval import build_arg_parser, main, run_evaluation
 
 
 class _TokenizerStub:
@@ -130,6 +130,38 @@ class EvaluationCliTests(unittest.TestCase):
         self.assertTrue(math.isclose(report["baseline_metrics"]["ndcg@1"], 1.0))
         self.assertTrue(math.isclose(report["metric_deltas"]["ndcg@1"], -1.0))
         self.assertIn("Evaluating", stderr.getvalue())
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.eval.load_embedding_module_from_checkpoint")
+    def test_main_prints_formatted_report(self, load_checkpoint, from_pretrained):
+        load_checkpoint.return_value = (_EvaluationModelStub(), build_cfg())
+        from_pretrained.return_value = _TokenizerStub()
+
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "input.parquet"
+            self.write_input_table(input_path)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                main(
+                    [
+                        "--checkpoint",
+                        str(Path(tmp_dir) / "model.ckpt"),
+                        "--input",
+                        str(input_path),
+                        "--embedding-precision",
+                        "binary",
+                    ]
+                )
+
+        output = stdout.getvalue()
+        self.assertIn("Embedding Evaluation", output)
+        self.assertIn("Precision       binary", output)
+        self.assertIn("Metrics", output)
+        self.assertIn("Selected", output)
+        self.assertIn("Baseline", output)
+        self.assertIn("Delta", output)
 
 
 if __name__ == "__main__":
