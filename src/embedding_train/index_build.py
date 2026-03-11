@@ -1,4 +1,5 @@
 import argparse
+import sys
 
 import faiss
 import numpy as np
@@ -6,6 +7,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from dotenv import load_dotenv
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 
 from embedding_train.index_artifact import prepare_index_directory, write_manifest
 from embedding_train.infer import (
@@ -17,6 +27,33 @@ from embedding_train.infer import (
 )
 from embedding_train.model import load_embedding_module_from_checkpoint
 from embedding_train.rendering import RowTextRenderer
+
+
+def build_progress(total_rows):
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=24),
+        TaskProgressColumn(),
+        TextColumn("[dim]({task.completed:,.0f}/{task.total:,.0f} rows)"),
+        TextColumn(
+            "[dim]indexed={task.fields[indexed_rows]:,.0f} skipped={task.fields[skipped_rows]:,.0f}"
+        ),
+        TimeElapsedColumn(),
+        console=Console(file=sys.stderr),
+        transient=False,
+    )
+
+
+def update_progress(
+    progress, task_id, processed_rows, total_rows, indexed_rows, skipped_rows
+):
+    progress.update(
+        task_id,
+        completed=min(processed_rows, total_rows),
+        indexed_rows=indexed_rows,
+        skipped_rows=skipped_rows,
+    )
 
 
 def build_arg_parser():
@@ -129,6 +166,9 @@ def run_index_build(args):
     tokenizer = build_tokenizer(cfg.model.model_name)
     renderer = RowTextRenderer(cfg.data)
     parquet_file = pq.ParquetFile(args.input)
+    total_rows = parquet_file.metadata.num_rows
+    if args.limit_rows is not None:
+        total_rows = min(total_rows, int(args.limit_rows))
     copy_columns = parse_copy_columns(args.copy_columns, parquet_file.schema.names)
     artifact_paths = prepare_index_directory(args.output, args.overwrite)
     metadata_writer = IncrementalParquetWriter(
@@ -145,66 +185,83 @@ def run_index_build(args):
     embedding_dim = None
     index = None
 
-    try:
-        for batch in parquet_file.iter_batches(batch_size=int(args.read_batch_size)):
-            rows = batch.to_pylist()
-            if args.limit_rows is not None:
-                remaining_rows = int(args.limit_rows) - processed_rows
-                if remaining_rows <= 0:
+    with build_progress(total_rows) as progress:
+        task_id = progress.add_task(
+            "Indexing",
+            total=max(total_rows, 1),
+            indexed_rows=0,
+            skipped_rows=0,
+        )
+
+        try:
+            for batch in parquet_file.iter_batches(
+                batch_size=int(args.read_batch_size)
+            ):
+                rows = batch.to_pylist()
+                if args.limit_rows is not None:
+                    remaining_rows = int(args.limit_rows) - processed_rows
+                    if remaining_rows <= 0:
+                        break
+                    rows = rows[:remaining_rows]
+
+                processed_rows += len(rows)
+                if not rows:
                     break
-                rows = rows[:remaining_rows]
 
-            processed_rows += len(rows)
-            if not rows:
-                break
+                (
+                    prepared_rows,
+                    offer_texts,
+                    row_number,
+                    next_faiss_id,
+                    batch_skipped_rows,
+                ) = prepare_offer_rows(
+                    rows,
+                    renderer,
+                    copy_columns,
+                    row_number,
+                    next_faiss_id,
+                )
+                skipped_rows += batch_skipped_rows
 
-            (
-                prepared_rows,
-                offer_texts,
-                row_number,
-                next_faiss_id,
-                batch_skipped_rows,
-            ) = prepare_offer_rows(
-                rows,
-                renderer,
-                copy_columns,
-                row_number,
-                next_faiss_id,
-            )
-            skipped_rows += batch_skipped_rows
+                if prepared_rows:
+                    embeddings = encode_texts(
+                        model,
+                        tokenizer,
+                        offer_texts,
+                        int(cfg.data.max_offer_length),
+                        int(args.encode_batch_size),
+                        device,
+                    )
+                    embedding_matrix = embeddings.numpy().astype("float32", copy=False)
 
-            if not prepared_rows:
-                continue
+                    if index is None:
+                        embedding_dim = int(embeddings.size(1))
+                        index = faiss.IndexIDMap2(faiss.IndexFlatIP(embedding_dim))
 
-            embeddings = encode_texts(
-                model,
-                tokenizer,
-                offer_texts,
-                int(cfg.data.max_offer_length),
-                int(args.encode_batch_size),
-                device,
-            )
-            embedding_matrix = embeddings.numpy().astype("float32", copy=False)
+                    faiss_ids = np.asarray(
+                        [row["faiss_id"] for row in prepared_rows],
+                        dtype="int64",
+                    )
+                    index.add_with_ids(embedding_matrix, faiss_ids)
 
-            if index is None:
-                embedding_dim = int(embeddings.size(1))
-                index = faiss.IndexIDMap2(faiss.IndexFlatIP(embedding_dim))
+                    metadata_table = build_metadata_table(
+                        prepared_rows,
+                        copy_columns,
+                        parquet_file.schema_arrow,
+                    )
+                    metadata_writer.write_table(metadata_table)
+                    indexed_rows += len(prepared_rows)
 
-            faiss_ids = np.asarray(
-                [row["faiss_id"] for row in prepared_rows],
-                dtype="int64",
-            )
-            index.add_with_ids(embedding_matrix, faiss_ids)
-
-            metadata_table = build_metadata_table(
-                prepared_rows,
-                copy_columns,
-                parquet_file.schema_arrow,
-            )
-            metadata_writer.write_table(metadata_table)
-            indexed_rows += len(prepared_rows)
-    finally:
-        metadata_writer.close()
+                update_progress(
+                    progress,
+                    task_id,
+                    processed_rows,
+                    total_rows,
+                    indexed_rows,
+                    skipped_rows,
+                )
+        finally:
+            metadata_writer.close()
 
     if index is None or embedding_dim is None or indexed_rows == 0:
         raise ValueError("No non-empty offers were available to index")

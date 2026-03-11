@@ -1,5 +1,7 @@
 import json
+import io
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -108,6 +110,7 @@ class IndexBuildCliTests(unittest.TestCase):
             input_path = Path(tmp_dir) / "offers.parquet"
             output_path = Path(tmp_dir) / "offer-index"
             self.write_offer_table(input_path)
+            stderr = io.StringIO()
 
             args = build_arg_parser().parse_args(
                 [
@@ -120,7 +123,8 @@ class IndexBuildCliTests(unittest.TestCase):
                 ]
             )
 
-            run_index_build(args)
+            with redirect_stderr(stderr):
+                run_index_build(args)
 
             metadata_rows = pq.read_table(output_path / "metadata.parquet").to_pylist()
             manifest = json.loads((output_path / "manifest.json").read_text())
@@ -140,6 +144,7 @@ class IndexBuildCliTests(unittest.TestCase):
             self.assertEqual(manifest["embedding_dim"], 3)
             self.assertEqual(manifest["indexed_rows"], 2)
             self.assertEqual(manifest["skipped_rows"], 1)
+            self.assertIn("Indexing", stderr.getvalue())
 
 
 if __name__ == "__main__":
