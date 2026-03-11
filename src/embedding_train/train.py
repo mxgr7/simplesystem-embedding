@@ -30,15 +30,21 @@ def build_callbacks(cfg):
     checkpoint_dir = Path(cfg.trainer.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=str(checkpoint_dir),
+        filename="best-step={step}-val_ndcg_at_5={val/ndcg_at_5:.4f}",
+        monitor="val/ndcg_at_5",
+        mode="max",
+        save_top_k=3,
+        save_last=True,
+        auto_insert_metric_name=False,
+    )
+    checkpoint_callback.CHECKPOINT_NAME_LAST = (
+        "last-step={step}-val_ndcg_at_5={val/ndcg_at_5:.4f}"
+    )
+
     return [
-        ModelCheckpoint(
-            dirpath=str(checkpoint_dir),
-            filename="best",
-            monitor="val/ndcg_at_5",
-            mode="max",
-            save_top_k=1,
-            save_last=True,
-        ),
+        checkpoint_callback,
         LearningRateMonitor(logging_interval="epoch"),
     ]
 
