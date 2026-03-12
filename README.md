@@ -86,7 +86,7 @@ uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/labeled_pa
 
 Notes:
 
-- Pairwise mode reports nDCG on scored query-offer rows and, for lower precisions, delta vs `float32`
+- Pairwise mode reports both graded ranking metrics (`nDCG@k`) and exact-match metrics (`exact_success@1`, `exact_mrr`, `exact_recall@k`), plus delta vs `float32` for lower precisions
 - Retrieval mode reports exact-match search metrics like `exact_success@1`, `exact_mrr`, and `exact_recall@k`
 - Retrieval mode expects the built index metadata to include `offer_id_b64`; the default index build settings already keep it when present in the input
 

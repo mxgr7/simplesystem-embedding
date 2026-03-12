@@ -186,6 +186,10 @@ def format_evaluation_report(report):
         ]
     else:
         metric_order = [
+            "exact_success@1",
+            "exact_mrr",
+            "exact_recall@5",
+            "exact_recall@10",
             "ndcg@1",
             "ndcg@5",
             "ndcg@10",
@@ -331,6 +335,11 @@ def run_evaluation(args):
             )
 
     metrics = compute_ranking_metrics(selected_rows)
+    exact_metrics = compute_exact_retrieval_metrics(selected_rows)
+    for key, value in exact_metrics.items():
+        if key in {"eligible_queries", "evaluated_queries"}:
+            continue
+        metrics[key] = value
     report = {
         "embedding_precision": embedding_precision,
         "processed_rows": float(processed_rows),
@@ -341,6 +350,11 @@ def run_evaluation(args):
 
     if embedding_precision != "float32":
         baseline_metrics = compute_ranking_metrics(baseline_rows)
+        baseline_exact_metrics = compute_exact_retrieval_metrics(baseline_rows)
+        for key, value in baseline_exact_metrics.items():
+            if key in {"eligible_queries", "evaluated_queries"}:
+                continue
+            baseline_metrics[key] = value
         report["baseline_precision"] = "float32"
         report["baseline_metrics"] = baseline_metrics
         report["metric_deltas"] = build_metric_deltas(metrics, baseline_metrics)
