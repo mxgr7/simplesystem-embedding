@@ -202,13 +202,14 @@ class EmbeddingModule(L.LightningModule):
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
-        del outputs, batch_idx
+        del outputs
 
         if not self.pending_train_record_metrics:
             return
 
         self.records_seen += self.resolve_batch_record_count(batch)
-        self.log_metrics_by_records(self.pending_train_record_metrics)
+        if self.should_log_records_on_batch(batch_idx):
+            self.log_metrics_by_records(self.pending_train_record_metrics)
         self.pending_train_record_metrics = {}
 
     def on_train_epoch_start(self):
@@ -489,6 +490,15 @@ class EmbeddingModule(L.LightningModule):
     def is_sanity_checking(self):
         trainer = getattr(self, "trainer", None)
         return bool(getattr(trainer, "sanity_checking", False))
+
+    def should_log_records_on_batch(self, batch_idx):
+        log_every_n_steps = self.resolve_log_every_n_steps()
+        return (batch_idx + 1) % log_every_n_steps == 0
+
+    def resolve_log_every_n_steps(self):
+        trainer = getattr(self, "trainer", None)
+        log_every_n_steps = int(getattr(trainer, "log_every_n_steps", 1) or 1)
+        return max(log_every_n_steps, 1)
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["records_seen"] = int(self.records_seen)

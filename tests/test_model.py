@@ -59,13 +59,14 @@ def build_cfg(**overrides):
 
 
 class _LogCaptureModule:
-    def __init__(self, log_batch_stats):
+    def __init__(self, log_batch_stats, log_every_n_steps=1):
         self.cfg = OmegaConf.create({"data": {"log_batch_stats": log_batch_stats}})
         self.logged = []
         self.records_seen = 12
         self.pending_train_record_metrics = {}
         self.record_metrics = []
         self.logger = None
+        self.trainer = SimpleNamespace(log_every_n_steps=log_every_n_steps)
 
     def log(self, name, value, **kwargs):
         self.logged.append({"name": name, "value": value, "kwargs": kwargs})
@@ -94,6 +95,12 @@ class _LogCaptureModule:
 
     def resolve_batch_record_count(self, batch):
         return EmbeddingModule.resolve_batch_record_count(self, batch)
+
+    def should_log_records_on_batch(self, batch_idx):
+        return EmbeddingModule.should_log_records_on_batch(self, batch_idx)
+
+    def resolve_log_every_n_steps(self):
+        return EmbeddingModule.resolve_log_every_n_steps(self)
 
 
 class _MLflowLoggerStub:
@@ -210,6 +217,41 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
                         "train/by_records/loss": 0.25,
                         "train/by_records/batch_positive_count": 1.0,
                     },
+                }
+            ],
+        )
+
+    def test_skips_record_metrics_until_log_every_n_steps_boundary(self):
+        module = _LogCaptureModule(log_batch_stats=True, log_every_n_steps=10)
+        module.records_seen = 0
+        module.pending_train_record_metrics = {
+            "train/by_batch/loss": torch.tensor(0.25),
+        }
+        batch = {"labels": torch.tensor([1.0, 0.0, 0.0])}
+
+        EmbeddingModule.on_train_batch_end(module, None, batch, 8)
+
+        self.assertEqual(module.records_seen, 3)
+        self.assertEqual(module.pending_train_record_metrics, {})
+        self.assertEqual(module.record_metrics, [])
+
+    def test_logs_record_metrics_on_log_every_n_steps_boundary(self):
+        module = _LogCaptureModule(log_batch_stats=True, log_every_n_steps=10)
+        module.records_seen = 27
+        module.pending_train_record_metrics = {
+            "train/by_batch/loss": torch.tensor(0.25),
+        }
+        batch = {"labels": torch.tensor([1.0, 0.0, 0.0])}
+
+        EmbeddingModule.on_train_batch_end(module, None, batch, 9)
+
+        self.assertEqual(module.records_seen, 30)
+        self.assertEqual(
+            module.record_metrics,
+            [
+                {
+                    "step": 30,
+                    "metrics": {"train/by_records/loss": 0.25},
                 }
             ],
         )
