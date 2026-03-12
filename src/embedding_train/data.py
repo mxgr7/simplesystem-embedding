@@ -1,9 +1,19 @@
 import random
+import sys
 from typing import cast
 
 import pandas as pd
 import torch
 from lightning import LightningDataModule
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
@@ -11,6 +21,33 @@ from embedding_train.batching import AnchorQueryBatchBuilder, AnchorQueryBatchDa
 from embedding_train.rendering import RowTextRenderer
 
 VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query"}
+
+
+def build_setup_progress(total_rows):
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=24),
+        TaskProgressColumn(),
+        TextColumn("[dim]({task.completed:,.0f}/{task.total:,.0f} rows)"),
+        TextColumn(
+            "[dim]prepared={task.fields[prepared_rows]:,.0f} skipped={task.fields[skipped_rows]:,.0f}"
+        ),
+        TimeElapsedColumn(),
+        console=Console(file=sys.stderr),
+        transient=False,
+    )
+
+
+def update_setup_progress(
+    progress, task_id, processed_rows, total_rows, prepared_rows, skipped_rows
+):
+    progress.update(
+        task_id,
+        completed=min(processed_rows, total_rows),
+        prepared_rows=prepared_rows,
+        skipped_rows=skipped_rows,
+    )
 
 
 def resolve_train_batching_mode(train_batching_mode):
@@ -100,15 +137,34 @@ class EmbeddingDataModule(LightningDataModule):
         train_records = []
         val_records = []
         skipped_rows = 0
+        total_rows = len(frame)
 
-        for values in frame.itertuples(index=False, name=None):
-            row = dict(zip(columns, values))
-            record = self._build_record(row)
-            if record is None:
-                skipped_rows += 1
-                continue
+        with build_setup_progress(total_rows) as progress:
+            task_id = progress.add_task(
+                "Preparing dataset",
+                total=max(1, total_rows),
+                prepared_rows=0,
+                skipped_rows=0,
+            )
 
-            all_records.append(record)
+            for processed_rows, values in enumerate(
+                frame.itertuples(index=False, name=None), start=1
+            ):
+                row = dict(zip(columns, values))
+                record = self._build_record(row)
+                if record is None:
+                    skipped_rows += 1
+                else:
+                    all_records.append(record)
+
+                update_setup_progress(
+                    progress,
+                    task_id,
+                    processed_rows,
+                    max(1, total_rows),
+                    len(all_records),
+                    skipped_rows,
+                )
 
         (
             train_records,
@@ -121,6 +177,17 @@ class EmbeddingDataModule(LightningDataModule):
         self._build_train_metadata(train_records)
         train_offer_ids = {record["offer_id"] for record in train_records}
         val_offer_ids = {record["offer_id"] for record in val_records}
+        total_query_count = len(
+            {record["query_id"] for record in train_records + val_records}
+        )
+        total_offer_count = len(train_offer_ids | val_offer_ids)
+        total_record_count = len(train_records) + len(val_records)
+        train_positive_rows = sum(
+            1 for record in train_records if record["label"] > 0.5
+        )
+        val_positive_rows = sum(1 for record in val_records if record["label"] > 0.5)
+        train_negative_rows = len(train_records) - train_positive_rows
+        val_negative_rows = len(val_records) - val_positive_rows
         self.dataset_stats = {
             "train_rows": len(train_records),
             "val_rows": len(val_records),
@@ -128,17 +195,26 @@ class EmbeddingDataModule(LightningDataModule):
             "val_queries": len({record["query_id"] for record in val_records}),
             "train_offers": len(train_offer_ids),
             "val_offers": len(val_offer_ids),
-            "train_positive_rows": sum(
-                1 for record in train_records if record["label"] > 0.5
+            "train_positive_rows": train_positive_rows,
+            "val_positive_rows": val_positive_rows,
+            "train_negative_rows": train_negative_rows,
+            "val_negative_rows": val_negative_rows,
+            "val_query_share": (
+                len({record["query_id"] for record in val_records}) / total_query_count
+                if total_query_count
+                else 0.0
             ),
-            "val_positive_rows": sum(
-                1 for record in val_records if record["label"] > 0.5
+            "val_offer_share": (
+                len(val_offer_ids) / total_offer_count if total_offer_count else 0.0
             ),
-            "train_negative_rows": sum(
-                1 for record in train_records if record["label"] <= 0.5
+            "val_row_share": (
+                len(val_records) / total_record_count if total_record_count else 0.0
             ),
-            "val_negative_rows": sum(
-                1 for record in val_records if record["label"] <= 0.5
+            "train_positive_rate": (
+                train_positive_rows / len(train_records) if train_records else 0.0
+            ),
+            "val_positive_rate": (
+                val_positive_rows / len(val_records) if val_records else 0.0
             ),
             "shared_offers_between_train_and_val": len(train_offer_ids & val_offer_ids),
             "skipped_rows": skipped_rows,

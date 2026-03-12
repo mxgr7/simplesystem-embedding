@@ -1,4 +1,6 @@
+import io
 import unittest
+from contextlib import redirect_stderr
 from unittest.mock import patch
 
 import pandas as pd
@@ -289,6 +291,26 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         self.assertEqual(
             datamodule.dataset_stats["shared_offers_between_train_and_val"], 0
         )
+        self.assertEqual(datamodule.dataset_stats["val_query_share"], 0.0)
+        self.assertEqual(datamodule.dataset_stats["val_offer_share"], 0.0)
+        self.assertEqual(datamodule.dataset_stats["val_row_share"], 0.0)
+        self.assertEqual(datamodule.dataset_stats["train_positive_rate"], 0.5)
+        self.assertEqual(datamodule.dataset_stats["val_positive_rate"], 0.0)
+
+    @patch("embedding_train.data.pd.read_parquet")
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_setup_shows_progress_for_dataset_preparation(
+        self, from_pretrained, read_parquet
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        read_parquet.return_value = self.build_frame()
+        datamodule = EmbeddingDataModule(build_cfg(val_fraction=0.0))
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            datamodule.setup()
+
+        self.assertIn("Preparing dataset", stderr.getvalue())
 
     @patch("embedding_train.data.pd.read_parquet")
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
