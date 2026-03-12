@@ -97,6 +97,16 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
 
         self.assertEqual(datamodule.train_batching_mode, "random_pairs")
 
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_accepts_random_query_pool_mode(self, from_pretrained):
+        from_pretrained.return_value = _TokenizerStub()
+
+        datamodule = EmbeddingDataModule(
+            build_cfg(train_batching_mode="random_query_pool")
+        )
+
+        self.assertEqual(datamodule.train_batching_mode, "random_query_pool")
+
 
 class RowTextRendererTests(unittest.TestCase):
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
@@ -616,6 +626,105 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         self.assertNotIn("batch_stats", batch)
         self.assertEqual(len(batch["query_ids"]), 3)
         self.assertEqual(batch["query_inputs"]["input_ids"].shape[0], 3)
+
+    @patch("embedding_train.data.pd.read_parquet")
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_random_query_pool_train_dataloader_builds_diverse_batches_from_query_pools(
+        self, from_pretrained, read_parquet
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        read_parquet.return_value = pd.DataFrame(
+            [
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "q1-p1",
+                    "query_term": "query one",
+                    "name": "offer one",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "q1-p2",
+                    "query_term": "query one",
+                    "name": "offer two",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "q1-p3",
+                    "query_term": "query one",
+                    "name": "offer three",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "q1-n1",
+                    "query_term": "query one",
+                    "name": "offer four",
+                    "label": "Irrelevant",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "q2-p1",
+                    "query_term": "query two",
+                    "name": "offer five",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "q2-p2",
+                    "query_term": "query two",
+                    "name": "offer six",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "q2-n1",
+                    "query_term": "query two",
+                    "name": "offer seven",
+                    "label": "Irrelevant",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "q2-n2",
+                    "query_term": "query two",
+                    "name": "offer eight",
+                    "label": "Irrelevant",
+                },
+                {
+                    "query_id": "q3",
+                    "offer_id_b64": "q3-p1",
+                    "query_term": "query three",
+                    "name": "offer nine",
+                    "label": "Exact",
+                },
+            ]
+        )
+        datamodule = EmbeddingDataModule(
+            build_cfg(
+                train_batching_mode="random_query_pool",
+                batch_size=3,
+                val_fraction=0.0,
+                n_pos_samples_per_query=2,
+                n_neg_samples_per_query=2,
+            )
+        )
+
+        datamodule.setup()
+        batch = next(iter(datamodule.train_dataloader()))
+        train_dataset = datamodule.train_dataloader().dataset
+        train_records = train_dataset.records
+
+        self.assertEqual({record["query_id"] for record in train_records}, {"q1", "q2"})
+        self.assertEqual(
+            sum(record["raw_label"] == "SyntheticNegative" for record in train_records),
+            1,
+        )
+        self.assertEqual(sum(record["query_id"] == "q1" for record in train_records), 5)
+        self.assertEqual(sum(record["query_id"] == "q2" for record in train_records), 4)
+        self.assertEqual(batch["labels"].size(0), 3)
+        self.assertIn("batch_stats", batch)
+        self.assertNotIn("anchor_query_id", batch["batch_stats"])
 
     @patch("embedding_train.data.pd.read_parquet")
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")

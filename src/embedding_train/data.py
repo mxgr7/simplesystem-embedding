@@ -17,10 +17,15 @@ from rich.progress import (
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
-from embedding_train.batching import AnchorQueryBatchBuilder, AnchorQueryBatchDataset
+from embedding_train.batching import (
+    AnchorQueryBatchBuilder,
+    AnchorQueryBatchDataset,
+    RandomQueryPoolBuilder,
+    build_batch_stats,
+)
 from embedding_train.rendering import RowTextRenderer
 
-VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query"}
+VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query", "random_query_pool"}
 
 
 def build_setup_progress(total_rows):
@@ -240,6 +245,17 @@ class EmbeddingDataModule(LightningDataModule):
                 collate_fn=self.collate_fn,
             )
 
+        if self.train_batching_mode == "random_query_pool":
+            train_dataset = cast(Dataset, self._build_random_query_pool_train_dataset())
+            return DataLoader(
+                train_dataset,
+                batch_size=int(self.cfg.data.batch_size),
+                shuffle=True,
+                num_workers=int(self.cfg.data.num_workers),
+                pin_memory=bool(self.cfg.data.pin_memory),
+                collate_fn=self.collate_fn,
+            )
+
         train_dataset = cast(Dataset, self.train_dataset)
 
         return DataLoader(
@@ -304,6 +320,13 @@ class EmbeddingDataModule(LightningDataModule):
             "raw_labels": [item["raw_label"] for item in batch_records],
         }
 
+        if (
+            batch_stats is None
+            and self.train_batching_mode == "random_query_pool"
+            and bool(self.cfg.data.log_batch_stats)
+        ):
+            batch_stats = build_batch_stats(batch_records)
+
         if batch_stats is not None:
             collated_batch["batch_stats"] = dict(batch_stats)
 
@@ -327,6 +350,21 @@ class EmbeddingDataModule(LightningDataModule):
         batch_size = int(self.cfg.data.batch_size)
         batches_per_epoch = max(1, (train_rows + batch_size - 1) // batch_size)
         return AnchorQueryBatchDataset(batch_builder, batches_per_epoch)
+
+    def _build_random_query_pool_train_dataset(self):
+        if self.train_dataset is None:
+            raise RuntimeError("train_dataset is not initialized. Call setup() first.")
+
+        pool_builder = RandomQueryPoolBuilder(
+            positive_records_by_query=self.positive_records_by_query,
+            negative_records_by_query=self.negative_records_by_query,
+            eligible_query_ids=self.eligible_query_ids,
+            synthetic_negative_offer_pool=self.synthetic_negative_offer_pool,
+            n_pos_samples_per_query=int(self.cfg.data.n_pos_samples_per_query),
+            n_neg_samples_per_query=int(self.cfg.data.n_neg_samples_per_query),
+            seed=int(self.cfg.seed),
+        )
+        return PairDataset(pool_builder.build_pool())
 
     def _build_record(self, row):
         return self.row_renderer.build_training_record(row)
@@ -497,7 +535,10 @@ class EmbeddingDataModule(LightningDataModule):
         self.eligible_query_ids = eligible_query_ids
         self.synthetic_negative_offer_pool = synthetic_negative_offer_pool
 
-        if self.train_batching_mode == "anchor_query" and not self.eligible_query_ids:
+        if (
+            self.train_batching_mode in {"anchor_query", "random_query_pool"}
+            and not self.eligible_query_ids
+        ):
             raise ValueError(
                 "No train query has at least "
                 f"n_pos_samples_per_query={n_pos_samples_per_query} positive rows"

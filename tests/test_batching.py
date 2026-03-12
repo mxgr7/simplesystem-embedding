@@ -2,6 +2,7 @@ import unittest
 
 from embedding_train.batching import (
     AnchorQueryBatchBuilder,
+    RandomQueryPoolBuilder,
     SYNTHETIC_NEGATIVE_LABEL,
     build_synthetic_negative_record,
 )
@@ -18,7 +19,7 @@ def make_record(query_id, offer_id, label, query_text, offer_text):
     }
 
 
-def build_builder(batch_size=6, n_pos_samples_per_query=2, n_neg_samples_per_query=2):
+def build_query_sampling_inputs():
     positive_records_by_query = {
         "q1": [
             make_record("q1", "q1-p1", 1.0, "anchor query", "anchor positive 1"),
@@ -59,15 +60,27 @@ def build_builder(batch_size=6, n_pos_samples_per_query=2, n_neg_samples_per_que
         for record in records
     ]
 
+    return {
+        "positive_records_by_query": positive_records_by_query,
+        "negative_records_by_query": negative_records_by_query,
+        "eligible_query_ids": ["q1"],
+        "synthetic_negative_offer_pool": synthetic_negative_offer_pool,
+        "seed": 7,
+    }
+
+
+def build_builder(batch_size=6, n_pos_samples_per_query=2, n_neg_samples_per_query=2):
+    inputs = build_query_sampling_inputs()
+
     return AnchorQueryBatchBuilder(
-        positive_records_by_query=positive_records_by_query,
-        negative_records_by_query=negative_records_by_query,
-        eligible_query_ids=["q1"],
-        synthetic_negative_offer_pool=synthetic_negative_offer_pool,
+        positive_records_by_query=inputs["positive_records_by_query"],
+        negative_records_by_query=inputs["negative_records_by_query"],
+        eligible_query_ids=inputs["eligible_query_ids"],
+        synthetic_negative_offer_pool=inputs["synthetic_negative_offer_pool"],
         batch_size=batch_size,
         n_pos_samples_per_query=n_pos_samples_per_query,
         n_neg_samples_per_query=n_neg_samples_per_query,
-        seed=7,
+        seed=inputs["seed"],
     )
 
 
@@ -191,6 +204,79 @@ class AnchorQueryBatchBuilderTests(unittest.TestCase):
             )
         )
         self.assertEqual({record["label"] for record in synthetic_records}, {0.0})
+
+
+class RandomQueryPoolBuilderTests(unittest.TestCase):
+    def test_build_pool_uses_all_real_records_for_eligible_queries(self):
+        inputs = build_query_sampling_inputs()
+        inputs["eligible_query_ids"] = ["q1", "q2"]
+        builder = RandomQueryPoolBuilder(
+            positive_records_by_query=inputs["positive_records_by_query"],
+            negative_records_by_query=inputs["negative_records_by_query"],
+            eligible_query_ids=inputs["eligible_query_ids"],
+            synthetic_negative_offer_pool=inputs["synthetic_negative_offer_pool"],
+            n_pos_samples_per_query=2,
+            n_neg_samples_per_query=2,
+            seed=inputs["seed"],
+        )
+
+        pool = builder.build_pool()
+        offer_ids = {record["offer_id"] for record in pool}
+
+        self.assertTrue(
+            {"q1-p1", "q1-p2", "q1-p3", "q1-p4", "q1-n1"}.issubset(offer_ids)
+        )
+        self.assertTrue({"q2-p1", "q2-p2", "q2-n1", "q2-n2"}.issubset(offer_ids))
+        self.assertGreater(len(pool), 9)
+
+    def test_build_pool_backfills_only_negative_shortfall(self):
+        inputs = build_query_sampling_inputs()
+        builder = RandomQueryPoolBuilder(
+            positive_records_by_query=inputs["positive_records_by_query"],
+            negative_records_by_query=inputs["negative_records_by_query"],
+            eligible_query_ids=inputs["eligible_query_ids"],
+            synthetic_negative_offer_pool=inputs["synthetic_negative_offer_pool"],
+            n_pos_samples_per_query=2,
+            n_neg_samples_per_query=2,
+            seed=inputs["seed"],
+        )
+
+        pool = builder.build_pool()
+        q1_records = [record for record in pool if record["query_id"] == "q1"]
+        synthetic_records = [
+            record
+            for record in q1_records
+            if record["raw_label"] == SYNTHETIC_NEGATIVE_LABEL
+        ]
+        real_negative_records = [
+            record for record in q1_records if record["offer_id"] == "q1-n1"
+        ]
+
+        self.assertEqual(len(q1_records), 6)
+        self.assertEqual(len(synthetic_records), 1)
+        self.assertEqual(len(real_negative_records), 1)
+        self.assertEqual(sum(record["label"] > 0.5 for record in q1_records), 4)
+
+    def test_build_pool_keeps_synthetic_negative_foreign_to_query(self):
+        inputs = build_query_sampling_inputs()
+        builder = RandomQueryPoolBuilder(
+            positive_records_by_query=inputs["positive_records_by_query"],
+            negative_records_by_query=inputs["negative_records_by_query"],
+            eligible_query_ids=inputs["eligible_query_ids"],
+            synthetic_negative_offer_pool=inputs["synthetic_negative_offer_pool"],
+            n_pos_samples_per_query=2,
+            n_neg_samples_per_query=2,
+            seed=inputs["seed"],
+        )
+
+        pool = builder.build_pool()
+        synthetic_records = [
+            record for record in pool if record["raw_label"] == SYNTHETIC_NEGATIVE_LABEL
+        ]
+
+        self.assertEqual(len(synthetic_records), 1)
+        self.assertEqual(synthetic_records[0]["query_id"], "q1")
+        self.assertFalse(synthetic_records[0]["offer_id"].startswith("q1-"))
 
 
 if __name__ == "__main__":
