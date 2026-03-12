@@ -75,13 +75,20 @@ Helpful flags:
 
 ## Evaluate
 
-Use the offline evaluator to compare lower-precision scoring against the float32 baseline with the same nDCG metrics used during validation.
+Use the offline evaluator to either compare lower-precision pair scoring against the float32 baseline, or evaluate exact-hit retrieval against a built FAISS index.
 
 ```bash
 uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parquet --embedding-precision float16
 uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parquet --embedding-precision int8
 uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/input.parquet --embedding-precision binary
+uv run embedding-eval --checkpoint checkpoints/best.ckpt --input data/labeled_pairs.parquet --index data/offer-index --top-k 10
 ```
+
+Notes:
+
+- Pairwise mode reports nDCG on scored query-offer rows and, for lower precisions, delta vs `float32`
+- Retrieval mode reports exact-match search metrics like `exact_success@1`, `exact_mrr`, and `exact_recall@k`
+- Retrieval mode expects the built index metadata to include `offer_id_b64`; the default index build settings already keep it when present in the input
 
 ## Build Index
 

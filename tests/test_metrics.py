@@ -1,7 +1,10 @@
 import math
 import unittest
 
-from embedding_train.metrics import compute_ranking_metrics
+from embedding_train.metrics import (
+    compute_exact_retrieval_metrics,
+    compute_ranking_metrics,
+)
 
 
 class ComputeRankingMetricsTests(unittest.TestCase):
@@ -40,6 +43,65 @@ class ComputeRankingMetricsTests(unittest.TestCase):
                     }
                 ]
             )
+
+
+class ComputeExactRetrievalMetricsTests(unittest.TestCase):
+    def test_computes_exact_retrieval_metrics_from_ranked_rows(self):
+        rows = [
+            {"query_id": "q1", "rank": 1, "raw_label": "Irrelevant"},
+            {"query_id": "q1", "rank": 2, "raw_label": "Exact"},
+            {"query_id": "q1", "rank": 3, "raw_label": "Substitute"},
+            {"query_id": "q2", "rank": 1, "raw_label": "Exact"},
+            {"query_id": "q2", "rank": 2, "raw_label": "Irrelevant"},
+            {"query_id": "q3", "rank": 1, "raw_label": "Substitute"},
+        ]
+
+        metrics = compute_exact_retrieval_metrics(
+            rows,
+            evaluated_query_ids=["q1", "q2", "q3"],
+            eligible_query_ids=["q1", "q2"],
+        )
+
+        self.assertEqual(metrics["evaluated_queries"], 3.0)
+        self.assertEqual(metrics["eligible_queries"], 2.0)
+        self.assertTrue(math.isclose(metrics["exact_success@1"], 0.5))
+        self.assertTrue(math.isclose(metrics["exact_recall@5"], 1.0))
+        self.assertTrue(math.isclose(metrics["exact_recall@10"], 1.0))
+        self.assertTrue(math.isclose(metrics["exact_mrr"], 0.75))
+
+    def test_uses_score_order_when_rank_is_missing(self):
+        rows = [
+            {"query_id": "q1", "score": 0.9, "raw_label": "Substitute"},
+            {"query_id": "q1", "score": 0.8, "raw_label": "Exact"},
+            {"query_id": "q1", "score": 0.1, "raw_label": "Irrelevant"},
+        ]
+
+        metrics = compute_exact_retrieval_metrics(rows)
+
+        self.assertEqual(metrics["evaluated_queries"], 1.0)
+        self.assertEqual(metrics["eligible_queries"], 1.0)
+        self.assertTrue(math.isclose(metrics["exact_success@1"], 0.0))
+        self.assertTrue(math.isclose(metrics["exact_recall@5"], 1.0))
+        self.assertTrue(math.isclose(metrics["exact_mrr"], 0.5))
+
+    def test_reports_zero_when_queries_have_no_exact_offer(self):
+        rows = [
+            {"query_id": "q1", "rank": 1, "raw_label": "Substitute"},
+            {"query_id": "q1", "rank": 2, "raw_label": "Irrelevant"},
+        ]
+
+        metrics = compute_exact_retrieval_metrics(
+            rows,
+            evaluated_query_ids=["q1"],
+            eligible_query_ids=[],
+        )
+
+        self.assertEqual(metrics["evaluated_queries"], 1.0)
+        self.assertEqual(metrics["eligible_queries"], 0.0)
+        self.assertEqual(metrics["exact_success@1"], 0.0)
+        self.assertEqual(metrics["exact_recall@5"], 0.0)
+        self.assertEqual(metrics["exact_recall@10"], 0.0)
+        self.assertEqual(metrics["exact_mrr"], 0.0)
 
 
 if __name__ == "__main__":
