@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import hydra
@@ -14,6 +15,16 @@ from embedding_train.model import EmbeddingModule
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
 MLFLOW_RUN_NAME_TAG = "mlflow.runName"
+
+
+def configure_logging(log_level):
+    level_name = str(log_level).strip().upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        raise ValueError(f"Unsupported log level: {log_level}")
+
+    logging.basicConfig(level=level)
+    logging.getLogger().setLevel(level)
 
 
 def build_logger(cfg):
@@ -66,6 +77,7 @@ def build_callbacks(cfg, logger):
 @hydra.main(version_base="1.3", config_path=str(CONFIG_DIR), config_name="config")
 def run(cfg):
     load_dotenv()
+    configure_logging(cfg.log_level)
     torch.set_float32_matmul_precision("high")
     L.seed_everything(int(cfg.seed), workers=True)
 

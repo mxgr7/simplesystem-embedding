@@ -7,6 +7,7 @@ defaults:
   - _self_
 
 seed: 42
+log_level: WARNING
 
 hydra:
   job:

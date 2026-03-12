@@ -1,3 +1,4 @@
+import logging
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,7 +8,7 @@ from unittest.mock import Mock, patch
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from omegaconf import OmegaConf
 
-from embedding_train.train import build_callbacks, run
+from embedding_train.train import build_callbacks, configure_logging, run
 
 
 class _LoggerStub:
@@ -24,6 +25,11 @@ class _LoggerStub:
 
 
 class TrainCallbackTests(unittest.TestCase):
+    def test_configure_logging_accepts_warning_level(self):
+        configure_logging("WARNING")
+
+        self.assertEqual(logging.getLogger().level, logging.WARNING)
+
     def test_build_callbacks_saves_to_run_name_subdirectory(self):
         with TemporaryDirectory() as tmp_dir:
             cfg = OmegaConf.create(
@@ -89,6 +95,7 @@ class TrainCallbackTests(unittest.TestCase):
         )
 
     @patch("embedding_train.train.load_dotenv")
+    @patch("embedding_train.train.configure_logging")
     @patch("embedding_train.train.L.seed_everything")
     @patch("embedding_train.train.torch.set_float32_matmul_precision")
     @patch("embedding_train.train.build_callbacks", return_value=[])
@@ -105,10 +112,12 @@ class TrainCallbackTests(unittest.TestCase):
         build_callbacks,
         set_matmul_precision,
         seed_everything,
+        configure_logging,
         load_dotenv,
     ):
         cfg = OmegaConf.create(
             {
+                "log_level": "WARNING",
                 "seed": 42,
                 "trainer": {
                     "accelerator": "cpu",
@@ -137,6 +146,7 @@ class TrainCallbackTests(unittest.TestCase):
 
         run.__wrapped__(cfg)
 
+        configure_logging.assert_called_once_with("WARNING")
         trainer.fit.assert_called_once_with(
             model,
             datamodule=datamodule,
