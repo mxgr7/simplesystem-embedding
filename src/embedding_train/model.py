@@ -1,5 +1,6 @@
 import lightning as L
 import torch
+import torch.distributed
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from transformers import AutoModel
@@ -95,7 +96,10 @@ class EmbeddingModule(L.LightningModule):
         self.encoder_hidden_size = int(self.encoder.config.hidden_size)
         self.output_dim = resolve_output_dim(cfg.model.output_dim)
         self.projection = None
+        self.records_seen = 0
         self.validation_rows = []
+        self.validation_loss_total = 0.0
+        self.validation_loss_examples = 0
 
         self.save_hyperparameters(OmegaConf.to_container(cfg, resolve=True))
 
@@ -124,6 +128,7 @@ class EmbeddingModule(L.LightningModule):
         query_embeddings, offer_embeddings, scores = self(
             batch["query_inputs"], batch["offer_inputs"]
         )
+        batch_size = batch["labels"].size(0)
         self.assert_finite(batch["labels"], "labels", batch_idx)
         self.assert_finite(scores, "scores", batch_idx)
         loss = self.compute_loss(
@@ -133,13 +138,14 @@ class EmbeddingModule(L.LightningModule):
             scores,
         )
         self.assert_finite(loss, "train_loss", batch_idx)
+        self.records_seen += self.resolve_batch_record_count(batch)
         self.log(
             f"train/{self.loss_type}_loss",
             loss,
             on_step=True,
             on_epoch=True,
             prog_bar=False,
-            batch_size=batch["labels"].size(0),
+            batch_size=batch_size,
         )
         self.log(
             "train/loss",
@@ -147,13 +153,21 @@ class EmbeddingModule(L.LightningModule):
             on_step=True,
             on_epoch=True,
             prog_bar=True,
-            batch_size=batch["labels"].size(0),
+            batch_size=batch_size,
+        )
+        self.log_metrics_by_records(
+            {
+                f"train/{self.loss_type}_loss": loss,
+                "train/loss": loss,
+            }
         )
         self.log_training_batch_stats(batch)
         return loss
 
     def on_validation_epoch_start(self):
         self.validation_rows = []
+        self.validation_loss_total = 0.0
+        self.validation_loss_examples = 0
 
     def validation_step(self, batch, batch_idx):
         query_embeddings, offer_embeddings, scores = self(
@@ -168,6 +182,9 @@ class EmbeddingModule(L.LightningModule):
             scores,
         )
         self.assert_finite(loss, "val_loss", batch_idx)
+        batch_size = batch["labels"].size(0)
+        self.validation_loss_total += float(loss.detach().item()) * batch_size
+        self.validation_loss_examples += batch_size
 
         self.log(
             f"val/{self.loss_type}_loss",
@@ -175,7 +192,7 @@ class EmbeddingModule(L.LightningModule):
             on_step=False,
             on_epoch=True,
             prog_bar=False,
-            batch_size=batch["labels"].size(0),
+            batch_size=batch_size,
         )
         self.log(
             "val/loss",
@@ -183,7 +200,7 @@ class EmbeddingModule(L.LightningModule):
             on_step=False,
             on_epoch=True,
             prog_bar=True,
-            batch_size=batch["labels"].size(0),
+            batch_size=batch_size,
         )
 
         cpu_scores = scores.detach().cpu().tolist()
@@ -205,6 +222,24 @@ class EmbeddingModule(L.LightningModule):
     def on_validation_epoch_end(self):
         metrics = compute_ranking_metrics(self.validation_rows)
         exact_metrics = compute_exact_retrieval_metrics(self.validation_rows)
+        record_metrics = {
+            "val/ndcg_at_1": metrics["ndcg@1"],
+            "val/ndcg_at_5": metrics["ndcg@5"],
+            "val/ndcg_at_10": metrics["ndcg@10"],
+            "val/exact_success_at_1": exact_metrics["exact_success@1"],
+            "val/exact_mrr": exact_metrics["exact_mrr"],
+            "val/exact_recall_at_5": exact_metrics["exact_recall@5"],
+            "val/exact_recall_at_10": exact_metrics["exact_recall@10"],
+            "val/eligible_queries": metrics["eligible_queries"],
+            "val/evaluated_queries": exact_metrics["evaluated_queries"],
+        }
+
+        if self.validation_loss_examples:
+            average_validation_loss = (
+                self.validation_loss_total / self.validation_loss_examples
+            )
+            record_metrics[f"val/{self.loss_type}_loss"] = average_validation_loss
+            record_metrics["val/loss"] = average_validation_loss
 
         self.log("val/ndcg_at_1", metrics["ndcg@1"], prog_bar=True)
         self.log("val/ndcg_at_5", metrics["ndcg@5"], prog_bar=True)
@@ -231,6 +266,7 @@ class EmbeddingModule(L.LightningModule):
             exact_metrics["evaluated_queries"],
             prog_bar=False,
         )
+        self.log_metrics_by_records(record_metrics)
 
     def configure_optimizers(self):
         return torch.optim.AdamW(
@@ -267,6 +303,50 @@ class EmbeddingModule(L.LightningModule):
                 prog_bar=False,
                 batch_size=batch_size,
             )
+
+        self.log_metrics_by_records(stats_to_log)
+
+    def resolve_batch_record_count(self, batch):
+        local_batch_size = int(batch["labels"].size(0))
+
+        if (
+            not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+        ):
+            return local_batch_size
+
+        batch_size = batch["labels"].new_tensor([local_batch_size], dtype=torch.long)
+        torch.distributed.all_reduce(batch_size, op=torch.distributed.ReduceOp.SUM)
+        return int(batch_size.item())
+
+    def record_aligned_metric_name(self, name):
+        return f"{name}_by_records"
+
+    def log_metrics_by_records(self, metrics):
+        logger = self.logger
+        log_metrics = getattr(logger, "log_metrics", None)
+        if logger is None or not callable(log_metrics):
+            return
+
+        record_metrics = {}
+        for name, value in metrics.items():
+            record_metrics[self.record_aligned_metric_name(name)] = (
+                self.metric_value_to_float(value)
+            )
+
+        log_metrics(record_metrics, step=int(self.records_seen))
+
+    def metric_value_to_float(self, value):
+        if isinstance(value, torch.Tensor):
+            return float(value.detach().item())
+
+        return float(value)
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["records_seen"] = int(self.records_seen)
+
+    def on_load_checkpoint(self, checkpoint):
+        self.records_seen = int(checkpoint.get("records_seen", 0))
 
     def compute_loss(self, batch, query_embeddings, offer_embeddings, scores):
         scale = float(self.cfg.model.similarity_scale)

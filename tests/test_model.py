@@ -49,18 +49,62 @@ class _LogCaptureModule:
     def __init__(self, log_batch_stats):
         self.cfg = OmegaConf.create({"data": {"log_batch_stats": log_batch_stats}})
         self.logged = []
+        self.records_seen = 12
+        self.record_metrics = []
+        self.logger = None
 
     def log(self, name, value, **kwargs):
         self.logged.append({"name": name, "value": value, "kwargs": kwargs})
+
+    def record_aligned_metric_name(self, name):
+        return EmbeddingModule.record_aligned_metric_name(self, name)
+
+    def metric_value_to_float(self, value):
+        return EmbeddingModule.metric_value_to_float(self, value)
+
+    def log_metrics_by_records(self, metrics):
+        self.record_metrics.append(
+            {
+                "step": self.records_seen,
+                "metrics": {
+                    self.record_aligned_metric_name(name): self.metric_value_to_float(
+                        value
+                    )
+                    for name, value in metrics.items()
+                },
+            }
+        )
+
+
+class _MLflowLoggerStub:
+    def __init__(self):
+        self.calls = []
+
+    def log_metrics(self, metrics, step):
+        self.calls.append({"metrics": metrics, "step": step})
 
 
 class _ValidationLogCaptureModule:
     def __init__(self, validation_rows):
         self.validation_rows = validation_rows
         self.logged = []
+        self.loss_type = "bce"
+        self.records_seen = 24
+        self.validation_loss_total = 1.5
+        self.validation_loss_examples = 3
+        self.logger = _MLflowLoggerStub()
 
     def log(self, name, value, **kwargs):
         self.logged.append({"name": name, "value": value, "kwargs": kwargs})
+
+    def record_aligned_metric_name(self, name):
+        return EmbeddingModule.record_aligned_metric_name(self, name)
+
+    def metric_value_to_float(self, value):
+        return EmbeddingModule.metric_value_to_float(self, value)
+
+    def log_metrics_by_records(self, metrics):
+        EmbeddingModule.log_metrics_by_records(self, metrics)
 
 
 class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
@@ -91,6 +135,19 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
         self.assertEqual(
             [entry["kwargs"]["batch_size"] for entry in module.logged],
             [3, 3, 3],
+        )
+        self.assertEqual(
+            module.record_metrics,
+            [
+                {
+                    "step": 12,
+                    "metrics": {
+                        "train/batch_positive_count_by_records": 1.0,
+                        "train/batch_same_query_negative_count_by_records": 1.0,
+                        "train/batch_cross_query_negative_count_by_records": 1.0,
+                    },
+                }
+            ],
         )
 
     def test_skips_logging_when_disabled(self):
@@ -145,6 +202,14 @@ class EmbeddingModuleValidationMetricTests(unittest.TestCase):
         )
         self.assertTrue(logged_by_name["val/exact_success_at_1"]["kwargs"]["prog_bar"])
         self.assertTrue(logged_by_name["val/exact_mrr"]["kwargs"]["prog_bar"])
+        self.assertEqual(len(module.logger.calls), 1)
+        self.assertEqual(module.logger.calls[0]["step"], 24)
+        self.assertAlmostEqual(
+            module.logger.calls[0]["metrics"]["val/loss_by_records"],
+            0.5,
+        )
+        self.assertIn("val/exact_mrr_by_records", module.logger.calls[0]["metrics"])
+        self.assertIn("val/ndcg_at_1_by_records", module.logger.calls[0]["metrics"])
 
 
 class EmbeddingModuleCheckpointTests(unittest.TestCase):
@@ -199,6 +264,20 @@ class EmbeddingModuleCheckpointTests(unittest.TestCase):
         self.assertIsInstance(loaded_module.projection, torch.nn.Linear)
         self.assertEqual(loaded_module.projection.out_features, 2)
 
+    @patch("embedding_train.model.AutoModel.from_pretrained")
+    def test_persists_records_seen_in_checkpoint_hooks(self, from_pretrained):
+        from_pretrained.return_value = _EncoderStub()
+        module = EmbeddingModule(build_cfg())
+        module.records_seen = 128
+        checkpoint = {}
+
+        module.on_save_checkpoint(checkpoint)
+        module.records_seen = 0
+        module.on_load_checkpoint(checkpoint)
+
+        self.assertEqual(checkpoint["records_seen"], 128)
+        self.assertEqual(module.records_seen, 128)
+
     def test_skips_logging_when_batch_stats_are_missing(self):
         module = _LogCaptureModule(log_batch_stats=True)
         batch = {"labels": torch.tensor([1.0, 0.0])}
@@ -245,6 +324,28 @@ class EmbeddingModuleProjectionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "output_dim must be at least 1"):
             EmbeddingModule(build_cfg(model={"output_dim": 0}))
+
+
+class EmbeddingModuleRecordLoggingTests(unittest.TestCase):
+    def test_logs_mlflow_metrics_with_record_aligned_step(self):
+        logger = _MLflowLoggerStub()
+        module = _ValidationLogCaptureModule([])
+        module.logger = logger
+        module.records_seen = 64
+
+        EmbeddingModule.log_metrics_by_records(
+            module, {"train/loss": torch.tensor(0.25)}
+        )
+
+        self.assertEqual(
+            logger.calls,
+            [
+                {
+                    "step": 64,
+                    "metrics": {"train/loss_by_records": 0.25},
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":
