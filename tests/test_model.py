@@ -1,12 +1,18 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 from omegaconf import OmegaConf
 
-from embedding_train.model import EmbeddingModule, load_embedding_module_from_checkpoint
+from embedding_train.model import (
+    EmbeddingModule,
+    load_embedding_module_from_checkpoint,
+    resolve_scheduler_name,
+    resolve_warmup_steps,
+)
 
 
 class _EncoderOutput:
@@ -40,6 +46,13 @@ def build_cfg(**overrides):
             },
             "trainer": {"precision": "32-true"},
             "data": {"log_batch_stats": True},
+            "optimizer": {
+                "lr": 2.0e-5,
+                "weight_decay": 0.01,
+                "scheduler": "linear",
+                "warmup_ratio": 0.1,
+                "warmup_steps": None,
+            },
         }
     )
     return OmegaConf.merge(cfg, OmegaConf.create(overrides))
@@ -324,6 +337,62 @@ class EmbeddingModuleProjectionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "output_dim must be at least 1"):
             EmbeddingModule(build_cfg(model={"output_dim": 0}))
+
+
+class OptimizerSchedulerTests(unittest.TestCase):
+    def test_resolve_scheduler_name_accepts_none_aliases(self):
+        self.assertEqual(resolve_scheduler_name("none"), "none")
+        self.assertEqual(resolve_scheduler_name("off"), "none")
+
+    def test_resolve_scheduler_name_rejects_unknown_values(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported optimizer scheduler"):
+            resolve_scheduler_name("exponential")
+
+    def test_resolve_warmup_steps_uses_ratio_when_steps_are_not_set(self):
+        optimizer_cfg = OmegaConf.create({"warmup_ratio": 0.1, "warmup_steps": None})
+
+        self.assertEqual(resolve_warmup_steps(optimizer_cfg, 200), 20)
+
+    def test_resolve_warmup_steps_prefers_explicit_steps(self):
+        optimizer_cfg = OmegaConf.create({"warmup_ratio": 0.1, "warmup_steps": 25})
+
+        self.assertEqual(resolve_warmup_steps(optimizer_cfg, 200), 25)
+
+    @patch("embedding_train.model.get_scheduler")
+    @patch("embedding_train.model.AutoModel.from_pretrained")
+    def test_configure_optimizers_builds_step_scheduler(
+        self, from_pretrained, get_scheduler
+    ):
+        from_pretrained.return_value = _EncoderStub()
+        scheduler = object()
+        get_scheduler.return_value = scheduler
+        module = EmbeddingModule(build_cfg())
+        module._trainer = SimpleNamespace(estimated_stepping_batches=1000)
+
+        configured = module.configure_optimizers()
+
+        self.assertIsInstance(configured["optimizer"], torch.optim.AdamW)
+        self.assertIs(configured["lr_scheduler"]["scheduler"], scheduler)
+        self.assertEqual(configured["lr_scheduler"]["interval"], "step")
+        self.assertEqual(configured["lr_scheduler"]["frequency"], 1)
+        get_scheduler.assert_called_once()
+        self.assertEqual(get_scheduler.call_args.args[0], "linear")
+        self.assertEqual(get_scheduler.call_args.kwargs["num_warmup_steps"], 100)
+        self.assertEqual(get_scheduler.call_args.kwargs["num_training_steps"], 1000)
+
+    @patch("embedding_train.model.get_scheduler")
+    @patch("embedding_train.model.AutoModel.from_pretrained")
+    def test_configure_optimizers_returns_bare_optimizer_when_scheduler_disabled(
+        self, from_pretrained, get_scheduler
+    ):
+        from_pretrained.return_value = _EncoderStub()
+        module = EmbeddingModule(build_cfg(optimizer={"scheduler": "none"}))
+        module._trainer = SimpleNamespace(estimated_stepping_batches=1000)
+
+        configured = module.configure_optimizers()
+
+        self.assertIsInstance(configured, torch.optim.AdamW)
+        get_scheduler.assert_not_called()
 
 
 class EmbeddingModuleRecordLoggingTests(unittest.TestCase):

@@ -4,6 +4,7 @@ import torch.distributed
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from transformers import AutoModel
+from transformers import get_scheduler
 
 from embedding_train.config import build_config_from_hyperparameters
 from embedding_train.losses import (
@@ -63,6 +64,39 @@ def resolve_output_dim(output_dim):
         raise ValueError(f"output_dim must be at least 1, got: {output_dim}")
 
     return resolved_output_dim
+
+
+def resolve_scheduler_name(scheduler_name):
+    normalized = str(scheduler_name).strip().lower()
+
+    if normalized in {"none", "off", "null"}:
+        return "none"
+
+    if normalized in {"linear", "cosine"}:
+        return normalized
+
+    raise ValueError(f"Unsupported optimizer scheduler: {scheduler_name}")
+
+
+def resolve_warmup_steps(optimizer_cfg, total_training_steps):
+    total_training_steps = int(total_training_steps)
+    warmup_steps = optimizer_cfg.get("warmup_steps")
+
+    if warmup_steps is not None:
+        resolved_warmup_steps = int(warmup_steps)
+        if resolved_warmup_steps < 0:
+            raise ValueError("optimizer.warmup_steps must be at least 0")
+        return min(resolved_warmup_steps, total_training_steps)
+
+    warmup_ratio = float(optimizer_cfg.get("warmup_ratio", 0.0))
+    if warmup_ratio < 0.0 or warmup_ratio > 1.0:
+        raise ValueError("optimizer.warmup_ratio must be between 0.0 and 1.0")
+
+    resolved_warmup_steps = int(total_training_steps * warmup_ratio)
+    if warmup_ratio > 0.0 and resolved_warmup_steps == 0 and total_training_steps > 0:
+        resolved_warmup_steps = 1
+
+    return min(resolved_warmup_steps, total_training_steps)
 
 
 def load_embedding_module_from_checkpoint(checkpoint_path, map_location="cpu"):
@@ -269,11 +303,37 @@ class EmbeddingModule(L.LightningModule):
         self.log_metrics_by_records(record_metrics)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=float(self.cfg.optimizer.lr),
             weight_decay=float(self.cfg.optimizer.weight_decay),
         )
+
+        scheduler_name = resolve_scheduler_name(
+            self.cfg.optimizer.get("scheduler", "none")
+        )
+        if scheduler_name == "none":
+            return optimizer
+
+        total_training_steps = int(self.trainer.estimated_stepping_batches)
+        if total_training_steps < 1:
+            return optimizer
+
+        warmup_steps = resolve_warmup_steps(self.cfg.optimizer, total_training_steps)
+        scheduler = get_scheduler(
+            scheduler_name,
+            optimizer=optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_training_steps,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
 
     def log_training_batch_stats(self, batch):
         if not bool(self.cfg.data.log_batch_stats):
