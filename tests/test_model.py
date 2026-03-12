@@ -54,6 +54,15 @@ class _LogCaptureModule:
         self.logged.append({"name": name, "value": value, "kwargs": kwargs})
 
 
+class _ValidationLogCaptureModule:
+    def __init__(self, validation_rows):
+        self.validation_rows = validation_rows
+        self.logged = []
+
+    def log(self, name, value, **kwargs):
+        self.logged.append({"name": name, "value": value, "kwargs": kwargs})
+
+
 class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
     def test_logs_training_batch_stats_when_present_and_enabled(self):
         module = _LogCaptureModule(log_batch_stats=True)
@@ -98,6 +107,44 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
         EmbeddingModule.log_training_batch_stats(module, batch)
 
         self.assertEqual(module.logged, [])
+
+
+class EmbeddingModuleValidationMetricTests(unittest.TestCase):
+    def test_logs_exact_metrics_alongside_ndcg(self):
+        module = _ValidationLogCaptureModule(
+            [
+                {"query_id": "q1", "score": 0.9, "raw_label": "Irrelevant"},
+                {"query_id": "q1", "score": 0.8, "raw_label": "Exact"},
+                {"query_id": "q2", "score": 0.7, "raw_label": "Exact"},
+                {"query_id": "q2", "score": 0.6, "raw_label": "Irrelevant"},
+                {"query_id": "q3", "score": 0.5, "raw_label": "Substitute"},
+            ]
+        )
+
+        EmbeddingModule.on_validation_epoch_end(module)
+
+        logged_by_name = {entry["name"]: entry for entry in module.logged}
+
+        self.assertIn("val/ndcg_at_1", logged_by_name)
+        self.assertIn("val/ndcg_at_5", logged_by_name)
+        self.assertIn("val/exact_success_at_1", logged_by_name)
+        self.assertIn("val/exact_mrr", logged_by_name)
+        self.assertIn("val/exact_recall_at_5", logged_by_name)
+        self.assertIn("val/exact_recall_at_10", logged_by_name)
+        self.assertIn("val/eligible_queries", logged_by_name)
+        self.assertIn("val/evaluated_queries", logged_by_name)
+        self.assertAlmostEqual(
+            logged_by_name["val/exact_success_at_1"]["value"],
+            0.5,
+        )
+        self.assertAlmostEqual(logged_by_name["val/exact_mrr"]["value"], 0.75)
+        self.assertAlmostEqual(logged_by_name["val/exact_recall_at_5"]["value"], 1.0)
+        self.assertAlmostEqual(
+            logged_by_name["val/evaluated_queries"]["value"],
+            3.0,
+        )
+        self.assertTrue(logged_by_name["val/exact_success_at_1"]["kwargs"]["prog_bar"])
+        self.assertTrue(logged_by_name["val/exact_mrr"]["kwargs"]["prog_bar"])
 
 
 class EmbeddingModuleCheckpointTests(unittest.TestCase):

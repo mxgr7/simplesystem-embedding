@@ -51,16 +51,16 @@ class TrainCallbackTests(unittest.TestCase):
         )
         self.assertEqual(
             checkpoint_callback.filename,
-            "best-step={step}-val_ndcg_at_5={val/ndcg_at_5:.4f}",
+            "best-step={step}-val_exact_mrr={val/exact_mrr:.4f}",
         )
-        self.assertEqual(checkpoint_callback.monitor, "val/ndcg_at_5")
+        self.assertEqual(checkpoint_callback.monitor, "val/exact_mrr")
         self.assertEqual(checkpoint_callback.mode, "max")
         self.assertEqual(checkpoint_callback.save_top_k, 3)
         self.assertTrue(checkpoint_callback.save_last)
         self.assertFalse(checkpoint_callback.auto_insert_metric_name)
         self.assertEqual(
             checkpoint_callback.CHECKPOINT_NAME_LAST,
-            "last-step={step}-val_ndcg_at_5={val/ndcg_at_5:.4f}",
+            "last-step={step}-val_exact_mrr={val/exact_mrr:.4f}",
         )
 
     def test_build_callbacks_includes_learning_rate_monitor(self):

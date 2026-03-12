@@ -10,7 +10,10 @@ from embedding_train.losses import (
     in_batch_contrastive_loss,
     in_batch_triplet_loss,
 )
-from embedding_train.metrics import compute_ranking_metrics
+from embedding_train.metrics import (
+    compute_exact_retrieval_metrics,
+    compute_ranking_metrics,
+)
 
 
 def resolve_model_dtype(precision):
@@ -201,11 +204,33 @@ class EmbeddingModule(L.LightningModule):
 
     def on_validation_epoch_end(self):
         metrics = compute_ranking_metrics(self.validation_rows)
+        exact_metrics = compute_exact_retrieval_metrics(self.validation_rows)
 
         self.log("val/ndcg_at_1", metrics["ndcg@1"], prog_bar=True)
         self.log("val/ndcg_at_5", metrics["ndcg@5"], prog_bar=True)
         self.log("val/ndcg_at_10", metrics["ndcg@10"], prog_bar=False)
+        self.log(
+            "val/exact_success_at_1",
+            exact_metrics["exact_success@1"],
+            prog_bar=True,
+        )
+        self.log("val/exact_mrr", exact_metrics["exact_mrr"], prog_bar=True)
+        self.log(
+            "val/exact_recall_at_5",
+            exact_metrics["exact_recall@5"],
+            prog_bar=False,
+        )
+        self.log(
+            "val/exact_recall_at_10",
+            exact_metrics["exact_recall@10"],
+            prog_bar=False,
+        )
         self.log("val/eligible_queries", metrics["eligible_queries"], prog_bar=False)
+        self.log(
+            "val/evaluated_queries",
+            exact_metrics["evaluated_queries"],
+            prog_bar=False,
+        )
 
     def configure_optimizers(self):
         return torch.optim.AdamW(
