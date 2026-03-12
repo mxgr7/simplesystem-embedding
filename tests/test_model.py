@@ -63,6 +63,7 @@ class _LogCaptureModule:
         self.cfg = OmegaConf.create({"data": {"log_batch_stats": log_batch_stats}})
         self.logged = []
         self.records_seen = 12
+        self.pending_train_record_metrics = {}
         self.record_metrics = []
         self.logger = None
 
@@ -71,6 +72,9 @@ class _LogCaptureModule:
 
     def record_aligned_metric_name(self, name):
         return EmbeddingModule.record_aligned_metric_name(self, name)
+
+    def batch_aligned_metric_name(self, split, name):
+        return EmbeddingModule.batch_aligned_metric_name(self, split, name)
 
     def metric_value_to_float(self, value):
         return EmbeddingModule.metric_value_to_float(self, value)
@@ -88,6 +92,9 @@ class _LogCaptureModule:
             }
         )
 
+    def resolve_batch_record_count(self, batch):
+        return EmbeddingModule.resolve_batch_record_count(self, batch)
+
 
 class _MLflowLoggerStub:
     def __init__(self):
@@ -98,14 +105,15 @@ class _MLflowLoggerStub:
 
 
 class _ValidationLogCaptureModule:
-    def __init__(self, validation_rows):
+    def __init__(self, validation_rows, records_seen=24, sanity_checking=False):
         self.validation_rows = validation_rows
         self.logged = []
         self.loss_type = "bce"
-        self.records_seen = 24
+        self.records_seen = records_seen
         self.validation_loss_total = 1.5
         self.validation_loss_examples = 3
         self.logger = _MLflowLoggerStub()
+        self.trainer = SimpleNamespace(sanity_checking=sanity_checking)
 
     def log(self, name, value, **kwargs):
         self.logged.append({"name": name, "value": value, "kwargs": kwargs})
@@ -113,11 +121,17 @@ class _ValidationLogCaptureModule:
     def record_aligned_metric_name(self, name):
         return EmbeddingModule.record_aligned_metric_name(self, name)
 
+    def batch_aligned_metric_name(self, split, name):
+        return EmbeddingModule.batch_aligned_metric_name(self, split, name)
+
     def metric_value_to_float(self, value):
         return EmbeddingModule.metric_value_to_float(self, value)
 
     def log_metrics_by_records(self, metrics):
         EmbeddingModule.log_metrics_by_records(self, metrics)
+
+    def is_sanity_checking(self):
+        return EmbeddingModule.is_sanity_checking(self)
 
 
 class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
@@ -132,14 +146,14 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
             },
         }
 
-        EmbeddingModule.log_training_batch_stats(module, batch)
+        stats_to_log = EmbeddingModule.log_training_batch_stats(module, batch)
 
         self.assertEqual(
             [entry["name"] for entry in module.logged],
             [
-                "train/batch_positive_count",
-                "train/batch_same_query_negative_count",
-                "train/batch_cross_query_negative_count",
+                "train/by_batch/batch_positive_count",
+                "train/by_batch/batch_same_query_negative_count",
+                "train/by_batch/batch_cross_query_negative_count",
             ],
         )
         self.assertEqual([entry["value"] for entry in module.logged], [1.0, 1.0, 1.0])
@@ -150,18 +164,14 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
             [3, 3, 3],
         )
         self.assertEqual(
-            module.record_metrics,
-            [
-                {
-                    "step": 12,
-                    "metrics": {
-                        "train/batch_positive_count_by_records": 1.0,
-                        "train/batch_same_query_negative_count_by_records": 1.0,
-                        "train/batch_cross_query_negative_count_by_records": 1.0,
-                    },
-                }
-            ],
+            stats_to_log,
+            {
+                "train/by_batch/batch_positive_count": 1,
+                "train/by_batch/batch_same_query_negative_count": 1,
+                "train/by_batch/batch_cross_query_negative_count": 1,
+            },
         )
+        self.assertEqual(module.record_metrics, [])
 
     def test_skips_logging_when_disabled(self):
         module = _LogCaptureModule(log_batch_stats=False)
@@ -177,6 +187,32 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
         EmbeddingModule.log_training_batch_stats(module, batch)
 
         self.assertEqual(module.logged, [])
+
+    def test_logs_record_metrics_after_train_batch_end(self):
+        module = _LogCaptureModule(log_batch_stats=True)
+        module.records_seen = 0
+        module.pending_train_record_metrics = {
+            "train/by_batch/loss": torch.tensor(0.25),
+            "train/by_batch/batch_positive_count": 1.0,
+        }
+        batch = {"labels": torch.tensor([1.0, 0.0, 0.0])}
+
+        EmbeddingModule.on_train_batch_end(module, None, batch, 0)
+
+        self.assertEqual(module.records_seen, 3)
+        self.assertEqual(module.pending_train_record_metrics, {})
+        self.assertEqual(
+            module.record_metrics,
+            [
+                {
+                    "step": 3,
+                    "metrics": {
+                        "train/by_records/loss": 0.25,
+                        "train/by_records/batch_positive_count": 1.0,
+                    },
+                }
+            ],
+        )
 
 
 class EmbeddingModuleValidationMetricTests(unittest.TestCase):
@@ -195,34 +231,45 @@ class EmbeddingModuleValidationMetricTests(unittest.TestCase):
 
         logged_by_name = {entry["name"]: entry for entry in module.logged}
 
-        self.assertIn("val/ndcg_at_1", logged_by_name)
-        self.assertIn("val/ndcg_at_5", logged_by_name)
-        self.assertIn("val/exact_success_at_1", logged_by_name)
-        self.assertIn("val/exact_mrr", logged_by_name)
-        self.assertIn("val/exact_recall_at_5", logged_by_name)
-        self.assertIn("val/exact_recall_at_10", logged_by_name)
-        self.assertIn("val/eligible_queries", logged_by_name)
-        self.assertIn("val/evaluated_queries", logged_by_name)
+        self.assertIn("val/by_batch/ndcg_at_1", logged_by_name)
+        self.assertIn("val/by_batch/ndcg_at_5", logged_by_name)
+        self.assertIn("val/by_batch/exact_success_at_1", logged_by_name)
+        self.assertIn("val/by_batch/exact_mrr", logged_by_name)
+        self.assertIn("val/by_batch/exact_recall_at_5", logged_by_name)
+        self.assertIn("val/by_batch/exact_recall_at_10", logged_by_name)
+        self.assertIn("val/by_batch/eligible_queries", logged_by_name)
+        self.assertIn("val/by_batch/evaluated_queries", logged_by_name)
         self.assertAlmostEqual(
-            logged_by_name["val/exact_success_at_1"]["value"],
+            logged_by_name["val/by_batch/exact_success_at_1"]["value"],
             0.5,
         )
-        self.assertAlmostEqual(logged_by_name["val/exact_mrr"]["value"], 0.75)
-        self.assertAlmostEqual(logged_by_name["val/exact_recall_at_5"]["value"], 1.0)
+        self.assertAlmostEqual(logged_by_name["val/by_batch/exact_mrr"]["value"], 0.75)
         self.assertAlmostEqual(
-            logged_by_name["val/evaluated_queries"]["value"],
+            logged_by_name["val/by_batch/exact_recall_at_5"]["value"], 1.0
+        )
+        self.assertAlmostEqual(
+            logged_by_name["val/by_batch/evaluated_queries"]["value"],
             3.0,
         )
-        self.assertTrue(logged_by_name["val/exact_success_at_1"]["kwargs"]["prog_bar"])
-        self.assertTrue(logged_by_name["val/exact_mrr"]["kwargs"]["prog_bar"])
+        self.assertTrue(
+            logged_by_name["val/by_batch/exact_success_at_1"]["kwargs"]["prog_bar"]
+        )
+        self.assertTrue(logged_by_name["val/by_batch/exact_mrr"]["kwargs"]["prog_bar"])
         self.assertEqual(len(module.logger.calls), 1)
         self.assertEqual(module.logger.calls[0]["step"], 24)
         self.assertAlmostEqual(
-            module.logger.calls[0]["metrics"]["val/loss_by_records"],
+            module.logger.calls[0]["metrics"]["val/by_records/loss"],
             0.5,
         )
-        self.assertIn("val/exact_mrr_by_records", module.logger.calls[0]["metrics"])
-        self.assertIn("val/ndcg_at_1_by_records", module.logger.calls[0]["metrics"])
+        self.assertIn("val/by_records/exact_mrr", module.logger.calls[0]["metrics"])
+        self.assertIn("val/by_records/ndcg_at_1", module.logger.calls[0]["metrics"])
+
+    def test_skips_record_aligned_validation_metrics_before_training(self):
+        module = _ValidationLogCaptureModule([], records_seen=0, sanity_checking=True)
+
+        EmbeddingModule.on_validation_epoch_end(module)
+
+        self.assertEqual(module.logger.calls, [])
 
 
 class EmbeddingModuleCheckpointTests(unittest.TestCase):
@@ -411,10 +458,19 @@ class EmbeddingModuleRecordLoggingTests(unittest.TestCase):
             [
                 {
                     "step": 64,
-                    "metrics": {"train/loss_by_records": 0.25},
+                    "metrics": {"train/by_records/loss": 0.25},
                 }
             ],
         )
+
+    def test_skips_mlflow_record_metrics_until_records_are_seen(self):
+        logger = _MLflowLoggerStub()
+        module = _ValidationLogCaptureModule([], records_seen=0)
+        module.logger = logger
+
+        EmbeddingModule.log_metrics_by_records(module, {"train/by_batch/loss": 0.25})
+
+        self.assertEqual(logger.calls, [])
 
 
 if __name__ == "__main__":

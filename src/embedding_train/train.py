@@ -57,15 +57,15 @@ def build_callbacks(cfg, logger):
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=str(checkpoint_dir),
-        filename="best-step={step}-val_exact_mrr={val/exact_mrr:.4f}",
-        monitor="val/exact_mrr",
+        filename="best-step={step}-val_by_batch_exact_mrr={val/by_batch/exact_mrr:.4f}",
+        monitor="val/by_batch/exact_mrr",
         mode="max",
         save_top_k=3,
         save_last=True,
         auto_insert_metric_name=False,
     )
     checkpoint_callback.CHECKPOINT_NAME_LAST = (
-        "last-step={step}-val_exact_mrr={val/exact_mrr:.4f}"
+        "last-step={step}-val_by_batch_exact_mrr={val/by_batch/exact_mrr:.4f}"
     )
 
     return [

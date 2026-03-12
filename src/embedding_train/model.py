@@ -131,6 +131,7 @@ class EmbeddingModule(L.LightningModule):
         self.output_dim = resolve_output_dim(cfg.model.output_dim)
         self.projection = None
         self.records_seen = 0
+        self.pending_train_record_metrics = {}
         self.validation_rows = []
         self.validation_loss_total = 0.0
         self.validation_loss_examples = 0
@@ -163,6 +164,10 @@ class EmbeddingModule(L.LightningModule):
             batch["query_inputs"], batch["offer_inputs"]
         )
         batch_size = batch["labels"].size(0)
+        loss_metric_name = self.batch_aligned_metric_name(
+            "train", f"{self.loss_type}_loss"
+        )
+        train_metric_name = self.batch_aligned_metric_name("train", "loss")
         self.assert_finite(batch["labels"], "labels", batch_idx)
         self.assert_finite(scores, "scores", batch_idx)
         loss = self.compute_loss(
@@ -172,9 +177,8 @@ class EmbeddingModule(L.LightningModule):
             scores,
         )
         self.assert_finite(loss, "train_loss", batch_idx)
-        self.records_seen += self.resolve_batch_record_count(batch)
         self.log(
-            f"train/{self.loss_type}_loss",
+            loss_metric_name,
             loss,
             on_step=True,
             on_epoch=True,
@@ -182,21 +186,45 @@ class EmbeddingModule(L.LightningModule):
             batch_size=batch_size,
         )
         self.log(
-            "train/loss",
+            train_metric_name,
             loss,
             on_step=True,
             on_epoch=True,
             prog_bar=True,
             batch_size=batch_size,
         )
-        self.log_metrics_by_records(
-            {
-                f"train/{self.loss_type}_loss": loss,
-                "train/loss": loss,
-            }
-        )
-        self.log_training_batch_stats(batch)
+        batch_stats_to_log = self.log_training_batch_stats(batch)
+        self.pending_train_record_metrics = {
+            loss_metric_name: loss.detach(),
+            train_metric_name: loss.detach(),
+            **batch_stats_to_log,
+        }
         return loss
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        del outputs, batch_idx
+
+        if not self.pending_train_record_metrics:
+            return
+
+        self.records_seen += self.resolve_batch_record_count(batch)
+        self.log_metrics_by_records(self.pending_train_record_metrics)
+        self.pending_train_record_metrics = {}
+
+    def on_train_epoch_start(self):
+        self.pending_train_record_metrics = {}
+
+    def on_validation_start(self):
+        if self.is_sanity_checking():
+            self.validation_rows = []
+            self.validation_loss_total = 0.0
+            self.validation_loss_examples = 0
+
+    def on_validation_end(self):
+        if self.is_sanity_checking():
+            self.validation_rows = []
+            self.validation_loss_total = 0.0
+            self.validation_loss_examples = 0
 
     def on_validation_epoch_start(self):
         self.validation_rows = []
@@ -219,9 +247,13 @@ class EmbeddingModule(L.LightningModule):
         batch_size = batch["labels"].size(0)
         self.validation_loss_total += float(loss.detach().item()) * batch_size
         self.validation_loss_examples += batch_size
+        loss_metric_name = self.batch_aligned_metric_name(
+            "val", f"{self.loss_type}_loss"
+        )
+        validation_metric_name = self.batch_aligned_metric_name("val", "loss")
 
         self.log(
-            f"val/{self.loss_type}_loss",
+            loss_metric_name,
             loss,
             on_step=False,
             on_epoch=True,
@@ -229,7 +261,7 @@ class EmbeddingModule(L.LightningModule):
             batch_size=batch_size,
         )
         self.log(
-            "val/loss",
+            validation_metric_name,
             loss,
             on_step=False,
             on_epoch=True,
@@ -257,49 +289,89 @@ class EmbeddingModule(L.LightningModule):
         metrics = compute_ranking_metrics(self.validation_rows)
         exact_metrics = compute_exact_retrieval_metrics(self.validation_rows)
         record_metrics = {
-            "val/ndcg_at_1": metrics["ndcg@1"],
-            "val/ndcg_at_5": metrics["ndcg@5"],
-            "val/ndcg_at_10": metrics["ndcg@10"],
-            "val/exact_success_at_1": exact_metrics["exact_success@1"],
-            "val/exact_mrr": exact_metrics["exact_mrr"],
-            "val/exact_recall_at_5": exact_metrics["exact_recall@5"],
-            "val/exact_recall_at_10": exact_metrics["exact_recall@10"],
-            "val/eligible_queries": metrics["eligible_queries"],
-            "val/evaluated_queries": exact_metrics["evaluated_queries"],
+            self.batch_aligned_metric_name("val", "ndcg_at_1"): metrics["ndcg@1"],
+            self.batch_aligned_metric_name("val", "ndcg_at_5"): metrics["ndcg@5"],
+            self.batch_aligned_metric_name("val", "ndcg_at_10"): metrics["ndcg@10"],
+            self.batch_aligned_metric_name("val", "exact_success_at_1"): exact_metrics[
+                "exact_success@1"
+            ],
+            self.batch_aligned_metric_name("val", "exact_mrr"): exact_metrics[
+                "exact_mrr"
+            ],
+            self.batch_aligned_metric_name("val", "exact_recall_at_5"): exact_metrics[
+                "exact_recall@5"
+            ],
+            self.batch_aligned_metric_name("val", "exact_recall_at_10"): exact_metrics[
+                "exact_recall@10"
+            ],
+            self.batch_aligned_metric_name("val", "eligible_queries"): metrics[
+                "eligible_queries"
+            ],
+            self.batch_aligned_metric_name("val", "evaluated_queries"): exact_metrics[
+                "evaluated_queries"
+            ],
         }
 
         if self.validation_loss_examples:
             average_validation_loss = (
                 self.validation_loss_total / self.validation_loss_examples
             )
-            record_metrics[f"val/{self.loss_type}_loss"] = average_validation_loss
-            record_metrics["val/loss"] = average_validation_loss
+            record_metrics[
+                self.batch_aligned_metric_name("val", f"{self.loss_type}_loss")
+            ] = average_validation_loss
+            record_metrics[self.batch_aligned_metric_name("val", "loss")] = (
+                average_validation_loss
+            )
 
-        self.log("val/ndcg_at_1", metrics["ndcg@1"], prog_bar=True)
-        self.log("val/ndcg_at_5", metrics["ndcg@5"], prog_bar=True)
-        self.log("val/ndcg_at_10", metrics["ndcg@10"], prog_bar=False)
         self.log(
-            "val/exact_success_at_1",
+            self.batch_aligned_metric_name("val", "ndcg_at_1"),
+            metrics["ndcg@1"],
+            prog_bar=True,
+        )
+        self.log(
+            self.batch_aligned_metric_name("val", "ndcg_at_5"),
+            metrics["ndcg@5"],
+            prog_bar=True,
+        )
+        self.log(
+            self.batch_aligned_metric_name("val", "ndcg_at_10"),
+            metrics["ndcg@10"],
+            prog_bar=False,
+        )
+        self.log(
+            self.batch_aligned_metric_name("val", "exact_success_at_1"),
             exact_metrics["exact_success@1"],
             prog_bar=True,
         )
-        self.log("val/exact_mrr", exact_metrics["exact_mrr"], prog_bar=True)
         self.log(
-            "val/exact_recall_at_5",
+            self.batch_aligned_metric_name("val", "exact_mrr"),
+            exact_metrics["exact_mrr"],
+            prog_bar=True,
+        )
+        self.log(
+            self.batch_aligned_metric_name("val", "exact_recall_at_5"),
             exact_metrics["exact_recall@5"],
             prog_bar=False,
         )
         self.log(
-            "val/exact_recall_at_10",
+            self.batch_aligned_metric_name("val", "exact_recall_at_10"),
             exact_metrics["exact_recall@10"],
             prog_bar=False,
         )
-        self.log("val/eligible_queries", metrics["eligible_queries"], prog_bar=False)
         self.log(
-            "val/evaluated_queries",
+            self.batch_aligned_metric_name("val", "eligible_queries"),
+            metrics["eligible_queries"],
+            prog_bar=False,
+        )
+        self.log(
+            self.batch_aligned_metric_name("val", "evaluated_queries"),
             exact_metrics["evaluated_queries"],
             prog_bar=False,
         )
+
+        if self.is_sanity_checking() or self.records_seen < 1:
+            return
+
         self.log_metrics_by_records(record_metrics)
 
     def configure_optimizers(self):
@@ -337,21 +409,23 @@ class EmbeddingModule(L.LightningModule):
 
     def log_training_batch_stats(self, batch):
         if not bool(self.cfg.data.log_batch_stats):
-            return
+            return {}
 
         batch_stats = batch.get("batch_stats")
         if not batch_stats:
-            return
+            return {}
 
         batch_size = batch["labels"].size(0)
         stats_to_log = {
-            "train/batch_positive_count": batch_stats["positive_count"],
-            "train/batch_same_query_negative_count": batch_stats[
-                "same_query_negative_count"
-            ],
-            "train/batch_cross_query_negative_count": batch_stats[
-                "cross_query_negative_count"
-            ],
+            self.batch_aligned_metric_name(
+                "train", "batch_positive_count"
+            ): batch_stats["positive_count"],
+            self.batch_aligned_metric_name(
+                "train", "batch_same_query_negative_count"
+            ): batch_stats["same_query_negative_count"],
+            self.batch_aligned_metric_name(
+                "train", "batch_cross_query_negative_count"
+            ): batch_stats["cross_query_negative_count"],
         }
 
         for name, value in stats_to_log.items():
@@ -364,7 +438,7 @@ class EmbeddingModule(L.LightningModule):
                 batch_size=batch_size,
             )
 
-        self.log_metrics_by_records(stats_to_log)
+        return stats_to_log
 
     def resolve_batch_record_count(self, batch):
         local_batch_size = int(batch["labels"].size(0))
@@ -380,12 +454,22 @@ class EmbeddingModule(L.LightningModule):
         return int(batch_size.item())
 
     def record_aligned_metric_name(self, name):
-        return f"{name}_by_records"
+        if "/by_batch/" in name:
+            return name.replace("/by_batch/", "/by_records/", 1)
+
+        first_separator = name.find("/")
+        if first_separator == -1:
+            return f"by_records/{name}"
+
+        return f"{name[:first_separator]}/by_records/{name[first_separator + 1 :]}"
+
+    def batch_aligned_metric_name(self, split, name):
+        return f"{split}/by_batch/{name}"
 
     def log_metrics_by_records(self, metrics):
         logger = self.logger
         log_metrics = getattr(logger, "log_metrics", None)
-        if logger is None or not callable(log_metrics):
+        if logger is None or not callable(log_metrics) or self.records_seen < 1:
             return
 
         record_metrics = {}
@@ -402,11 +486,16 @@ class EmbeddingModule(L.LightningModule):
 
         return float(value)
 
+    def is_sanity_checking(self):
+        trainer = getattr(self, "trainer", None)
+        return bool(getattr(trainer, "sanity_checking", False))
+
     def on_save_checkpoint(self, checkpoint):
         checkpoint["records_seen"] = int(self.records_seen)
 
     def on_load_checkpoint(self, checkpoint):
         self.records_seen = int(checkpoint.get("records_seen", 0))
+        self.pending_train_record_metrics = {}
 
     def compute_loss(self, batch, query_embeddings, offer_embeddings, scores):
         scale = float(self.cfg.model.similarity_scale)
