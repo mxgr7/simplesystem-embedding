@@ -70,7 +70,7 @@ def build_callbacks(cfg, logger):
 
     return [
         checkpoint_callback,
-        LearningRateMonitor(logging_interval="epoch"),
+        LearningRateMonitor(logging_interval="step"),
     ]
 
 

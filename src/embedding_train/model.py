@@ -456,13 +456,13 @@ class EmbeddingModule(L.LightningModule):
 
     def record_aligned_metric_name(self, name):
         if "/by_batch/" in name:
-            return name.replace("/by_batch/", "/by_records/", 1)
+            return name.replace("/by_batch/", "/", 1)
 
         first_separator = name.find("/")
         if first_separator == -1:
-            return f"by_records/{name}"
+            return name
 
-        return f"{name[:first_separator]}/by_records/{name[first_separator + 1 :]}"
+        return name
 
     def batch_aligned_metric_name(self, split, name):
         return f"{split}/by_batch/{name}"

@@ -214,8 +214,8 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
                 {
                     "step": 3,
                     "metrics": {
-                        "train/by_records/loss": 0.25,
-                        "train/by_records/batch_positive_count": 1.0,
+                        "train/loss": 0.25,
+                        "train/batch_positive_count": 1.0,
                     },
                 }
             ],
@@ -251,7 +251,7 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
             [
                 {
                     "step": 30,
-                    "metrics": {"train/by_records/loss": 0.25},
+                    "metrics": {"train/loss": 0.25},
                 }
             ],
         )
@@ -300,11 +300,11 @@ class EmbeddingModuleValidationMetricTests(unittest.TestCase):
         self.assertEqual(len(module.logger.calls), 1)
         self.assertEqual(module.logger.calls[0]["step"], 24)
         self.assertAlmostEqual(
-            module.logger.calls[0]["metrics"]["val/by_records/loss"],
+            module.logger.calls[0]["metrics"]["val/loss"],
             0.5,
         )
-        self.assertIn("val/by_records/exact_mrr", module.logger.calls[0]["metrics"])
-        self.assertIn("val/by_records/ndcg_at_1", module.logger.calls[0]["metrics"])
+        self.assertIn("val/exact_mrr", module.logger.calls[0]["metrics"])
+        self.assertIn("val/ndcg_at_1", module.logger.calls[0]["metrics"])
 
     def test_skips_record_aligned_validation_metrics_before_training(self):
         module = _ValidationLogCaptureModule([], records_seen=0, sanity_checking=True)
@@ -500,7 +500,7 @@ class EmbeddingModuleRecordLoggingTests(unittest.TestCase):
             [
                 {
                     "step": 64,
-                    "metrics": {"train/by_records/loss": 0.25},
+                    "metrics": {"train/loss": 0.25},
                 }
             ],
         )

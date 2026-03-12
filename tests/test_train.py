@@ -74,9 +74,12 @@ class TrainCallbackTests(unittest.TestCase):
 
             callbacks = build_callbacks(cfg, logger)
 
-        self.assertTrue(
-            any(isinstance(callback, LearningRateMonitor) for callback in callbacks)
+        lr_monitor = next(
+            callback
+            for callback in callbacks
+            if isinstance(callback, LearningRateMonitor)
         )
+        self.assertEqual(lr_monitor.logging_interval, "step")
 
     def test_build_callbacks_sanitizes_run_name_for_paths(self):
         with TemporaryDirectory() as tmp_dir:
