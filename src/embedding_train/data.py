@@ -95,21 +95,8 @@ class EmbeddingDataModule(LightningDataModule):
         if self.cfg.data.limit_rows:
             frame = frame.head(int(self.cfg.data.limit_rows))
 
-        query_ids = [
-            value
-            for value in frame["query_id"].dropna().astype(str).unique().tolist()
-            if value
-        ]
-        randomizer = random.Random(self.cfg.seed)
-        randomizer.shuffle(query_ids)
-
-        val_size = int(len(query_ids) * float(self.cfg.data.val_fraction))
-        if float(self.cfg.data.val_fraction) > 0 and val_size == 0:
-            val_size = 1
-
-        val_query_ids = set(query_ids[:val_size])
-
         columns = list(frame.columns)
+        all_records = []
         train_records = []
         val_records = []
         skipped_rows = 0
@@ -121,21 +108,42 @@ class EmbeddingDataModule(LightningDataModule):
                 skipped_rows += 1
                 continue
 
-            if record["query_id"] in val_query_ids:
-                val_records.append(record)
-            else:
-                train_records.append(record)
+            all_records.append(record)
+
+        (
+            train_records,
+            val_records,
+            split_stats,
+        ) = self._split_records_by_offer_connected_components(all_records)
 
         self.train_dataset = PairDataset(train_records)
         self.val_dataset = PairDataset(val_records)
         self._build_train_metadata(train_records)
+        train_offer_ids = {record["offer_id"] for record in train_records}
+        val_offer_ids = {record["offer_id"] for record in val_records}
         self.dataset_stats = {
             "train_rows": len(train_records),
             "val_rows": len(val_records),
             "train_queries": len({record["query_id"] for record in train_records}),
             "val_queries": len({record["query_id"] for record in val_records}),
+            "train_offers": len(train_offer_ids),
+            "val_offers": len(val_offer_ids),
+            "train_positive_rows": sum(
+                1 for record in train_records if record["label"] > 0.5
+            ),
+            "val_positive_rows": sum(
+                1 for record in val_records if record["label"] > 0.5
+            ),
+            "train_negative_rows": sum(
+                1 for record in train_records if record["label"] <= 0.5
+            ),
+            "val_negative_rows": sum(
+                1 for record in val_records if record["label"] <= 0.5
+            ),
+            "shared_offers_between_train_and_val": len(train_offer_ids & val_offer_ids),
             "skipped_rows": skipped_rows,
             "eligible_train_queries": len(self.eligible_query_ids),
+            **split_stats,
         }
 
         print("Loaded dataset:", self.dataset_stats)
@@ -246,6 +254,138 @@ class EmbeddingDataModule(LightningDataModule):
 
     def _build_record(self, row):
         return self.row_renderer.build_training_record(row)
+
+    def _split_records_by_offer_connected_components(self, records):
+        if not records:
+            return (
+                [],
+                [],
+                {
+                    "target_val_queries": 0,
+                    "selected_val_queries": 0,
+                    "connected_components": 0,
+                    "train_connected_components": 0,
+                    "val_connected_components": 0,
+                },
+            )
+
+        query_nodes = {}
+        parent = {}
+        component_records = {}
+        component_query_ids = {}
+        query_ids = []
+        record_query_nodes = []
+        seen_query_ids = set()
+        train_records = []
+        val_records = []
+
+        def ensure_node(node):
+            if node not in parent:
+                parent[node] = node
+
+        def find(node):
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        def union(left, right):
+            left_root = find(left)
+            right_root = find(right)
+
+            if left_root == right_root:
+                return left_root
+
+            parent[right_root] = left_root
+            return left_root
+
+        for index, record in enumerate(records):
+            query_id = record["query_id"]
+            offer_id = record["offer_id"]
+
+            if query_id:
+                query_node = query_nodes.get(query_id)
+                if query_node is None:
+                    query_node = f"query:{query_id}"
+                    query_nodes[query_id] = query_node
+            else:
+                query_node = f"query_row:{index}"
+
+            ensure_node(query_node)
+            record_query_nodes.append(query_node)
+
+            if query_id and query_id not in seen_query_ids:
+                seen_query_ids.add(query_id)
+                query_ids.append(query_id)
+
+            if offer_id:
+                offer_node = f"offer:{offer_id}"
+                ensure_node(offer_node)
+                union(query_node, offer_node)
+
+        for record, query_node in zip(records, record_query_nodes):
+            component_id = find(query_node)
+            component_records.setdefault(component_id, []).append(record)
+
+            if record["query_id"]:
+                component_query_ids.setdefault(component_id, set()).add(
+                    record["query_id"]
+                )
+
+        randomizer = random.Random(self.cfg.seed)
+        randomizer.shuffle(query_ids)
+
+        val_size = int(len(query_ids) * float(self.cfg.data.val_fraction))
+        if float(self.cfg.data.val_fraction) > 0 and val_size == 0 and query_ids:
+            val_size = 1
+
+        if val_size == 0:
+            return (
+                records,
+                [],
+                {
+                    "target_val_queries": 0,
+                    "selected_val_queries": 0,
+                    "connected_components": len(component_records),
+                    "train_connected_components": len(component_records),
+                    "val_connected_components": 0,
+                },
+            )
+
+        val_component_ids = set()
+        val_query_count = 0
+
+        for query_id in query_ids:
+            component_id = find(query_nodes[query_id])
+
+            if component_id in val_component_ids:
+                continue
+
+            val_component_ids.add(component_id)
+            val_query_count += len(component_query_ids.get(component_id, set()))
+
+            if val_query_count >= val_size:
+                break
+
+        for component_id in component_records:
+            if component_id in val_component_ids:
+                val_records.extend(component_records[component_id])
+            else:
+                train_records.extend(component_records[component_id])
+
+        return (
+            train_records,
+            val_records,
+            {
+                "target_val_queries": val_size,
+                "selected_val_queries": val_query_count,
+                "connected_components": len(component_records),
+                "train_connected_components": (
+                    len(component_records) - len(val_component_ids)
+                ),
+                "val_connected_components": len(val_component_ids),
+            },
+        )
 
     def _build_train_metadata(self, train_records):
         positive_records_by_query = {}

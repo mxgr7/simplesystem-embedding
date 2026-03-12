@@ -284,6 +284,155 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             },
         )
         self.assertEqual(datamodule.dataset_stats["eligible_train_queries"], 2)
+        self.assertEqual(datamodule.dataset_stats["train_offers"], 10)
+        self.assertEqual(datamodule.dataset_stats["val_offers"], 0)
+        self.assertEqual(
+            datamodule.dataset_stats["shared_offers_between_train_and_val"], 0
+        )
+
+    @patch("embedding_train.data.pd.read_parquet")
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_split_keeps_shared_offers_in_a_single_split(
+        self, from_pretrained, read_parquet
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        read_parquet.return_value = pd.DataFrame(
+            [
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "offer-shared",
+                    "query_term": "query one",
+                    "name": "shared offer",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "offer-q1",
+                    "query_term": "query one",
+                    "name": "offer one",
+                    "label": "Irrelevant",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "offer-shared",
+                    "query_term": "query two",
+                    "name": "shared offer",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "offer-q2",
+                    "query_term": "query two",
+                    "name": "offer two",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q3",
+                    "offer_id_b64": "offer-q3",
+                    "query_term": "query three",
+                    "name": "offer three",
+                    "label": "Exact",
+                },
+            ]
+        )
+        datamodule = EmbeddingDataModule(build_cfg(val_fraction=0.34))
+
+        datamodule.setup()
+
+        train_offer_ids = {
+            record["offer_id"] for record in datamodule.train_dataset.records
+        }
+        val_offer_ids = {
+            record["offer_id"] for record in datamodule.val_dataset.records
+        }
+        train_query_ids = {
+            record["query_id"] for record in datamodule.train_dataset.records
+        }
+        val_query_ids = {
+            record["query_id"] for record in datamodule.val_dataset.records
+        }
+
+        self.assertFalse(train_offer_ids & val_offer_ids)
+        self.assertEqual("q1" in train_query_ids, "q2" in train_query_ids)
+        self.assertEqual("q1" in val_query_ids, "q2" in val_query_ids)
+        self.assertEqual(
+            datamodule.dataset_stats["shared_offers_between_train_and_val"], 0
+        )
+        self.assertEqual(datamodule.dataset_stats["train_offers"], len(train_offer_ids))
+        self.assertEqual(datamodule.dataset_stats["val_offers"], len(val_offer_ids))
+
+    @patch("embedding_train.data.pd.read_parquet")
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_split_keeps_transitively_connected_queries_together(
+        self, from_pretrained, read_parquet
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        read_parquet.return_value = pd.DataFrame(
+            [
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "offer-1",
+                    "query_term": "query one",
+                    "name": "offer one",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "offer-1",
+                    "query_term": "query two",
+                    "name": "offer one",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "offer-2",
+                    "query_term": "query two",
+                    "name": "offer two",
+                    "label": "Irrelevant",
+                },
+                {
+                    "query_id": "q3",
+                    "offer_id_b64": "offer-2",
+                    "query_term": "query three",
+                    "name": "offer two",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q4",
+                    "offer_id_b64": "offer-4",
+                    "query_term": "query four",
+                    "name": "offer four",
+                    "label": "Exact",
+                },
+            ]
+        )
+        datamodule = EmbeddingDataModule(build_cfg(val_fraction=0.25))
+
+        datamodule.setup()
+
+        train_offer_ids = {
+            record["offer_id"] for record in datamodule.train_dataset.records
+        }
+        val_offer_ids = {
+            record["offer_id"] for record in datamodule.val_dataset.records
+        }
+        train_query_ids = {
+            record["query_id"] for record in datamodule.train_dataset.records
+        }
+        val_query_ids = {
+            record["query_id"] for record in datamodule.val_dataset.records
+        }
+
+        self.assertFalse(train_offer_ids & val_offer_ids)
+        connected_train_query_ids = {"q1", "q2", "q3"} & train_query_ids
+        connected_val_query_ids = {"q1", "q2", "q3"} & val_query_ids
+
+        self.assertIn(connected_train_query_ids, [set(), {"q1", "q2", "q3"}])
+        self.assertIn(connected_val_query_ids, [set(), {"q1", "q2", "q3"}])
+        self.assertEqual(
+            datamodule.dataset_stats["shared_offers_between_train_and_val"], 0
+        )
+        self.assertGreaterEqual(datamodule.dataset_stats["connected_components"], 2)
 
     @patch("embedding_train.data.pd.read_parquet")
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
