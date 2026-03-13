@@ -12,6 +12,7 @@ pin_memory: false
 max_query_length: 32
 max_offer_length: 256
 val_fraction: 0.05
+val_split_mode: query_id
 clean_html: true
 limit_rows: null
 

@@ -52,6 +52,7 @@ def build_cfg(**data_overrides):
                 "max_query_length": 32,
                 "max_offer_length": 256,
                 "val_fraction": 0.05,
+                "val_split_mode": "query_id",
                 "clean_html": True,
                 "limit_rows": None,
                 "query_template": "{{ query_term }}",
@@ -69,6 +70,13 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Unsupported train batching mode"):
             EmbeddingDataModule(build_cfg(train_batching_mode="unknown_mode"))
+
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_rejects_unknown_val_split_mode(self, from_pretrained):
+        from_pretrained.return_value = _TokenizerStub()
+
+        with self.assertRaisesRegex(ValueError, "Unsupported val split mode"):
+            EmbeddingDataModule(build_cfg(val_split_mode="unknown_mode"))
 
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
     def test_rejects_anchor_query_batch_size_smaller_than_minimum(
@@ -98,6 +106,7 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
         datamodule = EmbeddingDataModule(build_cfg())
 
         self.assertEqual(datamodule.train_batching_mode, "random_pairs")
+        self.assertEqual(datamodule.val_split_mode, "query_id")
 
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
     def test_accepts_random_query_pool_mode(self, from_pretrained):
@@ -108,6 +117,14 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(datamodule.train_batching_mode, "random_query_pool")
+
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_accepts_query_id_val_split_mode(self, from_pretrained):
+        from_pretrained.return_value = _TokenizerStub()
+
+        datamodule = EmbeddingDataModule(build_cfg(val_split_mode="query_id"))
+
+        self.assertEqual(datamodule.val_split_mode, "query_id")
 
 
 class RowTextRendererTests(unittest.TestCase):
@@ -398,7 +415,9 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
                 },
             ]
         )
-        datamodule = EmbeddingDataModule(build_cfg(val_fraction=0.34))
+        datamodule = EmbeddingDataModule(
+            build_cfg(val_fraction=0.34, val_split_mode="offer_connected_component")
+        )
 
         datamodule.setup()
 
@@ -469,7 +488,9 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
                 },
             ]
         )
-        datamodule = EmbeddingDataModule(build_cfg(val_fraction=0.25))
+        datamodule = EmbeddingDataModule(
+            build_cfg(val_fraction=0.25, val_split_mode="offer_connected_component")
+        )
 
         datamodule.setup()
 
@@ -521,11 +542,106 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
                 },
             ]
         )
-        datamodule = EmbeddingDataModule(build_cfg(val_fraction=0.5))
+        datamodule = EmbeddingDataModule(
+            build_cfg(val_fraction=0.5, val_split_mode="offer_connected_component")
+        )
 
         with self.assertRaisesRegex(
             ValueError,
             "Train split is empty after offer-connected-component splitting",
+        ):
+            datamodule.setup()
+
+    @patch("embedding_train.data.pd.read_parquet")
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_query_id_split_can_place_shared_offer_in_both_splits(
+        self, from_pretrained, read_parquet
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        read_parquet.return_value = pd.DataFrame(
+            [
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "offer-shared",
+                    "query_term": "query one",
+                    "name": "shared offer",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "offer-q1",
+                    "query_term": "query one",
+                    "name": "offer one",
+                    "label": "Irrelevant",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "offer-shared",
+                    "query_term": "query two",
+                    "name": "shared offer",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "offer-q2",
+                    "query_term": "query two",
+                    "name": "offer two",
+                    "label": "Exact",
+                },
+            ]
+        )
+        datamodule = EmbeddingDataModule(
+            build_cfg(val_fraction=0.5, val_split_mode="query_id")
+        )
+
+        datamodule.setup()
+
+        train_offer_ids = {
+            record["offer_id"] for record in datamodule.train_dataset.records
+        }
+        val_offer_ids = {
+            record["offer_id"] for record in datamodule.val_dataset.records
+        }
+        train_query_ids = {
+            record["query_id"] for record in datamodule.train_dataset.records
+        }
+        val_query_ids = {
+            record["query_id"] for record in datamodule.val_dataset.records
+        }
+
+        self.assertEqual(len(train_query_ids), 1)
+        self.assertEqual(len(val_query_ids), 1)
+        self.assertFalse(train_query_ids & val_query_ids)
+        self.assertEqual(train_offer_ids & val_offer_ids, {"offer-shared"})
+        self.assertEqual(datamodule.dataset_stats["val_split_mode"], "query_id")
+        self.assertEqual(
+            datamodule.dataset_stats["shared_offers_between_train_and_val"], 1
+        )
+
+    @patch("embedding_train.data.pd.read_parquet")
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_query_id_split_raises_clear_error_when_it_consumes_all_queries(
+        self, from_pretrained, read_parquet
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        read_parquet.return_value = pd.DataFrame(
+            [
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "offer-1",
+                    "query_term": "query one",
+                    "name": "offer one",
+                    "label": "Exact",
+                }
+            ]
+        )
+        datamodule = EmbeddingDataModule(
+            build_cfg(val_fraction=1.0, val_split_mode="query_id")
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Train split is empty after query-id splitting",
         ):
             datamodule.setup()
 

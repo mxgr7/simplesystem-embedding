@@ -26,6 +26,7 @@ from embedding_train.batching import (
 from embedding_train.rendering import RowTextRenderer
 
 VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query", "random_query_pool"}
+VALID_VAL_SPLIT_MODES = {"offer_connected_component", "query_id"}
 
 
 def build_setup_progress(total_rows):
@@ -68,6 +69,18 @@ def resolve_train_batching_mode(train_batching_mode):
     )
 
 
+def resolve_val_split_mode(val_split_mode):
+    normalized = str(val_split_mode).strip().lower()
+
+    if normalized in VALID_VAL_SPLIT_MODES:
+        return normalized
+
+    choices = "|".join(sorted(VALID_VAL_SPLIT_MODES))
+    raise ValueError(
+        f"Unsupported val split mode: {val_split_mode}. Expected one of {choices}"
+    )
+
+
 class PairDataset(Dataset):
     def __init__(self, records):
         self.records = records
@@ -85,6 +98,9 @@ class EmbeddingDataModule(LightningDataModule):
         self.cfg = cfg
         self.train_batching_mode = resolve_train_batching_mode(
             cfg.data.train_batching_mode
+        )
+        self.val_split_mode = resolve_val_split_mode(
+            getattr(cfg.data, "val_split_mode", "query_id")
         )
         self.row_renderer = RowTextRenderer(cfg.data)
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -171,13 +187,26 @@ class EmbeddingDataModule(LightningDataModule):
                     skipped_rows,
                 )
 
-        (
-            train_records,
-            val_records,
-            split_stats,
-        ) = self._split_records_by_offer_connected_components(all_records)
+        if self.val_split_mode == "query_id":
+            train_records, val_records, split_stats = self._split_records_by_query_id(
+                all_records
+            )
+        else:
+            (
+                train_records,
+                val_records,
+                split_stats,
+            ) = self._split_records_by_offer_connected_components(all_records)
 
         if not train_records and val_records:
+            if self.val_split_mode == "query_id":
+                raise ValueError(
+                    "Train split is empty after query-id splitting. "
+                    f"target_val_queries={split_stats['target_val_queries']} "
+                    f"selected_val_queries={split_stats['selected_val_queries']}. "
+                    "Set data.val_fraction=0.0 or reduce it below 1.0."
+                )
+
             raise ValueError(
                 "Train split is empty after offer-connected-component splitting. "
                 f"target_val_queries={split_stats['target_val_queries']} "
@@ -235,6 +264,7 @@ class EmbeddingDataModule(LightningDataModule):
             "shared_offers_between_train_and_val": len(train_offer_ids & val_offer_ids),
             "skipped_rows": skipped_rows,
             "eligible_train_queries": len(self.eligible_query_ids),
+            "val_split_mode": self.val_split_mode,
             **split_stats,
         }
 
@@ -380,19 +410,83 @@ class EmbeddingDataModule(LightningDataModule):
     def _build_record(self, row):
         return self.row_renderer.build_training_record(row)
 
-    def _split_records_by_offer_connected_components(self, records):
+    def _empty_split_stats(self):
+        return {
+            "target_val_queries": 0,
+            "selected_val_queries": 0,
+            "connected_components": 0,
+            "train_connected_components": 0,
+            "val_connected_components": 0,
+        }
+
+    def _compute_target_val_size(self, query_ids):
+        val_size = int(len(query_ids) * float(self.cfg.data.val_fraction))
+        if float(self.cfg.data.val_fraction) > 0 and val_size == 0 and query_ids:
+            val_size = 1
+
+        return val_size
+
+    def _split_records_by_query_id(self, records):
         if not records:
+            return [], [], self._empty_split_stats()
+
+        records_by_query = {}
+        query_ids = []
+        seen_query_ids = set()
+        train_records = []
+        val_records = []
+
+        for index, record in enumerate(records):
+            query_id = record["query_id"]
+            group_id = query_id or f"query_row:{index}"
+            records_by_query.setdefault(group_id, []).append(record)
+
+            if query_id and query_id not in seen_query_ids:
+                seen_query_ids.add(query_id)
+                query_ids.append(query_id)
+
+        randomizer = random.Random(self.cfg.seed)
+        randomizer.shuffle(query_ids)
+
+        val_size = self._compute_target_val_size(query_ids)
+        if val_size == 0:
             return (
-                [],
+                records,
                 [],
                 {
                     "target_val_queries": 0,
                     "selected_val_queries": 0,
-                    "connected_components": 0,
-                    "train_connected_components": 0,
+                    "connected_components": len(records_by_query),
+                    "train_connected_components": len(records_by_query),
                     "val_connected_components": 0,
                 },
             )
+
+        val_query_ids = set(query_ids[:val_size])
+
+        for group_id, group_records in records_by_query.items():
+            if group_id in val_query_ids:
+                val_records.extend(group_records)
+            else:
+                train_records.extend(group_records)
+
+        return (
+            train_records,
+            val_records,
+            {
+                "target_val_queries": val_size,
+                "selected_val_queries": len(val_query_ids),
+                "connected_components": len(records_by_query),
+                "train_connected_components": (
+                    len(records_by_query) - len(val_query_ids)
+                ),
+                "val_connected_components": len(val_query_ids),
+            },
+        )
+
+    def _split_records_by_offer_connected_components(self, records):
+        if not records:
+            return [], [], self._empty_split_stats()
 
         query_nodes = {}
         parent = {}
@@ -460,9 +554,7 @@ class EmbeddingDataModule(LightningDataModule):
         randomizer = random.Random(self.cfg.seed)
         randomizer.shuffle(query_ids)
 
-        val_size = int(len(query_ids) * float(self.cfg.data.val_fraction))
-        if float(self.cfg.data.val_fraction) > 0 and val_size == 0 and query_ids:
-            val_size = 1
+        val_size = self._compute_target_val_size(query_ids)
 
         if val_size == 0:
             return (
