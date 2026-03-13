@@ -499,6 +499,38 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
 
     @patch("embedding_train.data.pd.read_parquet")
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_setup_raises_clear_error_when_val_split_consumes_only_component(
+        self, from_pretrained, read_parquet
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        read_parquet.return_value = pd.DataFrame(
+            [
+                {
+                    "query_id": "q1",
+                    "offer_id_b64": "offer-shared",
+                    "query_term": "query one",
+                    "name": "shared offer",
+                    "label": "Exact",
+                },
+                {
+                    "query_id": "q2",
+                    "offer_id_b64": "offer-shared",
+                    "query_term": "query two",
+                    "name": "shared offer",
+                    "label": "Exact",
+                },
+            ]
+        )
+        datamodule = EmbeddingDataModule(build_cfg(val_fraction=0.5))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Train split is empty after offer-connected-component splitting",
+        ):
+            datamodule.setup()
+
+    @patch("embedding_train.data.pd.read_parquet")
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
     def test_anchor_query_mode_raises_when_no_query_has_enough_positives(
         self, from_pretrained, read_parquet
     ):

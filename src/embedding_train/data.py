@@ -177,6 +177,17 @@ class EmbeddingDataModule(LightningDataModule):
             split_stats,
         ) = self._split_records_by_offer_connected_components(all_records)
 
+        if not train_records and val_records:
+            raise ValueError(
+                "Train split is empty after offer-connected-component splitting. "
+                f"target_val_queries={split_stats['target_val_queries']} "
+                f"selected_val_queries={split_stats['selected_val_queries']} "
+                f"connected_components={split_stats['connected_components']}. "
+                "A non-zero data.val_fraction moved every connected component into "
+                "validation. Set data.val_fraction=0.0 or provide data with more "
+                "than one disconnected query-offer component."
+            )
+
         self.train_dataset = PairDataset(train_records)
         self.val_dataset = PairDataset(val_records)
         self._build_train_metadata(train_records)
