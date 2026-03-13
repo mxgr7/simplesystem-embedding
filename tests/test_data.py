@@ -40,6 +40,8 @@ def build_cfg(**data_overrides):
             "data": {
                 "path": "/tmp/dataset.parquet",
                 "positive_label": "Exact",
+                "query_id_column": "query_id",
+                "offer_id_column": "offer_id_b64",
                 "batch_size": 16,
                 "train_batching_mode": "random_pairs",
                 "n_pos_samples_per_query": 2,
@@ -155,6 +157,35 @@ class RowTextRendererTests(unittest.TestCase):
                 "raw_label": "Exact",
             },
         )
+        self.assertEqual(datamodule._build_record(row), expected_record)
+
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_record_builder_supports_configurable_id_columns(self, from_pretrained):
+        from_pretrained.return_value = _TokenizerStub()
+        cfg = build_cfg(
+            query_id_column="search_id",
+            offer_id_column="listing_id",
+        )
+        renderer = RowTextRenderer(cfg.data)
+        datamodule = EmbeddingDataModule(cfg)
+        row = {
+            "search_id": "q-custom",
+            "listing_id": "o-custom",
+            "query_term": "Metric Bolt",
+            "name": "Hex Bolt",
+            "label": "Exact",
+        }
+
+        expected_record = {
+            "query_id": "q-custom",
+            "offer_id": "o-custom",
+            "query_text": "Metric Bolt",
+            "offer_text": "Hex Bolt",
+            "label": 1.0,
+            "raw_label": "Exact",
+        }
+
+        self.assertEqual(renderer.build_training_record(row), expected_record)
         self.assertEqual(datamodule._build_record(row), expected_record)
 
     @patch("embedding_train.data.pd.read_parquet")

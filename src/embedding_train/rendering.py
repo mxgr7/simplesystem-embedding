@@ -11,6 +11,13 @@ from embedding_train.text import (
 class RowTextRenderer:
     def __init__(self, data_cfg):
         self.data_cfg = data_cfg
+        self.query_id_column = (
+            str(data_cfg.get("query_id_column", "query_id")).strip() or "query_id"
+        )
+        self.offer_id_column = (
+            str(data_cfg.get("offer_id_column", "offer_id_b64")).strip()
+            or "offer_id_b64"
+        )
         self.query_template = build_template(data_cfg.query_template)
         self.offer_template = build_template(data_cfg.offer_template)
 
@@ -23,8 +30,8 @@ class RowTextRenderer:
             return None
 
         return {
-            "query_id": normalize_text(context.get("query_id")),
-            "offer_id": normalize_text(context.get("offer_id_b64")),
+            "query_id": normalize_text(context.get(self.query_id_column)),
+            "offer_id": normalize_text(context.get(self.offer_id_column)),
             "query_text": query_text,
             "offer_text": offer_text,
             "label": (
