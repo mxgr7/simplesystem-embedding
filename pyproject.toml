@@ -31,6 +31,7 @@ dependencies = [
 embedding-train = "embedding_train.train:main"
 embedding-infer = "embedding_train.infer:main"
 embedding-eval = "embedding_train.eval:main"
+embedding-catalog-benchmark = "embedding_train.catalog_benchmark:main"
 embedding-index-build = "embedding_train.index_build:main"
 embedding-index-search = "embedding_train.index_search:main"
 

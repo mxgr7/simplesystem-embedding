@@ -90,6 +90,24 @@ Notes:
 - Retrieval mode reports exact-match search metrics like `exact_success@1`, `exact_mrr`, and `exact_recall@k`
 - Retrieval mode expects the built index metadata to include `offer_id_b64`; the default index build settings already keep it when present in the input
 
+## Benchmark Catalog Search
+
+Use the exhaustive benchmark CLI when you want to embed the queries and offers from one labeled parquet file, score every query against the full deduplicated catalog exactly, and report ranking metrics.
+
+```bash
+uv run embedding-catalog-benchmark --checkpoint checkpoints/best.ckpt --input data/queries_offers_eval.parquet
+uv run embedding-catalog-benchmark --checkpoint checkpoints/best.ckpt --input data/queries_offers_eval.parquet --similarity cosine --ks 1,5,10,100
+uv run embedding-catalog-benchmark --checkpoint checkpoints/best.ckpt --input data/queries_offers_eval.parquet --relevant-labels Exact,Substitute
+```
+
+Notes:
+
+- The benchmark uses exact exhaustive scoring over the whole catalog, not ANN search
+- The input file should contain query fields, offer fields, and `label` in the same row format as `queries_offers_eval.parquet`
+- `nDCG@k` uses the graded gains from the labeled data: `Exact=1.0`, `Substitute=0.1`, `Complement=0.01`, `Irrelevant=0.0`
+- `Recall@k`, `MRR`, and `Precision@k` treat `Exact` as relevant by default; override with `--relevant-labels`
+- The catalog is built by deduplicating the offer id column from the same input file
+
 ## Build Index
 
 Build a FAISS inner-product index over offer embeddings rendered with the same `offer_template` used for training and evaluation. The command writes an artifact directory containing `index.faiss`, `metadata.parquet`, and `manifest.json`.

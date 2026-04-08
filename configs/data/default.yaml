@@ -17,10 +17,10 @@ clean_html: true
 limit_rows: null
 
 query_template: |-
-  {{ query_term }}
+  query: {{ query_term }}
 
 offer_template: |-
-  Article Name: {{ name }}
+  passage: Article Name: {{ name }}
   {% if ean %} EAN: {{ ean }}{% endif %}
   {% if article_number %} Article Number: {{ article_number }}{% endif %}
   {% if manufacturer_article_number %} Article Number (Manufacturer): {{ manufacturer_article_number }}{% endif %}

@@ -9,6 +9,7 @@ RELEVANCE_GAINS = {
 }
 
 EXACT_LABEL = "Exact"
+DEFAULT_BINARY_RELEVANT_LABELS = (EXACT_LABEL,)
 
 
 def compute_ranking_metrics(rows, ks=(1, 5, 10)):
@@ -77,9 +78,29 @@ def compute_exact_retrieval_metrics(
     evaluated_query_ids=None,
     eligible_query_ids=None,
 ):
+    return compute_binary_retrieval_metrics(
+        rows,
+        ks=ks,
+        evaluated_query_ids=evaluated_query_ids,
+        eligible_query_ids=eligible_query_ids,
+        relevant_labels=DEFAULT_BINARY_RELEVANT_LABELS,
+        metric_prefix="exact",
+    )
+
+
+def compute_binary_retrieval_metrics(
+    rows,
+    ks=(1, 5, 10),
+    evaluated_query_ids=None,
+    eligible_query_ids=None,
+    relevant_labels=None,
+    metric_prefix="",
+):
     grouped = {}
     for row in rows:
         grouped.setdefault(row["query_id"], []).append(row)
+
+    relevant_label_set = resolve_relevant_label_set(relevant_labels)
 
     if evaluated_query_ids is None:
         evaluated_query_ids = list(grouped)
@@ -90,7 +111,7 @@ def compute_exact_retrieval_metrics(
         eligible_query_ids = [
             query_id
             for query_id, items in grouped.items()
-            if any(item.get("raw_label") == EXACT_LABEL for item in items)
+            if any(item.get("raw_label") in relevant_label_set for item in items)
         ]
     else:
         eligible_query_ids = list(dict.fromkeys(eligible_query_ids))
@@ -110,7 +131,7 @@ def compute_exact_retrieval_metrics(
         first_exact_rank = None
 
         for index, item in enumerate(ranked_items, start=1):
-            if item.get("raw_label") == EXACT_LABEL:
+            if item.get("raw_label") in relevant_label_set:
                 first_exact_rank = index
                 break
 
@@ -126,20 +147,86 @@ def compute_exact_retrieval_metrics(
     metrics = {
         "eligible_queries": float(eligible_queries),
         "evaluated_queries": float(len(evaluated_query_ids)),
-        "exact_mrr": 0.0,
+        resolve_mrr_metric_name(metric_prefix): 0.0,
     }
 
     for k in ks:
-        metric_name = resolve_exact_metric_name(k)
+        metric_name = resolve_recall_metric_name(k, metric_prefix)
         metrics[metric_name] = 0.0
 
     if eligible_queries == 0:
         return metrics
 
-    metrics["exact_mrr"] = reciprocal_rank_total / float(eligible_queries)
+    metrics[resolve_mrr_metric_name(metric_prefix)] = reciprocal_rank_total / float(
+        eligible_queries
+    )
     for k in ks:
-        metric_name = resolve_exact_metric_name(k)
+        metric_name = resolve_recall_metric_name(k, metric_prefix)
         metrics[metric_name] = success_totals[k] / float(eligible_queries)
+
+    return metrics
+
+
+def compute_precision_metrics(
+    rows,
+    ks=(1, 5, 10),
+    evaluated_query_ids=None,
+    eligible_query_ids=None,
+    relevant_labels=None,
+    metric_prefix="",
+):
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["query_id"], []).append(row)
+
+    relevant_label_set = resolve_relevant_label_set(relevant_labels)
+
+    if evaluated_query_ids is None:
+        evaluated_query_ids = list(grouped)
+    else:
+        evaluated_query_ids = list(dict.fromkeys(evaluated_query_ids))
+
+    if eligible_query_ids is None:
+        eligible_query_ids = [
+            query_id
+            for query_id, items in grouped.items()
+            if any(item.get("raw_label") in relevant_label_set for item in items)
+        ]
+    else:
+        eligible_query_ids = list(dict.fromkeys(eligible_query_ids))
+
+    eligible_query_id_set = set(eligible_query_ids)
+    evaluated_eligible_query_ids = [
+        query_id
+        for query_id in evaluated_query_ids
+        if query_id in eligible_query_id_set
+    ]
+
+    precision_totals = {k: 0.0 for k in ks}
+    eligible_queries = len(evaluated_eligible_query_ids)
+    metrics = {
+        "eligible_queries": float(eligible_queries),
+        "evaluated_queries": float(len(evaluated_query_ids)),
+    }
+
+    for k in ks:
+        metrics[resolve_precision_metric_name(k, metric_prefix)] = 0.0
+
+    if eligible_queries == 0:
+        return metrics
+
+    for query_id in evaluated_eligible_query_ids:
+        ranked_items = sort_ranked_items(grouped.get(query_id, []))
+        for k in ks:
+            relevant_hits = 0.0
+            for item in ranked_items[: int(k)]:
+                if item.get("raw_label") in relevant_label_set:
+                    relevant_hits += 1.0
+            precision_totals[k] += relevant_hits / float(int(k))
+
+    for k in ks:
+        metric_name = resolve_precision_metric_name(k, metric_prefix)
+        metrics[metric_name] = precision_totals[k] / float(eligible_queries)
 
     return metrics
 
@@ -156,6 +243,39 @@ def resolve_exact_metric_name(k):
         return "exact_success@1"
 
     return f"exact_recall@{int(k)}"
+
+
+def resolve_recall_metric_name(k, metric_prefix=""):
+    if metric_prefix == "exact":
+        return resolve_exact_metric_name(k)
+
+    metric_name = f"recall@{int(k)}"
+    if not metric_prefix:
+        return metric_name
+    return f"{metric_prefix}_{metric_name}"
+
+
+def resolve_mrr_metric_name(metric_prefix=""):
+    if metric_prefix == "exact":
+        return "exact_mrr"
+
+    if not metric_prefix:
+        return "mrr"
+    return f"{metric_prefix}_mrr"
+
+
+def resolve_precision_metric_name(k, metric_prefix=""):
+    metric_name = f"precision@{int(k)}"
+    if not metric_prefix:
+        return metric_name
+    return f"{metric_prefix}_{metric_name}"
+
+
+def resolve_relevant_label_set(relevant_labels):
+    if relevant_labels is None:
+        relevant_labels = DEFAULT_BINARY_RELEVANT_LABELS
+
+    return {str(label).strip() for label in relevant_labels if str(label).strip()}
 
 
 def sort_ranked_items(items):

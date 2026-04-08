@@ -2,7 +2,9 @@ import math
 import unittest
 
 from embedding_train.metrics import (
+    compute_binary_retrieval_metrics,
     compute_exact_retrieval_metrics,
+    compute_precision_metrics,
     compute_ranking_metrics,
 )
 
@@ -102,6 +104,49 @@ class ComputeExactRetrievalMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["exact_recall@5"], 0.0)
         self.assertEqual(metrics["exact_recall@10"], 0.0)
         self.assertEqual(metrics["exact_mrr"], 0.0)
+
+
+class ComputeBinaryMetricHelpersTests(unittest.TestCase):
+    def test_computes_precision_at_k_for_exact_relevance(self):
+        rows = [
+            {"query_id": "q1", "rank": 1, "raw_label": "Substitute"},
+            {"query_id": "q1", "rank": 2, "raw_label": "Exact"},
+            {"query_id": "q2", "rank": 1, "raw_label": "Exact"},
+            {"query_id": "q2", "rank": 2, "raw_label": "Irrelevant"},
+            {"query_id": "q3", "rank": 1, "raw_label": "Substitute"},
+        ]
+
+        metrics = compute_precision_metrics(
+            rows,
+            ks=(1, 2),
+            evaluated_query_ids=["q1", "q2", "q3"],
+            eligible_query_ids=["q1", "q2"],
+        )
+
+        self.assertEqual(metrics["evaluated_queries"], 3.0)
+        self.assertEqual(metrics["eligible_queries"], 2.0)
+        self.assertTrue(math.isclose(metrics["precision@1"], 0.5))
+        self.assertTrue(math.isclose(metrics["precision@2"], 0.5))
+
+    def test_supports_custom_relevant_labels_for_binary_retrieval(self):
+        rows = [
+            {"query_id": "q1", "rank": 1, "raw_label": "Substitute"},
+            {"query_id": "q1", "rank": 2, "raw_label": "Exact"},
+            {"query_id": "q2", "rank": 1, "raw_label": "Complement"},
+            {"query_id": "q2", "rank": 2, "raw_label": "Irrelevant"},
+        ]
+
+        metrics = compute_binary_retrieval_metrics(
+            rows,
+            ks=(1, 2),
+            relevant_labels=("Exact", "Substitute"),
+        )
+
+        self.assertEqual(metrics["evaluated_queries"], 2.0)
+        self.assertEqual(metrics["eligible_queries"], 1.0)
+        self.assertTrue(math.isclose(metrics["recall@1"], 1.0))
+        self.assertTrue(math.isclose(metrics["recall@2"], 1.0))
+        self.assertTrue(math.isclose(metrics["mrr"], 1.0))
 
 
 if __name__ == "__main__":
