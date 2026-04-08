@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 
 import faiss
@@ -7,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from dotenv import load_dotenv
+from omegaconf import OmegaConf
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -24,6 +26,7 @@ from embedding_train.faiss_index import (
     minimum_training_vectors,
     resolve_faiss_index_type,
 )
+from embedding_train.config import load_base_config
 from embedding_train.index_artifact import prepare_index_directory, write_manifest
 from embedding_train.infer import (
     IncrementalParquetWriter,
@@ -32,6 +35,7 @@ from embedding_train.infer import (
     parse_copy_columns,
     resolve_device,
 )
+from embedding_train.model import EmbeddingModule
 from embedding_train.model import load_embedding_module_from_checkpoint
 from embedding_train.rendering import RowTextRenderer
 
@@ -48,6 +52,7 @@ def build_progress(total_rows):
         ),
         TimeElapsedColumn(),
         console=Console(file=sys.stderr),
+        auto_refresh=False,
         transient=False,
     )
 
@@ -61,13 +66,23 @@ def update_progress(
         indexed_rows=indexed_rows,
         skipped_rows=skipped_rows,
     )
+    progress.refresh()
 
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Build a FAISS offer index from a Parquet dataset using the training offer template."
     )
-    parser.add_argument("--checkpoint", required=True, help="Lightning checkpoint path")
+    parser.add_argument(
+        "--checkpoint",
+        default="",
+        help="Optional Lightning checkpoint path. If omitted, uses the base pretrained model.",
+    )
+    parser.add_argument(
+        "--model-name",
+        default="",
+        help="Optional pretrained model name override when --checkpoint is omitted.",
+    )
     parser.add_argument("--input", required=True, help="Input Parquet path")
     parser.add_argument(
         "--output",
@@ -262,15 +277,145 @@ def flush_pending_batches(
     return flushed_rows
 
 
+def run_flat_index_build(
+    args,
+    model,
+    cfg,
+    device,
+    parquet_file,
+    copy_columns,
+):
+    debug_logging = os.environ.get("DEBUG_INDEX_BUILD") == "1"
+    artifact_paths = prepare_index_directory(args.output, args.overwrite)
+    tokenizer = build_tokenizer(cfg.model.model_name)
+    renderer = RowTextRenderer(cfg.data)
+    if debug_logging:
+        print("flat_build:start", flush=True)
+
+    processed_rows = 0
+    skipped_rows = 0
+    row_number = 0
+    next_faiss_id = 0
+    prepared_row_chunks = []
+    embedding_chunks = []
+
+    for batch in parquet_file.iter_batches(batch_size=int(args.read_batch_size)):
+        rows = batch.to_pylist()
+        if args.limit_rows is not None:
+            remaining_rows = int(args.limit_rows) - processed_rows
+            if remaining_rows <= 0:
+                break
+            rows = rows[:remaining_rows]
+
+        processed_rows += len(rows)
+        if not rows:
+            break
+
+        (
+            prepared_rows,
+            offer_texts,
+            row_number,
+            next_faiss_id,
+            batch_skipped_rows,
+        ) = prepare_offer_rows(
+            rows,
+            renderer,
+            copy_columns,
+            row_number,
+            next_faiss_id,
+        )
+        skipped_rows += batch_skipped_rows
+        if not prepared_rows:
+            continue
+
+        if debug_logging:
+            print(f"flat_build:prepared={len(prepared_rows)}", flush=True)
+
+        embeddings = encode_texts(
+            model,
+            tokenizer,
+            offer_texts,
+            int(cfg.data.max_offer_length),
+            int(args.encode_batch_size),
+            device,
+        )
+        if debug_logging:
+            print(f"flat_build:encoded={tuple(embeddings.shape)}", flush=True)
+        prepared_row_chunks.append(prepared_rows)
+        embedding_chunks.append(embeddings.numpy().astype("float32", copy=False))
+
+    if not prepared_row_chunks or not embedding_chunks:
+        raise ValueError("No non-empty offers were available to index")
+
+    prepared_rows = [row for chunk in prepared_row_chunks for row in chunk]
+    embedding_matrix = concatenate_embedding_chunks(embedding_chunks)
+    embedding_dim = int(embedding_matrix.shape[1])
+    if debug_logging:
+        print(f"flat_build:concatenated={embedding_matrix.shape}", flush=True)
+    index = create_faiss_index(embedding_dim, {"index_type": "flat"})
+    faiss_ids = np.asarray([row["faiss_id"] for row in prepared_rows], dtype="int64")
+    index.add_with_ids(embedding_matrix, faiss_ids)
+    if debug_logging:
+        print("flat_build:indexed", flush=True)
+
+    metadata_table = build_metadata_table(
+        prepared_rows,
+        copy_columns,
+        parquet_file.schema_arrow,
+    )
+    pq.write_table(
+        metadata_table,
+        artifact_paths["metadata_file"],
+        compression=args.compression,
+    )
+    if debug_logging:
+        print("flat_build:metadata_written", flush=True)
+    faiss.write_index(index, str(artifact_paths["index_file"]))
+    if debug_logging:
+        print("flat_build:index_written", flush=True)
+    write_manifest(
+        artifact_paths["manifest_file"],
+        {
+            "checkpoint": str(args.checkpoint),
+            "copy_columns": copy_columns,
+            "embedding_dim": embedding_dim,
+            "index_file": artifact_paths["index_file"].name,
+            "index_type": "flat",
+            "index_config": build_index_config(args),
+            "indexed_rows": len(prepared_rows),
+            "input": str(args.input),
+            "metadata_file": artifact_paths["metadata_file"].name,
+            "metric": "inner_product",
+            "processed_rows": processed_rows,
+            "query_model_name": str(cfg.model.model_name),
+            "rendered_text_column": "offer_text",
+            "skipped_rows": skipped_rows,
+        },
+    )
+    if debug_logging:
+        print("flat_build:manifest_written", flush=True)
+
+    print(
+        "Index build complete:",
+        {
+            "device": str(device),
+            "index_type": "flat",
+            "processed_rows": processed_rows,
+            "indexed_rows": len(prepared_rows),
+            "skipped_rows": skipped_rows,
+            "embedding_dim": embedding_dim,
+            "output": str(artifact_paths["index_dir"]),
+        },
+    )
+
+
 def run_index_build(args):
     device = resolve_device(args.device)
     index_config = build_index_config(args)
     index_type = resolve_faiss_index_type(index_config["index_type"])
     requires_training = index_requires_training(index_type)
 
-    model, cfg = load_embedding_module_from_checkpoint(
-        args.checkpoint, map_location="cpu"
-    )
+    model, cfg = load_index_model(args)
     model = model.to(device)
     model.eval()
 
@@ -281,6 +426,17 @@ def run_index_build(args):
     if args.limit_rows is not None:
         total_rows = min(total_rows, int(args.limit_rows))
     copy_columns = parse_copy_columns(args.copy_columns, parquet_file.schema.names)
+
+    if index_type == "flat":
+        return run_flat_index_build(
+            args,
+            model,
+            cfg,
+            device,
+            parquet_file,
+            copy_columns,
+        )
+
     artifact_paths = prepare_index_directory(args.output, args.overwrite)
     metadata_writer = IncrementalParquetWriter(
         artifact_paths["metadata_file"],
@@ -477,6 +633,24 @@ def main(argv=None):
     torch.set_float32_matmul_precision("high")
     args = build_arg_parser().parse_args(argv)
     run_index_build(args)
+
+
+def load_index_model(args):
+    if args.checkpoint:
+        return load_embedding_module_from_checkpoint(
+            args.checkpoint, map_location="cpu"
+        )
+
+    cfg = load_base_config()
+    if args.model_name:
+        cfg = OmegaConf.merge(
+            cfg,
+            OmegaConf.create({"model": {"model_name": args.model_name}}),
+        )
+
+    model = EmbeddingModule(cfg)
+    model.eval()
+    return model, cfg
 
 
 if __name__ == "__main__":

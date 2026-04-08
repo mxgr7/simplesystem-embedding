@@ -149,6 +149,42 @@ class IndexBuildCliTests(unittest.TestCase):
             self.assertIn("Indexing", stderr.getvalue())
 
     @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.index_build.EmbeddingModule")
+    @patch("embedding_train.index_build.load_base_config")
+    def test_builds_index_without_checkpoint(
+        self,
+        load_base_config,
+        embedding_module,
+        from_pretrained,
+    ):
+        load_base_config.return_value = build_cfg()
+        embedding_module.return_value = _IndexModelStub()
+        from_pretrained.return_value = _TokenizerStub()
+
+        with TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "offers.parquet"
+            output_path = Path(tmp_dir) / "offer-index"
+            self.write_offer_table(input_path)
+
+            args = build_arg_parser().parse_args(
+                [
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                    "--model-name",
+                    "custom-stub-model",
+                ]
+            )
+
+            run_index_build(args)
+            manifest = json.loads((output_path / "manifest.json").read_text())
+
+        self.assertEqual(manifest["checkpoint"], "")
+        self.assertEqual(manifest["query_model_name"], "custom-stub-model")
+        embedding_module.assert_called_once()
+
+    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
     @patch("embedding_train.index_build.load_embedding_module_from_checkpoint")
     def test_persists_ann_index_configuration(self, load_checkpoint, from_pretrained):
         load_checkpoint.return_value = (_IndexModelStub(), build_cfg())

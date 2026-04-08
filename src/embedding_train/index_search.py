@@ -6,10 +6,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from dotenv import load_dotenv
+from omegaconf import OmegaConf
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from embedding_train.config import load_base_config
 from embedding_train.faiss_index import apply_search_parameters
 from embedding_train.index_artifact import read_manifest, resolve_index_paths
 from embedding_train.infer import (
@@ -19,6 +21,7 @@ from embedding_train.infer import (
     parse_copy_columns,
     resolve_device,
 )
+from embedding_train.model import EmbeddingModule
 from embedding_train.model import load_embedding_module_from_checkpoint
 from embedding_train.rendering import RowTextRenderer
 from embedding_train.text import normalize_text
@@ -28,7 +31,16 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Search a built FAISS offer index using either Parquet queries or raw query text."
     )
-    parser.add_argument("--checkpoint", required=True, help="Lightning checkpoint path")
+    parser.add_argument(
+        "--checkpoint",
+        default="",
+        help="Optional Lightning checkpoint path. If omitted, uses the base pretrained model.",
+    )
+    parser.add_argument(
+        "--model-name",
+        default="",
+        help="Optional pretrained model name override when --checkpoint is omitted.",
+    )
     parser.add_argument(
         "--index",
         required=True,
@@ -272,9 +284,7 @@ def run_index_search(args):
         ef_search=args.ef_search,
     )
 
-    model, cfg = load_embedding_module_from_checkpoint(
-        args.checkpoint, map_location="cpu"
-    )
+    model, cfg = load_search_model(args)
     model = model.to(device)
     model.eval()
 
@@ -425,6 +435,24 @@ def main(argv=None):
     torch.set_float32_matmul_precision("high")
     args = build_arg_parser().parse_args(argv)
     run_index_search(args)
+
+
+def load_search_model(args):
+    if args.checkpoint:
+        return load_embedding_module_from_checkpoint(
+            args.checkpoint, map_location="cpu"
+        )
+
+    cfg = load_base_config()
+    if args.model_name:
+        cfg = OmegaConf.merge(
+            cfg,
+            OmegaConf.create({"model": {"model_name": args.model_name}}),
+        )
+
+    model = EmbeddingModule(cfg)
+    model.eval()
+    return model, cfg
 
 
 if __name__ == "__main__":

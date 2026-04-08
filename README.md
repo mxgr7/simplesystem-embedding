@@ -113,10 +113,11 @@ Notes:
 Build a FAISS inner-product index over offer embeddings rendered with the same `offer_template` used for training and evaluation. The command writes an artifact directory containing `index.faiss`, `metadata.parquet`, and `manifest.json`.
 
 ```bash
+uv run embedding-index-build --input data/offers.parquet --output data/offer-index
 uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index
-uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index --index-type ivf_flat --nlist 4096 --train-sample-size 50000 --nprobe 32
+uv run embedding-index-build --model-name intfloat/multilingual-e5-base --input data/offers.parquet --output data/offer-index --index-type ivf_flat --nlist 4096 --train-sample-size 50000 --nprobe 32
 uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index-pq --index-type ivf_pq --nlist 4096 --train-sample-size 100000 --pq-m 16 --pq-bits 8 --nprobe 32
-uv run embedding-index-build --checkpoint checkpoints/best.ckpt --input data/offers.parquet --output data/offer-index-hnsw --index-type hnsw --hnsw-m 32 --ef-construction 200 --ef-search 64
+uv run embedding-index-build --input data/offers.parquet --output data/offer-index-hnsw --index-type hnsw --hnsw-m 32 --ef-construction 200 --ef-search 64
 ```
 
 Helpful flags:
@@ -128,6 +129,8 @@ Helpful flags:
 - `--copy-columns offer_id_b64,name` to retain extra offer metadata alongside the index
 - `--read-batch-size 4096` and `--encode-batch-size 256` to tune throughput
 - `--limit-rows 10000` to build a smaller test index
+- `--checkpoint` to use a fine-tuned model, or omit it to use the default base model
+- `--model-name` to override the pretrained base model when `--checkpoint` is omitted
 - `--overwrite` to replace an existing artifact directory
 
 ## Search Index
@@ -135,10 +138,10 @@ Helpful flags:
 Search a built index with either Parquet queries rendered through the same `query_template` used for training and evaluation, or with raw query text.
 
 ```bash
-uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index --input data/queries.parquet --output data/search_results.parquet --top-k 10
-uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index --query-text "hex bolt" --top-k 5
+uv run embedding-index-search --index data/offer-index --input data/queries.parquet --output data/search_results.parquet --top-k 10
+uv run embedding-index-search --index data/offer-index --query-text "hex bolt" --top-k 5
 uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index --input data/queries.parquet --output data/search_results.parquet --top-k 10 --nprobe 64
-uv run embedding-index-search --checkpoint checkpoints/best.ckpt --index data/offer-index-hnsw --query-text "hex bolt" --top-k 5 --ef-search 128
+uv run embedding-index-search --model-name intfloat/multilingual-e5-base --index data/offer-index-hnsw --query-text "hex bolt" --top-k 5 --ef-search 128
 ```
 
 Helpful flags:
@@ -148,4 +151,6 @@ Helpful flags:
 - `--copy-columns query_id` to retain query metadata in Parquet search results
 - `--output data/search_results.parquet` to persist raw-text searches instead of printing them
 - `--limit-rows 1000` to search only part of a Parquet query file
+- `--checkpoint` to use a fine-tuned query encoder, or omit it to use the default base model
+- `--model-name` to override the pretrained base model when `--checkpoint` is omitted
 - `--overwrite` to replace an existing search output Parquet file

@@ -12,7 +12,12 @@ from omegaconf import OmegaConf
 
 from embedding_train.index_build import build_arg_parser as build_index_arg_parser
 from embedding_train.index_build import run_index_build
-from embedding_train.index_search import build_arg_parser, main, run_index_search
+from embedding_train.index_search import (
+    build_arg_parser,
+    load_search_model,
+    main,
+    run_index_search,
+)
 
 
 TOKEN_IDS = {
@@ -229,6 +234,33 @@ class IndexSearchCliTests(unittest.TestCase):
         self.assertIn("FAISS Search Results", output)
         self.assertIn("bolt", output)
         self.assertIn("o1", output)
+
+    @patch("embedding_train.index_search.EmbeddingModule")
+    @patch("embedding_train.index_search.load_base_config")
+    def test_loads_search_model_without_checkpoint(
+        self,
+        load_base_config,
+        embedding_module,
+    ):
+        load_base_config.return_value = build_cfg()
+        embedding_module.return_value = _IndexModelStub()
+
+        args = build_arg_parser().parse_args(
+            [
+                "--index",
+                "/tmp/offer-index",
+                "--query-text",
+                "bolt",
+                "--model-name",
+                "custom-stub-model",
+            ]
+        )
+
+        model, cfg = load_search_model(args)
+
+        self.assertIs(model, embedding_module.return_value)
+        self.assertEqual(cfg.model.model_name, "custom-stub-model")
+        embedding_module.assert_called_once()
 
     @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
     @patch("embedding_train.index_search.load_embedding_module_from_checkpoint")
