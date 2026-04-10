@@ -1,7 +1,7 @@
 import json
 import io
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -111,7 +111,7 @@ class IndexBuildCliTests(unittest.TestCase):
             input_path = Path(tmp_dir) / "offers.parquet"
             output_path = Path(tmp_dir) / "offer-index"
             self.write_offer_table(input_path)
-            stderr = io.StringIO()
+            stdout = io.StringIO()
 
             args = build_arg_parser().parse_args(
                 [
@@ -124,7 +124,7 @@ class IndexBuildCliTests(unittest.TestCase):
                 ]
             )
 
-            with redirect_stderr(stderr):
+            with redirect_stdout(stdout):
                 run_index_build(args)
 
             metadata_rows = pq.read_table(output_path / "metadata.parquet").to_pylist()
@@ -146,7 +146,7 @@ class IndexBuildCliTests(unittest.TestCase):
             self.assertEqual(manifest["indexed_rows"], 3)
             self.assertEqual(manifest["skipped_rows"], 1)
             self.assertEqual(manifest["index_type"], "flat")
-            self.assertIn("Indexing", stderr.getvalue())
+            self.assertIn("Index build complete", stdout.getvalue())
 
     @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
     @patch("embedding_train.index_build.EmbeddingModule")

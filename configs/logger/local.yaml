@@ -1,0 +1,6 @@
+tracking_uri: file:///tmp/mlruns
+experiment_name: simplesystem-embedding
+run_name: null
+log_model: false
+tags:
+  project: embedding-train

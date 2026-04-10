@@ -51,16 +51,16 @@ class TrainCallbackTests(unittest.TestCase):
         )
         self.assertEqual(
             checkpoint_callback.filename,
-            "best-step={step}-val_by_batch_exact_mrr={val/by_batch/exact_mrr:.4f}",
+            "best-step={step}-val_full_catalog_ndcg_at_5={val/full_catalog/ndcg_at_5:.4f}",
         )
-        self.assertEqual(checkpoint_callback.monitor, "val/by_batch/exact_mrr")
+        self.assertEqual(checkpoint_callback.monitor, "val/full_catalog/ndcg_at_5")
         self.assertEqual(checkpoint_callback.mode, "max")
         self.assertEqual(checkpoint_callback.save_top_k, 3)
         self.assertTrue(checkpoint_callback.save_last)
         self.assertFalse(checkpoint_callback.auto_insert_metric_name)
         self.assertEqual(
             checkpoint_callback.CHECKPOINT_NAME_LAST,
-            "last-step={step}-val_by_batch_exact_mrr={val/by_batch/exact_mrr:.4f}",
+            "last-step={step}-val_full_catalog_ndcg_at_5={val/full_catalog/ndcg_at_5:.4f}",
         )
 
     def test_build_callbacks_includes_learning_rate_monitor(self):
@@ -133,6 +133,7 @@ class TrainCallbackTests(unittest.TestCase):
                     "limit_train_batches": 1.0,
                     "limit_val_batches": 1.0,
                     "val_check_interval": 1000,
+                    "validate_before_training": False,
                     "resume_from_checkpoint": "checkpoints/run-001/last.ckpt",
                 },
             }
@@ -146,6 +147,7 @@ class TrainCallbackTests(unittest.TestCase):
         build_logger.return_value = logger
         data_module_cls.return_value = datamodule
         module_cls.return_value = model
+        datamodule.dataset_stats = {}
 
         run.__wrapped__(cfg)
 

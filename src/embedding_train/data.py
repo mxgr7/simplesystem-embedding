@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
 from embedding_train.batching import (
+    HARD_NEGATIVE_LABEL,
     AnchorQueryBatchBuilder,
     AnchorQueryBatchDataset,
     RandomQueryPoolBuilder,
@@ -111,6 +112,7 @@ class EmbeddingDataModule(LightningDataModule):
         self.dataset_stats = {}
         self.positive_records_by_query = {}
         self.negative_records_by_query = {}
+        self.hard_negative_records_by_query = {}
         self.eligible_query_ids = []
         self.synthetic_negative_offer_pool = []
         self._validate_batching_config()
@@ -264,6 +266,11 @@ class EmbeddingDataModule(LightningDataModule):
             "shared_offers_between_train_and_val": len(train_offer_ids & val_offer_ids),
             "skipped_rows": skipped_rows,
             "eligible_train_queries": len(self.eligible_query_ids),
+            "hard_negative_queries": len(self.hard_negative_records_by_query),
+            "hard_negative_records": sum(
+                len(records)
+                for records in self.hard_negative_records_by_query.values()
+            ),
             "val_split_mode": self.val_split_mode,
             **split_stats,
         }
@@ -388,6 +395,7 @@ class EmbeddingDataModule(LightningDataModule):
             n_pos_samples_per_query=int(self.cfg.data.n_pos_samples_per_query),
             n_neg_samples_per_query=int(self.cfg.data.n_neg_samples_per_query),
             seed=int(self.cfg.seed),
+            hard_negative_records_by_query=self.hard_negative_records_by_query,
         )
         train_rows = len(self.train_dataset)
         batch_size = int(self.cfg.data.batch_size)
@@ -406,6 +414,7 @@ class EmbeddingDataModule(LightningDataModule):
             n_pos_samples_per_query=int(self.cfg.data.n_pos_samples_per_query),
             n_neg_samples_per_query=int(self.cfg.data.n_neg_samples_per_query),
             seed=int(self.cfg.seed),
+            hard_negative_records_by_query=self.hard_negative_records_by_query,
         )
         return PairDataset(pool_builder.build_pool())
 
@@ -639,6 +648,9 @@ class EmbeddingDataModule(LightningDataModule):
         self.negative_records_by_query = negative_records_by_query
         self.eligible_query_ids = eligible_query_ids
         self.synthetic_negative_offer_pool = synthetic_negative_offer_pool
+        self.hard_negative_records_by_query = self._load_hard_negatives(
+            positive_records_by_query
+        )
 
         if (
             self.train_batching_mode in {"anchor_query", "random_query_pool"}
@@ -648,3 +660,49 @@ class EmbeddingDataModule(LightningDataModule):
                 "No train query has at least "
                 f"n_pos_samples_per_query={n_pos_samples_per_query} positive rows"
             )
+
+    def _load_hard_negatives(self, positive_records_by_query):
+        hard_negatives_path = getattr(self.cfg.data, "hard_negatives_path", None)
+        if not hard_negatives_path:
+            return {}
+
+        frame = pd.read_parquet(hard_negatives_path)
+        required_columns = {"query_id", "offer_id", "offer_text"}
+        missing = required_columns - set(frame.columns)
+        if missing:
+            raise ValueError(
+                f"Hard negatives file is missing columns: {', '.join(sorted(missing))}"
+            )
+
+        positive_offer_ids_by_query = {
+            query_id: {r["offer_id"] for r in records}
+            for query_id, records in positive_records_by_query.items()
+        }
+
+        hard_negative_records_by_query = {}
+        loaded_count = 0
+        excluded_count = 0
+
+        for row in frame.itertuples(index=False):
+            query_id = str(getattr(row, "query_id", "") or "").strip()
+            offer_id = str(getattr(row, "offer_id", "") or "").strip()
+            offer_text = str(getattr(row, "offer_text", "") or "").strip()
+
+            if not query_id or not offer_id or not offer_text:
+                continue
+
+            if offer_id in positive_offer_ids_by_query.get(query_id, set()):
+                excluded_count += 1
+                continue
+
+            hard_negative_records_by_query.setdefault(query_id, []).append(
+                {"offer_id": offer_id, "offer_text": offer_text}
+            )
+            loaded_count += 1
+
+        print(
+            f"Loaded hard negatives: {loaded_count} records for "
+            f"{len(hard_negative_records_by_query)} queries "
+            f"(excluded {excluded_count} positives)"
+        )
+        return hard_negative_records_by_query

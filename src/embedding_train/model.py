@@ -554,12 +554,12 @@ class EmbeddingModule(L.LightningModule):
             ]
 
         monitor_metric = build_full_catalog_monitor_metric(self.validation_metric)
-        for name, value in metric_mapping.items():
-            self.log(
-                name,
-                float(value),
-                prog_bar=(name == monitor_metric),
-            )
+        self.log(
+            monitor_metric,
+            float(metric_mapping[monitor_metric]),
+            prog_bar=True,
+            logger=False,
+        )
 
         catalog_sample = getattr(self.cfg.trainer, "validation_catalog_sample", None)
         mode_label = (
@@ -705,7 +705,20 @@ class EmbeddingModule(L.LightningModule):
             self.batch_aligned_metric_name(
                 "train", "batch_cross_query_negative_count"
             ): batch_stats["cross_query_negative_count"],
+            self.batch_aligned_metric_name(
+                "train", "batch_hard_negative_count"
+            ): batch_stats.get("hard_negative_count", 0),
         }
+
+        total_negatives = (
+            batch_stats["same_query_negative_count"]
+            + batch_stats["cross_query_negative_count"]
+            + batch_stats.get("hard_negative_count", 0)
+        )
+        if total_negatives > 0:
+            stats_to_log[
+                self.batch_aligned_metric_name("train", "batch_hard_negative_share")
+            ] = batch_stats.get("hard_negative_count", 0) / total_negatives
 
         for name, value in stats_to_log.items():
             self.log(

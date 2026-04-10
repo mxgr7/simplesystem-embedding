@@ -4,6 +4,7 @@ from torch.utils.data import IterableDataset
 
 
 SYNTHETIC_NEGATIVE_LABEL = "SyntheticNegative"
+HARD_NEGATIVE_LABEL = "HardNegative"
 
 
 def build_synthetic_negative_record(
@@ -22,14 +23,30 @@ def build_synthetic_negative_record(
     }
 
 
+def build_hard_negative_record(anchor_query_id, anchor_query_text, hard_negative):
+    return {
+        "query_id": anchor_query_id,
+        "query_text": anchor_query_text,
+        "offer_id": hard_negative["offer_id"],
+        "offer_text": hard_negative["offer_text"],
+        "label": 0.0,
+        "raw_label": HARD_NEGATIVE_LABEL,
+    }
+
+
 def build_batch_stats(records, anchor_query_id=None):
     positive_count = 0
     same_query_negative_count = 0
     cross_query_negative_count = 0
+    hard_negative_count = 0
 
     for record in records:
         if record["label"] > 0.5:
             positive_count += 1
+            continue
+
+        if record["raw_label"] == HARD_NEGATIVE_LABEL:
+            hard_negative_count += 1
             continue
 
         if record["raw_label"] == SYNTHETIC_NEGATIVE_LABEL:
@@ -42,6 +59,7 @@ def build_batch_stats(records, anchor_query_id=None):
         "positive_count": positive_count,
         "same_query_negative_count": same_query_negative_count,
         "cross_query_negative_count": cross_query_negative_count,
+        "hard_negative_count": hard_negative_count,
     }
 
     if anchor_query_id is not None:
@@ -60,6 +78,7 @@ class QuerySamplingBuilder:
         n_pos_samples_per_query,
         n_neg_samples_per_query,
         seed,
+        hard_negative_records_by_query=None,
     ):
         self.positive_records_by_query = {
             query_id: list(records)
@@ -73,6 +92,10 @@ class QuerySamplingBuilder:
         self.synthetic_offer_pool = [
             dict(record) for record in synthetic_negative_offer_pool
         ]
+        self.hard_negative_records_by_query = {
+            query_id: list(records)
+            for query_id, records in (hard_negative_records_by_query or {}).items()
+        }
         self.n_pos_samples_per_query = int(n_pos_samples_per_query)
         self.n_neg_samples_per_query = int(n_neg_samples_per_query)
         self.randomizer = random.Random(seed)
@@ -105,6 +128,9 @@ class QuerySamplingBuilder:
         anchor_negative_records = self._shuffled_copy(
             self.negative_records_by_query.get(anchor_query_id, [])
         )
+        anchor_hard_negative_records = self._shuffled_copy(
+            self.hard_negative_records_by_query.get(anchor_query_id, [])
+        )
         anchor_query_text = self._resolve_anchor_query_text(anchor_query_id)
         synthetic_offer_candidates = self._shuffled_copy(self.synthetic_offer_pool)
 
@@ -130,6 +156,15 @@ class QuerySamplingBuilder:
                 )
                 continue
 
+            if anchor_hard_negative_records and self._append_hard_negative(
+                records,
+                anchor_query_id,
+                anchor_query_text,
+                anchor_hard_negative_records,
+                used_offer_ids,
+            ):
+                continue
+
             self._append_synthetic_negative(
                 records,
                 anchor_query_id,
@@ -142,6 +177,7 @@ class QuerySamplingBuilder:
             "records": records,
             "remaining_positive_records": anchor_positive_records,
             "remaining_negative_records": anchor_negative_records,
+            "remaining_hard_negative_records": anchor_hard_negative_records,
             "anchor_query_text": anchor_query_text,
             "synthetic_offer_candidates": synthetic_offer_candidates,
             "used_offer_ids": used_offer_ids,
@@ -150,6 +186,28 @@ class QuerySamplingBuilder:
     def _append_real_record(self, batch, record, used_offer_ids):
         batch.append(dict(record))
         used_offer_ids.add(record["offer_id"])
+
+    def _append_hard_negative(
+        self,
+        batch,
+        anchor_query_id,
+        anchor_query_text,
+        hard_negative_candidates,
+        used_offer_ids,
+    ):
+        while hard_negative_candidates:
+            candidate = hard_negative_candidates.pop()
+            if candidate["offer_id"] in used_offer_ids:
+                continue
+            batch.append(
+                build_hard_negative_record(
+                    anchor_query_id, anchor_query_text, candidate
+                )
+            )
+            used_offer_ids.add(candidate["offer_id"])
+            return True
+
+        return False
 
     def _append_synthetic_negative(
         self,
@@ -215,6 +273,7 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
         n_pos_samples_per_query,
         n_neg_samples_per_query,
         seed,
+        hard_negative_records_by_query=None,
     ):
         super().__init__(
             positive_records_by_query=positive_records_by_query,
@@ -224,6 +283,7 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
             n_pos_samples_per_query=n_pos_samples_per_query,
             n_neg_samples_per_query=n_neg_samples_per_query,
             seed=seed,
+            hard_negative_records_by_query=hard_negative_records_by_query,
         )
         self.batch_size = int(batch_size)
         self._validate_config()
@@ -236,6 +296,7 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
         batch = build_context["records"]
         anchor_positive_records = build_context["remaining_positive_records"]
         anchor_negative_records = build_context["remaining_negative_records"]
+        anchor_hard_negative_records = build_context["remaining_hard_negative_records"]
         anchor_query_text = build_context["anchor_query_text"]
         synthetic_offer_candidates = build_context["synthetic_offer_candidates"]
         used_offer_ids = build_context["used_offer_ids"]
@@ -256,6 +317,17 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
                     anchor_negative_records.pop(),
                     used_offer_ids,
                 )
+
+        while len(batch) < self.batch_size and anchor_hard_negative_records:
+            appended = self._append_hard_negative(
+                batch,
+                anchor_query_id,
+                anchor_query_text,
+                anchor_hard_negative_records,
+                used_offer_ids,
+            )
+            if not appended:
+                break
 
         while len(batch) < self.batch_size:
             self._append_synthetic_negative(
@@ -297,6 +369,8 @@ class RandomQueryPoolBuilder(QuerySamplingBuilder):
         records = build_context["records"]
         remaining_positive_records = build_context["remaining_positive_records"]
         remaining_negative_records = build_context["remaining_negative_records"]
+        remaining_hard_negative_records = build_context["remaining_hard_negative_records"]
+        anchor_query_text = build_context["anchor_query_text"]
 
         extra_records = []
         for record in remaining_positive_records:
@@ -304,6 +378,14 @@ class RandomQueryPoolBuilder(QuerySamplingBuilder):
 
         for record in remaining_negative_records:
             extra_records.append(dict(record))
+
+        used_offer_ids = build_context["used_offer_ids"]
+        for candidate in remaining_hard_negative_records:
+            if candidate["offer_id"] not in used_offer_ids:
+                extra_records.append(
+                    build_hard_negative_record(query_id, anchor_query_text, candidate)
+                )
+                used_offer_ids.add(candidate["offer_id"])
 
         self.randomizer.shuffle(extra_records)
         records.extend(extra_records)

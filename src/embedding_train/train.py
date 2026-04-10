@@ -108,6 +108,7 @@ def run(cfg):
     datamodule = EmbeddingDataModule(cfg)
     model = EmbeddingModule(cfg)
     logger = build_logger(cfg)
+    print(f"MLflow run directory: {logger.experiment.get_run(logger.run_id).info.artifact_uri}")
     callbacks = build_callbacks(cfg, logger)
 
     trainer = L.Trainer(
@@ -127,6 +128,19 @@ def run(cfg):
     )
 
     logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
+
+    datamodule.setup(stage="fit")
+    if datamodule.dataset_stats:
+        logger.log_hyperparams(
+            {f"dataset/{k}": v for k, v in datamodule.dataset_stats.items()}
+        )
+
+    if cfg.trainer.validate_before_training:
+        original_finalize = logger.finalize
+        logger.finalize = lambda *args, **kwargs: None
+        trainer.validate(model, datamodule=datamodule)
+        logger.finalize = original_finalize
+
     trainer.fit(
         model,
         datamodule=datamodule,

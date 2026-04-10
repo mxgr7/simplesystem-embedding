@@ -470,19 +470,21 @@ class FullCatalogValidationEpochEndTests(unittest.TestCase):
 
         EmbeddingModule.on_validation_epoch_end(module)
 
-        self.assertIn("val/full_catalog/mrr", module.logged)
+        # Only the monitor metric is logged via self.log(); all others go to MLflow
         self.assertIn("val/full_catalog/ndcg_at_5", module.logged)
-        self.assertIn("val/full_catalog/ndcg_at_10", module.logged)
-        self.assertIn("val/full_catalog/recall_at_10", module.logged)
-        self.assertIn("val/full_catalog/recall_at_100", module.logged)
-        self.assertIn("val/full_catalog/catalog_size", module.logged)
-        self.assertIn("val/full_catalog/evaluated_queries", module.logged)
 
+        mlflow_metrics = module.logger.calls[0]["metrics"]
+        self.assertIn("val/full_catalog/mrr", mlflow_metrics)
+        self.assertIn("val/full_catalog/ndcg_at_5", mlflow_metrics)
+        self.assertIn("val/full_catalog/ndcg_at_10", mlflow_metrics)
+        self.assertIn("val/full_catalog/recall_at_10", mlflow_metrics)
+        self.assertIn("val/full_catalog/recall_at_100", mlflow_metrics)
+        self.assertIn("val/full_catalog/catalog_size", mlflow_metrics)
+        self.assertIn("val/full_catalog/evaluated_queries", mlflow_metrics)
+
+        self.assertEqual(mlflow_metrics["val/full_catalog/catalog_size"], 3.0)
         self.assertEqual(
-            module.logged["val/full_catalog/catalog_size"]["value"], 3.0
-        )
-        self.assertEqual(
-            module.logged["val/full_catalog/evaluated_queries"]["value"], 2.0
+            mlflow_metrics["val/full_catalog/evaluated_queries"], 2.0
         )
 
     def test_monitor_metric_has_prog_bar_true(self):
@@ -509,9 +511,8 @@ class FullCatalogValidationEpochEndTests(unittest.TestCase):
         self.assertTrue(
             module.logged["val/full_catalog/ndcg_at_5"]["kwargs"]["prog_bar"]
         )
-        self.assertFalse(
-            module.logged["val/full_catalog/mrr"]["kwargs"]["prog_bar"]
-        )
+        # Non-monitor metrics are no longer logged via self.log()
+        self.assertNotIn("val/full_catalog/mrr", module.logged)
 
     def test_pairwise_metrics_still_logged(self):
         rows = [
@@ -570,8 +571,9 @@ class FullCatalogValidationEpochEndTests(unittest.TestCase):
 
         EmbeddingModule.on_validation_epoch_end(module)
 
+        mlflow_metrics = module.logger.calls[0]["metrics"]
         self.assertGreater(
-            module.logged["val/full_catalog/retrieval_eligible_queries"]["value"],
+            mlflow_metrics["val/full_catalog/retrieval_eligible_queries"],
             0.0,
         )
 

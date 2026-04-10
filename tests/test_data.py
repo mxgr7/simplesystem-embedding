@@ -43,7 +43,7 @@ def build_cfg(**data_overrides):
                 "query_id_column": "query_id",
                 "offer_id_column": "offer_id_b64",
                 "batch_size": 16,
-                "train_batching_mode": "random_pairs",
+                "train_batching_mode": "anchor_query",
                 "n_pos_samples_per_query": 2,
                 "n_neg_samples_per_query": 2,
                 "log_batch_stats": True,
@@ -98,14 +98,14 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
             )
 
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
-    def test_accepts_random_pairs_with_default_phase_one_settings(
+    def test_accepts_anchor_query_as_default_batching_mode(
         self, from_pretrained
     ):
         from_pretrained.return_value = _TokenizerStub()
 
         datamodule = EmbeddingDataModule(build_cfg())
 
-        self.assertEqual(datamodule.train_batching_mode, "random_pairs")
+        self.assertEqual(datamodule.train_batching_mode, "anchor_query")
         self.assertEqual(datamodule.val_split_mode, "query_id")
 
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
@@ -416,7 +416,11 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             ]
         )
         datamodule = EmbeddingDataModule(
-            build_cfg(val_fraction=0.34, val_split_mode="offer_connected_component")
+            build_cfg(
+                val_fraction=0.34,
+                val_split_mode="offer_connected_component",
+                train_batching_mode="random_pairs",
+            )
         )
 
         datamodule.setup()
@@ -489,7 +493,11 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             ]
         )
         datamodule = EmbeddingDataModule(
-            build_cfg(val_fraction=0.25, val_split_mode="offer_connected_component")
+            build_cfg(
+                val_fraction=0.25,
+                val_split_mode="offer_connected_component",
+                train_batching_mode="random_pairs",
+            )
         )
 
         datamodule.setup()
@@ -591,7 +599,11 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             ]
         )
         datamodule = EmbeddingDataModule(
-            build_cfg(val_fraction=0.5, val_split_mode="query_id")
+            build_cfg(
+                val_fraction=0.5,
+                val_split_mode="query_id",
+                train_batching_mode="random_pairs",
+            )
         )
 
         datamodule.setup()

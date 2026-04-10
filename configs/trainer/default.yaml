@@ -17,3 +17,4 @@ validation_relevant_labels: Exact
 validation_catalog_sample: null
 encode_batch_size: 128
 score_batch_size: 128
+validate_before_training: true
