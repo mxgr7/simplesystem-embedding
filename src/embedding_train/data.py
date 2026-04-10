@@ -359,6 +359,8 @@ class EmbeddingDataModule(LightningDataModule):
             "query_ids": [item["query_id"] for item in batch_records],
             "offer_ids": [item["offer_id"] for item in batch_records],
             "raw_labels": [item["raw_label"] for item in batch_records],
+            "query_texts": query_texts,
+            "offer_texts": offer_texts,
         }
 
         if (

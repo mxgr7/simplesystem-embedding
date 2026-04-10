@@ -119,6 +119,7 @@ class _ValidationLogCaptureModule:
         self.records_seen = records_seen
         self.validation_loss_total = 1.5
         self.validation_loss_examples = 3
+        self.validation_mode = "pairwise_proxy"
         self.logger = _MLflowLoggerStub()
         self.trainer = SimpleNamespace(sanity_checking=sanity_checking)
 
@@ -139,6 +140,9 @@ class _ValidationLogCaptureModule:
 
     def is_sanity_checking(self):
         return EmbeddingModule.is_sanity_checking(self)
+
+    def _compute_pairwise_validation_metrics(self):
+        return EmbeddingModule._compute_pairwise_validation_metrics(self)
 
 
 class EmbeddingModuleBatchLoggingTests(unittest.TestCase):

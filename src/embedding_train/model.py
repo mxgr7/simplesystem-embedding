@@ -1,3 +1,7 @@
+import logging
+import random
+from collections import defaultdict
+
 import lightning as L
 import torch
 import torch.distributed
@@ -13,9 +17,12 @@ from embedding_train.losses import (
     in_batch_triplet_loss,
 )
 from embedding_train.metrics import (
+    RELEVANCE_GAINS,
     compute_exact_retrieval_metrics,
     compute_ranking_metrics,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_model_dtype(precision):
@@ -66,6 +73,46 @@ def resolve_output_dim(output_dim):
     return resolved_output_dim
 
 
+VALID_VALIDATION_MODES = {"full_catalog", "pairwise_proxy"}
+VALID_VALIDATION_METRICS = {"ndcg_at_5", "ndcg_at_10", "mrr", "recall_at_10", "recall_at_100"}
+VALID_VALIDATION_SIMILARITIES = {"dot", "cosine"}
+
+
+def resolve_validation_mode(validation_mode):
+    normalized = str(validation_mode).strip().lower()
+    if normalized in VALID_VALIDATION_MODES:
+        return normalized
+    choices = "|".join(sorted(VALID_VALIDATION_MODES))
+    raise ValueError(
+        f"Unsupported validation_mode: {validation_mode}. Expected one of {choices}"
+    )
+
+
+def resolve_validation_metric(validation_metric):
+    normalized = str(validation_metric).strip().lower()
+    if normalized in VALID_VALIDATION_METRICS:
+        return normalized
+    choices = "|".join(sorted(VALID_VALIDATION_METRICS))
+    raise ValueError(
+        f"Unsupported validation_metric: {validation_metric}. Expected one of {choices}"
+    )
+
+
+def resolve_validation_similarity(validation_similarity):
+    normalized = str(validation_similarity).strip().lower()
+    if normalized in VALID_VALIDATION_SIMILARITIES:
+        return normalized
+    choices = "|".join(sorted(VALID_VALIDATION_SIMILARITIES))
+    raise ValueError(
+        f"Unsupported validation_similarity: {validation_similarity}. "
+        f"Expected one of {choices}"
+    )
+
+
+def build_full_catalog_monitor_metric(validation_metric):
+    return f"val/full_catalog/{validation_metric}"
+
+
 def resolve_scheduler_name(scheduler_name):
     normalized = str(scheduler_name).strip().lower()
 
@@ -99,6 +146,28 @@ def resolve_warmup_steps(optimizer_cfg, total_training_steps):
     return min(resolved_warmup_steps, total_training_steps)
 
 
+def subsample_catalog(catalog_rows, sample_size, judgments_by_query):
+    judged_offer_ids = set()
+    for offers in judgments_by_query.values():
+        judged_offer_ids.update(offers)
+
+    judged_rows = []
+    unjudged_rows = []
+    for row in catalog_rows:
+        if row["offer_id"] in judged_offer_ids:
+            judged_rows.append(row)
+        else:
+            unjudged_rows.append(row)
+
+    if len(judged_rows) >= sample_size:
+        return judged_rows[:sample_size]
+
+    remaining = sample_size - len(judged_rows)
+    rng = random.Random(42)
+    rng.shuffle(unjudged_rows)
+    return judged_rows + unjudged_rows[:remaining]
+
+
 def load_embedding_module_from_checkpoint(checkpoint_path, map_location="cpu"):
     checkpoint = torch.load(
         checkpoint_path,
@@ -123,6 +192,15 @@ class EmbeddingModule(L.LightningModule):
         self.cfg = cfg
         self.loss_type = resolve_loss_type(cfg.model.loss_type)
         self.model_dtype = resolve_model_dtype(cfg.trainer.precision)
+        self.validation_mode = resolve_validation_mode(
+            getattr(cfg.trainer, "validation_mode", "full_catalog")
+        )
+        self.validation_metric = resolve_validation_metric(
+            getattr(cfg.trainer, "validation_metric", "ndcg_at_5")
+        )
+        self.validation_similarity = resolve_validation_similarity(
+            getattr(cfg.trainer, "validation_similarity", "dot")
+        )
         self.encoder = AutoModel.from_pretrained(
             cfg.model.model_name,
             dtype=self.model_dtype,
@@ -273,20 +351,46 @@ class EmbeddingModule(L.LightningModule):
         cpu_scores = scores.detach().cpu().tolist()
         raw_labels = batch["raw_labels"]
 
-        for query_id, score, raw_label in zip(
-            batch["query_ids"], cpu_scores, raw_labels
+        for i, (query_id, score, raw_label) in enumerate(
+            zip(batch["query_ids"], cpu_scores, raw_labels)
         ):
-            self.validation_rows.append(
-                {
-                    "query_id": query_id,
-                    "score": float(score),
-                    "raw_label": raw_label,
-                }
-            )
+            row = {
+                "query_id": query_id,
+                "score": float(score),
+                "raw_label": raw_label,
+            }
+            if self.validation_mode == "full_catalog":
+                row["offer_id"] = batch["offer_ids"][i]
+                row["query_text"] = batch["query_texts"][i]
+                row["offer_text"] = batch["offer_texts"][i]
+            self.validation_rows.append(row)
 
         return loss
 
     def on_validation_epoch_end(self):
+        record_metrics = self._compute_pairwise_validation_metrics()
+
+        if self.validation_mode == "full_catalog":
+            catalog_metrics = self._compute_full_catalog_validation_metrics()
+            record_metrics.update(catalog_metrics)
+
+        if self.validation_loss_examples:
+            average_validation_loss = (
+                self.validation_loss_total / self.validation_loss_examples
+            )
+            record_metrics[
+                self.batch_aligned_metric_name("val", f"{self.loss_type}_loss")
+            ] = average_validation_loss
+            record_metrics[self.batch_aligned_metric_name("val", "loss")] = (
+                average_validation_loss
+            )
+
+        if self.is_sanity_checking() or self.records_seen < 1:
+            return
+
+        self.log_metrics_by_records(record_metrics)
+
+    def _compute_pairwise_validation_metrics(self):
         metrics = compute_ranking_metrics(self.validation_rows)
         exact_metrics = compute_exact_retrieval_metrics(self.validation_rows)
         record_metrics = {
@@ -312,17 +416,6 @@ class EmbeddingModule(L.LightningModule):
                 "evaluated_queries"
             ],
         }
-
-        if self.validation_loss_examples:
-            average_validation_loss = (
-                self.validation_loss_total / self.validation_loss_examples
-            )
-            record_metrics[
-                self.batch_aligned_metric_name("val", f"{self.loss_type}_loss")
-            ] = average_validation_loss
-            record_metrics[self.batch_aligned_metric_name("val", "loss")] = (
-                average_validation_loss
-            )
 
         self.log(
             self.batch_aligned_metric_name("val", "ndcg_at_1"),
@@ -370,10 +463,195 @@ class EmbeddingModule(L.LightningModule):
             prog_bar=False,
         )
 
-        if self.is_sanity_checking() or self.records_seen < 1:
-            return
+        return record_metrics
 
-        self.log_metrics_by_records(record_metrics)
+    def _compute_full_catalog_validation_metrics(self):
+        from embedding_train.catalog_benchmark import (
+            parse_relevant_labels,
+            resolve_similarity,
+            score_queries_against_catalog,
+        )
+
+        query_rows, catalog_rows, judgments_by_query = (
+            self._build_full_catalog_validation_data()
+        )
+
+        if not query_rows or not catalog_rows:
+            logger.warning(
+                "Full-catalog validation skipped: %d queries, %d catalog items",
+                len(query_rows),
+                len(catalog_rows),
+            )
+            return {}
+
+        tokenizer = self.trainer.datamodule.tokenizer
+        device = self.device
+        encode_batch_size = int(
+            getattr(self.cfg.trainer, "encode_batch_size", 128)
+        )
+        score_batch_size = int(
+            getattr(self.cfg.trainer, "score_batch_size", 128)
+        )
+        max_query_length = int(self.cfg.data.max_query_length)
+        max_offer_length = int(self.cfg.data.max_offer_length)
+
+        query_embeddings = self._encode_texts_batched(
+            tokenizer,
+            [row["query_text"] for row in query_rows],
+            max_query_length,
+            encode_batch_size,
+            device,
+        )
+        catalog_embeddings = self._encode_texts_batched(
+            tokenizer,
+            [row["offer_text"] for row in catalog_rows],
+            max_offer_length,
+            encode_batch_size,
+            device,
+        )
+
+        query_embeddings, catalog_embeddings = resolve_similarity(
+            self.validation_similarity,
+            query_embeddings,
+            catalog_embeddings,
+        )
+
+        ks = (5, 10, 100)
+        relevant_labels = parse_relevant_labels(
+            getattr(self.cfg.trainer, "validation_relevant_labels", "Exact")
+        )
+
+        catalog_metrics = score_queries_against_catalog(
+            query_rows=query_rows,
+            query_embeddings=query_embeddings,
+            catalog_rows=catalog_rows,
+            catalog_embeddings=catalog_embeddings,
+            judgments_by_query=judgments_by_query,
+            ks=ks,
+            relevant_labels=set(relevant_labels),
+            score_batch_size=score_batch_size,
+        )
+
+        metric_mapping = {
+            "val/full_catalog/mrr": catalog_metrics["mrr"],
+            "val/full_catalog/evaluated_queries": catalog_metrics[
+                "evaluated_queries"
+            ],
+            "val/full_catalog/ndcg_eligible_queries": catalog_metrics[
+                "ndcg_eligible_queries"
+            ],
+            "val/full_catalog/retrieval_eligible_queries": catalog_metrics[
+                "retrieval_eligible_queries"
+            ],
+            "val/full_catalog/catalog_size": float(len(catalog_rows)),
+        }
+        for k in ks:
+            metric_mapping[f"val/full_catalog/ndcg_at_{k}"] = catalog_metrics[
+                f"ndcg@{k}"
+            ]
+            metric_mapping[f"val/full_catalog/recall_at_{k}"] = catalog_metrics[
+                f"recall@{k}"
+            ]
+
+        monitor_metric = build_full_catalog_monitor_metric(self.validation_metric)
+        for name, value in metric_mapping.items():
+            self.log(
+                name,
+                float(value),
+                prog_bar=(name == monitor_metric),
+            )
+
+        catalog_sample = getattr(self.cfg.trainer, "validation_catalog_sample", None)
+        mode_label = (
+            "sampled" if catalog_sample is not None else "exhaustive"
+        )
+        logger.info(
+            "Full-catalog validation (%s): %d queries, %d catalog items, %s=%.4f",
+            mode_label,
+            len(query_rows),
+            len(catalog_rows),
+            monitor_metric,
+            float(metric_mapping.get(monitor_metric, 0.0)),
+        )
+
+        return metric_mapping
+
+    def _build_full_catalog_validation_data(self):
+        query_rows_by_id = {}
+        catalog_rows_by_offer_id = {}
+        judgments_by_query = defaultdict(dict)
+
+        for row in self.validation_rows:
+            query_id = row["query_id"]
+            offer_id = row["offer_id"]
+            raw_label = row["raw_label"]
+
+            if query_id not in query_rows_by_id:
+                query_rows_by_id[query_id] = {
+                    "query_id": query_id,
+                    "query_text": row["query_text"],
+                }
+
+            if offer_id not in catalog_rows_by_offer_id:
+                catalog_rows_by_offer_id[offer_id] = {
+                    "offer_id": offer_id,
+                    "offer_text": row["offer_text"],
+                }
+
+            existing_label = judgments_by_query[query_id].get(offer_id)
+            if existing_label is None:
+                judgments_by_query[query_id][offer_id] = raw_label
+            elif RELEVANCE_GAINS.get(raw_label, 0.0) > RELEVANCE_GAINS.get(
+                existing_label, 0.0
+            ):
+                judgments_by_query[query_id][offer_id] = raw_label
+
+        catalog_rows = list(catalog_rows_by_offer_id.values())
+
+        catalog_sample = getattr(self.cfg.trainer, "validation_catalog_sample", None)
+        if catalog_sample is not None and int(catalog_sample) < len(catalog_rows):
+            catalog_rows = subsample_catalog(
+                catalog_rows,
+                int(catalog_sample),
+                judgments_by_query,
+            )
+
+        return (
+            list(query_rows_by_id.values()),
+            catalog_rows,
+            dict(judgments_by_query),
+        )
+
+    def _encode_texts_batched(
+        self, tokenizer, texts, max_length, encode_batch_size, device
+    ):
+        encoded_batches = []
+        was_training = self.training
+        self.eval()
+
+        with torch.inference_mode():
+            for start in range(0, len(texts), encode_batch_size):
+                chunk = texts[start : start + encode_batch_size]
+                inputs = tokenizer(
+                    chunk,
+                    padding=True,
+                    truncation=True,
+                    max_length=max_length,
+                    return_tensors="pt",
+                )
+                inputs = {
+                    name: tensor.to(device)
+                    for name, tensor in dict(inputs).items()
+                }
+                embeddings = self.encode(inputs)
+                encoded_batches.append(
+                    embeddings.detach().cpu().to(dtype=torch.float32)
+                )
+
+        if was_training:
+            self.train()
+
+        return torch.cat(encoded_batches, dim=0)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(

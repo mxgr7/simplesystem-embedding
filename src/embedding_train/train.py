@@ -10,7 +10,12 @@ from lightning.pytorch.loggers import MLFlowLogger
 from omegaconf import OmegaConf
 
 from embedding_train.data import EmbeddingDataModule
-from embedding_train.model import EmbeddingModule
+from embedding_train.model import (
+    EmbeddingModule,
+    build_full_catalog_monitor_metric,
+    resolve_validation_metric,
+    resolve_validation_mode,
+)
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
@@ -49,23 +54,40 @@ def _resolve_checkpoint_run_name(logger):
     return _sanitize_path_component(run_name)
 
 
+def _resolve_checkpoint_monitor(cfg):
+    validation_mode = resolve_validation_mode(
+        getattr(cfg.trainer, "validation_mode", "full_catalog")
+    )
+
+    if validation_mode == "full_catalog":
+        validation_metric = resolve_validation_metric(
+            getattr(cfg.trainer, "validation_metric", "ndcg_at_5")
+        )
+        return build_full_catalog_monitor_metric(validation_metric)
+
+    return "val/by_batch/exact_mrr"
+
+
 def build_callbacks(cfg, logger):
     checkpoint_dir = Path(cfg.trainer.checkpoint_dir) / _resolve_checkpoint_run_name(
         logger
     )
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    monitor = _resolve_checkpoint_monitor(cfg)
+    safe_monitor = monitor.replace("/", "_")
+
     checkpoint_callback = ModelCheckpoint(
         dirpath=str(checkpoint_dir),
-        filename="best-step={step}-val_by_batch_exact_mrr={val/by_batch/exact_mrr:.4f}",
-        monitor="val/by_batch/exact_mrr",
+        filename=f"best-step={{step}}-{safe_monitor}={{{monitor}:.4f}}",
+        monitor=monitor,
         mode="max",
         save_top_k=3,
         save_last=True,
         auto_insert_metric_name=False,
     )
     checkpoint_callback.CHECKPOINT_NAME_LAST = (
-        "last-step={step}-val_by_batch_exact_mrr={val/by_batch/exact_mrr:.4f}"
+        f"last-step={{step}}-{safe_monitor}={{{monitor}:.4f}}"
     )
 
     return [
