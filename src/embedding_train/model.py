@@ -15,6 +15,7 @@ from embedding_train.losses import (
     cosine_bce_loss,
     in_batch_contrastive_loss,
     in_batch_triplet_loss,
+    kl_distillation_loss,
 )
 from embedding_train.metrics import (
     RELEVANCE_GAINS,
@@ -56,7 +57,7 @@ def resolve_model_dtype(precision):
 def resolve_loss_type(loss_type):
     normalized = str(loss_type).strip().lower()
 
-    if normalized in {"bce", "contrastive", "triplet"}:
+    if normalized in {"bce", "contrastive", "triplet", "distill"}:
         return normalized
 
     raise ValueError(f"Unsupported loss type: {loss_type}")
@@ -257,6 +258,27 @@ class EmbeddingModule(L.LightningModule):
         if getattr(cfg.model, "compile", False):
             self.encoder = torch.compile(self.encoder)
 
+        self._teacher_ref = None
+        teacher_checkpoint = getattr(cfg.model, "teacher_checkpoint", None)
+        if teacher_checkpoint:
+            teacher, _ = load_embedding_module_from_checkpoint(
+                teacher_checkpoint, map_location="cpu"
+            )
+            for parameter in teacher.parameters():
+                parameter.requires_grad_(False)
+            teacher.eval()
+            # List-wrap to keep the teacher out of self.parameters(),
+            # the optimizer, DDP sync, and the checkpoint state_dict.
+            self._teacher_ref = [teacher]
+
+    def on_fit_start(self):
+        self._move_teacher_to_device()
+
+    def _move_teacher_to_device(self):
+        if self._teacher_ref is None:
+            return
+        self._teacher_ref[0].to(device=self.device, dtype=self.model_dtype)
+
     def forward(self, query_inputs, offer_inputs):
         query_embeddings = self.encode(query_inputs)
         offer_embeddings = self.encode(offer_inputs)
@@ -322,6 +344,7 @@ class EmbeddingModule(L.LightningModule):
         self.pending_train_record_metrics = {}
 
     def on_validation_start(self):
+        self._move_teacher_to_device()
         if self.is_sanity_checking():
             self.validation_rows = []
             self.validation_loss_total = 0.0
@@ -921,6 +944,28 @@ class EmbeddingModule(L.LightningModule):
             )
             self._last_triplet_stats = stats
             return loss
+
+        if self.loss_type == "distill":
+            if self._teacher_ref is None:
+                raise RuntimeError(
+                    "loss_type='distill' requires cfg.model.teacher_checkpoint to be set"
+                )
+            teacher = self._teacher_ref[0]
+            with torch.no_grad():
+                teacher_query_embeddings = teacher.encode(batch["query_inputs"])
+                teacher_offer_embeddings = teacher.encode(batch["offer_inputs"])
+            student_sims = torch.matmul(
+                query_embeddings, offer_embeddings.transpose(0, 1)
+            )
+            teacher_sims = torch.matmul(
+                teacher_query_embeddings,
+                teacher_offer_embeddings.transpose(0, 1),
+            )
+            return kl_distillation_loss(
+                student_sims,
+                teacher_sims,
+                temperature=float(self.cfg.model.distill_temperature),
+            )
 
         raise RuntimeError(f"Unsupported loss type: {self.loss_type}")
 

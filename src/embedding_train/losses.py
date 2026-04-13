@@ -33,6 +33,18 @@ def in_batch_contrastive_loss(
     return losses.mean()
 
 
+def kl_distillation_loss(student_sims, teacher_sims, temperature):
+    teacher_log_probs = F.log_softmax(teacher_sims / temperature, dim=1)
+    student_log_probs = F.log_softmax(student_sims / temperature, dim=1)
+    loss = F.kl_div(
+        student_log_probs,
+        teacher_log_probs,
+        reduction="batchmean",
+        log_target=True,
+    )
+    return loss * (temperature ** 2)
+
+
 def in_batch_triplet_loss(
     query_embeddings,
     offer_embeddings,
