@@ -11,7 +11,11 @@ import pyarrow.parquet as pq
 import torch
 from omegaconf import OmegaConf
 
-from embedding_train.index_build import build_arg_parser, run_index_build
+from embedding_train.index_build import (
+    ParquetSource,
+    build_arg_parser,
+    run_index_build,
+)
 
 
 TOKEN_IDS = {
@@ -226,6 +230,57 @@ class IndexBuildCliTests(unittest.TestCase):
         self.assertEqual(manifest["index_config"]["pq_m"], 1)
         self.assertEqual(manifest["index_config"]["pq_bits"], 1)
         self.assertEqual(manifest["index_config"]["nprobe"], 1)
+
+
+class ParquetSourceTests(unittest.TestCase):
+    def _write_shard(self, path, names):
+        table = pa.table(
+            {
+                "name": pa.array(names, type=pa.string()),
+            }
+        )
+        pq.write_table(table, path)
+
+    def test_reads_single_file(self):
+        with TemporaryDirectory() as tmp:
+            shard_path = Path(tmp) / "data.parquet"
+            self._write_shard(shard_path, ["a", "b", "c"])
+
+            source = ParquetSource(str(shard_path))
+
+            self.assertEqual(source.metadata.num_rows, 3)
+            self.assertIn("name", source.schema.names)
+            batches = list(source.iter_batches(batch_size=2))
+            rows = [row for batch in batches for row in batch.to_pylist()]
+            self.assertEqual([r["name"] for r in rows], ["a", "b", "c"])
+
+    def test_reads_directory_in_sorted_order(self):
+        with TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            self._write_shard(directory / "data_2.parquet", ["c", "d"])
+            self._write_shard(directory / "data_10.parquet", ["e"])
+            self._write_shard(directory / "data_1.parquet", ["a", "b"])
+
+            source = ParquetSource(str(directory))
+
+            self.assertEqual(source.metadata.num_rows, 5)
+            self.assertEqual(
+                [p.name for p in source.shard_paths],
+                ["data_1.parquet", "data_10.parquet", "data_2.parquet"],
+            )
+            rows = [
+                row
+                for batch in source.iter_batches(batch_size=4)
+                for row in batch.to_pylist()
+            ]
+            self.assertEqual(
+                [r["name"] for r in rows], ["a", "b", "e", "c", "d"]
+            )
+
+    def test_empty_directory_raises(self):
+        with TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                ParquetSource(tmp)
 
 
 if __name__ == "__main__":

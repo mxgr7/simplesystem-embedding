@@ -1,6 +1,8 @@
 import argparse
 import os
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import faiss
 import numpy as np
@@ -38,6 +40,43 @@ from embedding_train.infer import (
 from embedding_train.model import EmbeddingModule
 from embedding_train.model import load_embedding_module_from_checkpoint
 from embedding_train.rendering import RowTextRenderer
+
+
+class ParquetSource:
+    """Streaming parquet source backed by a single file or a directory of shards.
+
+    Mimics the subset of pyarrow.parquet.ParquetFile that index_build relies on:
+    iter_batches(batch_size), metadata.num_rows, schema.names, schema_arrow.
+    Shards are read in sorted order and streamed one at a time so memory use
+    stays bounded when indexing large partitioned datasets.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self.shard_paths = self._resolve_shard_paths(path)
+        if not self.shard_paths:
+            raise ValueError(f"No parquet files found at: {path}")
+
+        first = pq.ParquetFile(str(self.shard_paths[0]))
+        self.schema_arrow = first.schema_arrow
+        self.schema = first.schema
+        num_rows = 0
+        for shard_path in self.shard_paths:
+            num_rows += pq.ParquetFile(str(shard_path)).metadata.num_rows
+        self.metadata = SimpleNamespace(num_rows=num_rows)
+
+    @staticmethod
+    def _resolve_shard_paths(path):
+        candidate = Path(path)
+        if candidate.is_dir():
+            return sorted(candidate.glob("*.parquet"))
+        return [candidate]
+
+    def iter_batches(self, batch_size):
+        for shard_path in self.shard_paths:
+            shard = pq.ParquetFile(str(shard_path))
+            for batch in shard.iter_batches(batch_size=batch_size):
+                yield batch
 
 
 def build_progress(total_rows):
@@ -83,7 +122,14 @@ def build_arg_parser():
         default="",
         help="Optional pretrained model name override when --checkpoint is omitted.",
     )
-    parser.add_argument("--input", required=True, help="Input Parquet path")
+    parser.add_argument(
+        "--input",
+        required=True,
+        help=(
+            "Input Parquet path. Either a single .parquet file or a directory "
+            "of .parquet shards (read in sorted name order)."
+        ),
+    )
     parser.add_argument(
         "--output",
         required=True,
@@ -421,7 +467,7 @@ def run_index_build(args):
 
     tokenizer = build_tokenizer(cfg.model.model_name)
     renderer = RowTextRenderer(cfg.data)
-    parquet_file = pq.ParquetFile(args.input)
+    parquet_file = ParquetSource(args.input)
     total_rows = parquet_file.metadata.num_rows
     if args.limit_rows is not None:
         total_rows = min(total_rows, int(args.limit_rows))
