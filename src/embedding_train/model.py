@@ -125,7 +125,8 @@ def resolve_scheduler_name(scheduler_name):
     raise ValueError(f"Unsupported optimizer scheduler: {scheduler_name}")
 
 
-def resolve_warmup_steps(optimizer_cfg, total_training_steps):
+def resolve_warmup_steps(optimizer_cfg, steps_per_epoch, total_training_steps):
+    steps_per_epoch = int(steps_per_epoch)
     total_training_steps = int(total_training_steps)
     warmup_steps = optimizer_cfg.get("warmup_steps")
 
@@ -139,8 +140,8 @@ def resolve_warmup_steps(optimizer_cfg, total_training_steps):
     if warmup_ratio < 0.0 or warmup_ratio > 1.0:
         raise ValueError("optimizer.warmup_ratio must be between 0.0 and 1.0")
 
-    resolved_warmup_steps = int(total_training_steps * warmup_ratio)
-    if warmup_ratio > 0.0 and resolved_warmup_steps == 0 and total_training_steps > 0:
+    resolved_warmup_steps = int(steps_per_epoch * warmup_ratio)
+    if warmup_ratio > 0.0 and resolved_warmup_steps == 0 and steps_per_epoch > 0:
         resolved_warmup_steps = 1
 
     return min(resolved_warmup_steps, total_training_steps)
@@ -670,7 +671,11 @@ class EmbeddingModule(L.LightningModule):
         if total_training_steps < 1:
             return optimizer
 
-        warmup_steps = resolve_warmup_steps(self.cfg.optimizer, total_training_steps)
+        max_epochs = max(int(self.cfg.trainer.get("max_epochs", 1) or 1), 1)
+        steps_per_epoch = max(total_training_steps // max_epochs, 1)
+        warmup_steps = resolve_warmup_steps(
+            self.cfg.optimizer, steps_per_epoch, total_training_steps
+        )
         scheduler = get_scheduler(
             scheduler_name,
             optimizer=optimizer,
@@ -806,6 +811,22 @@ class EmbeddingModule(L.LightningModule):
     def on_load_checkpoint(self, checkpoint):
         self.records_seen = int(checkpoint.get("records_seen", 0))
         self.pending_train_record_metrics = {}
+
+    def on_train_start(self):
+        if not getattr(self.trainer, "ckpt_path", None):
+            return
+        if not bool(self.cfg.optimizer.get("override_lr_on_resume", False)):
+            return
+        new_lr = float(self.cfg.optimizer.lr)
+        for optimizer in self.trainer.optimizers:
+            for group in optimizer.param_groups:
+                group["lr"] = new_lr
+                if "initial_lr" in group:
+                    group["initial_lr"] = new_lr
+        for scheduler_config in self.trainer.lr_scheduler_configs:
+            scheduler = scheduler_config.scheduler
+            if hasattr(scheduler, "base_lrs"):
+                scheduler.base_lrs = [new_lr for _ in scheduler.base_lrs]
 
     def compute_loss(self, batch, query_embeddings, offer_embeddings, scores):
         scale = float(self.cfg.model.similarity_scale)

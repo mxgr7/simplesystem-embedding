@@ -1,5 +1,6 @@
 lr: 2.0e-5
 weight_decay: 0.01
 scheduler: linear
-warmup_ratio: 0.1
+warmup_ratio: 0.33
 warmup_steps: null
+override_lr_on_resume: false

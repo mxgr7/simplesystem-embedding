@@ -452,15 +452,22 @@ class OptimizerSchedulerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported optimizer scheduler"):
             resolve_scheduler_name("exponential")
 
-    def test_resolve_warmup_steps_uses_ratio_when_steps_are_not_set(self):
+    def test_resolve_warmup_steps_uses_ratio_relative_to_one_epoch(self):
         optimizer_cfg = OmegaConf.create({"warmup_ratio": 0.1, "warmup_steps": None})
 
-        self.assertEqual(resolve_warmup_steps(optimizer_cfg, 200), 20)
+        self.assertEqual(resolve_warmup_steps(optimizer_cfg, 200, 600), 20)
 
     def test_resolve_warmup_steps_prefers_explicit_steps(self):
         optimizer_cfg = OmegaConf.create({"warmup_ratio": 0.1, "warmup_steps": 25})
 
-        self.assertEqual(resolve_warmup_steps(optimizer_cfg, 200), 25)
+        self.assertEqual(resolve_warmup_steps(optimizer_cfg, 200, 600), 25)
+
+    def test_resolve_warmup_steps_caps_explicit_steps_at_total(self):
+        optimizer_cfg = OmegaConf.create(
+            {"warmup_ratio": 0.0, "warmup_steps": 5000}
+        )
+
+        self.assertEqual(resolve_warmup_steps(optimizer_cfg, 200, 600), 600)
 
     @patch("embedding_train.model.get_scheduler")
     @patch("embedding_train.model.AutoModel.from_pretrained")
@@ -486,6 +493,22 @@ class OptimizerSchedulerTests(unittest.TestCase):
 
     @patch("embedding_train.model.get_scheduler")
     @patch("embedding_train.model.AutoModel.from_pretrained")
+    def test_configure_optimizers_warmup_ratio_is_relative_to_one_epoch(
+        self, from_pretrained, get_scheduler
+    ):
+        from_pretrained.return_value = _EncoderStub()
+        get_scheduler.return_value = object()
+        module = EmbeddingModule(build_cfg(trainer={"max_epochs": 4}))
+        module._trainer = SimpleNamespace(estimated_stepping_batches=1000)
+
+        module.configure_optimizers()
+
+        # 1000 total steps / 4 epochs = 250 steps per epoch, 10% warmup = 25
+        self.assertEqual(get_scheduler.call_args.kwargs["num_warmup_steps"], 25)
+        self.assertEqual(get_scheduler.call_args.kwargs["num_training_steps"], 1000)
+
+    @patch("embedding_train.model.get_scheduler")
+    @patch("embedding_train.model.AutoModel.from_pretrained")
     def test_configure_optimizers_returns_bare_optimizer_when_scheduler_disabled(
         self, from_pretrained, get_scheduler
     ):
@@ -497,6 +520,68 @@ class OptimizerSchedulerTests(unittest.TestCase):
 
         self.assertIsInstance(configured, torch.optim.AdamW)
         get_scheduler.assert_not_called()
+
+
+class OnTrainStartLearningRateOverrideTests(unittest.TestCase):
+    def _build_module(self, **optimizer_overrides):
+        with patch("embedding_train.model.AutoModel.from_pretrained") as pretrained:
+            pretrained.return_value = _EncoderStub()
+            return EmbeddingModule(build_cfg(optimizer=optimizer_overrides))
+
+    def _build_trainer(self, ckpt_path, optimizer, scheduler=None):
+        scheduler_configs = []
+        if scheduler is not None:
+            scheduler_configs.append(SimpleNamespace(scheduler=scheduler))
+        return SimpleNamespace(
+            ckpt_path=ckpt_path,
+            optimizers=[optimizer],
+            lr_scheduler_configs=scheduler_configs,
+        )
+
+    def test_on_train_start_overrides_lr_when_enabled_and_resuming(self):
+        module = self._build_module(lr=5.0e-5, override_lr_on_resume=True)
+        optimizer = torch.optim.AdamW(
+            [torch.nn.Parameter(torch.zeros(1))], lr=1.0e-5
+        )
+        optimizer.param_groups[0]["initial_lr"] = 1.0e-5
+        scheduler = SimpleNamespace(base_lrs=[1.0e-5])
+        module._trainer = self._build_trainer(
+            "checkpoints/run-001/last.ckpt", optimizer, scheduler
+        )
+
+        module.on_train_start()
+
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 5.0e-5)
+        self.assertAlmostEqual(optimizer.param_groups[0]["initial_lr"], 5.0e-5)
+        self.assertEqual(scheduler.base_lrs, [5.0e-5])
+
+    def test_on_train_start_is_noop_when_flag_disabled(self):
+        module = self._build_module(lr=5.0e-5, override_lr_on_resume=False)
+        optimizer = torch.optim.AdamW(
+            [torch.nn.Parameter(torch.zeros(1))], lr=1.0e-5
+        )
+        scheduler = SimpleNamespace(base_lrs=[1.0e-5])
+        module._trainer = self._build_trainer(
+            "checkpoints/run-001/last.ckpt", optimizer, scheduler
+        )
+
+        module.on_train_start()
+
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 1.0e-5)
+        self.assertEqual(scheduler.base_lrs, [1.0e-5])
+
+    def test_on_train_start_is_noop_when_not_resuming(self):
+        module = self._build_module(lr=5.0e-5, override_lr_on_resume=True)
+        optimizer = torch.optim.AdamW(
+            [torch.nn.Parameter(torch.zeros(1))], lr=1.0e-5
+        )
+        scheduler = SimpleNamespace(base_lrs=[1.0e-5])
+        module._trainer = self._build_trainer(None, optimizer, scheduler)
+
+        module.on_train_start()
+
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 1.0e-5)
+        self.assertEqual(scheduler.base_lrs, [1.0e-5])
 
 
 class EmbeddingModuleRecordLoggingTests(unittest.TestCase):
