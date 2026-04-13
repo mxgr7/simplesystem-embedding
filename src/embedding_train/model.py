@@ -253,6 +253,9 @@ class EmbeddingModule(L.LightningModule):
         self.encoder = self.encoder.to(dtype=self.model_dtype)
         self.encoder.train()
 
+        if getattr(cfg.model, "compile", False):
+            self.encoder = torch.compile(self.encoder)
+
     def forward(self, query_inputs, offer_inputs):
         query_embeddings = self.encode(query_inputs)
         offer_embeddings = self.encode(offer_inputs)
