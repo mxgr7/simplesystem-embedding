@@ -1,7 +1,10 @@
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from embedding_train.batching import (
     AnchorQueryBatchBuilder,
+    AnchorQueryBatchDataset,
     RandomQueryPoolBuilder,
     SYNTHETIC_NEGATIVE_LABEL,
     build_synthetic_negative_record,
@@ -277,6 +280,67 @@ class RandomQueryPoolBuilderTests(unittest.TestCase):
         self.assertEqual(len(synthetic_records), 1)
         self.assertEqual(synthetic_records[0]["query_id"], "q1")
         self.assertFalse(synthetic_records[0]["offer_id"].startswith("q1-"))
+
+
+class AnchorQueryBatchDatasetTests(unittest.TestCase):
+    def _make_multi_query_builder(self):
+        inputs = build_query_sampling_inputs()
+        inputs["eligible_query_ids"] = ["q1", "q2", "q3"]
+        # q2/q3 only have 2 positives; use n_pos_samples_per_query=2 to stay eligible.
+        return AnchorQueryBatchBuilder(
+            positive_records_by_query=inputs["positive_records_by_query"],
+            negative_records_by_query=inputs["negative_records_by_query"],
+            eligible_query_ids=inputs["eligible_query_ids"],
+            synthetic_negative_offer_pool=inputs["synthetic_negative_offer_pool"],
+            batch_size=4,
+            n_pos_samples_per_query=2,
+            n_neg_samples_per_query=1,
+            seed=inputs["seed"],
+        )
+
+    def _run_shard(self, batches_per_epoch, worker_id, num_workers, initial_seed):
+        dataset = AnchorQueryBatchDataset(
+            self._make_multi_query_builder(), batches_per_epoch
+        )
+        info = SimpleNamespace(id=worker_id, num_workers=num_workers)
+        with mock.patch(
+            "embedding_train.batching.torch.utils.data.get_worker_info",
+            return_value=info,
+        ), mock.patch(
+            "embedding_train.batching.torch.initial_seed",
+            return_value=initial_seed,
+        ):
+            return list(iter(dataset))
+
+    def test_no_worker_info_yields_full_epoch(self):
+        dataset = AnchorQueryBatchDataset(self._make_multi_query_builder(), 9)
+        with mock.patch(
+            "embedding_train.batching.torch.utils.data.get_worker_info",
+            return_value=None,
+        ):
+            batches = list(iter(dataset))
+        self.assertEqual(len(batches), 9)
+
+    def test_sharding_divides_batches_across_workers(self):
+        # 9 batches over 4 workers: ceil split 3,2,2,2 → total 9, none duplicated.
+        counts = [
+            len(self._run_shard(9, worker_id=i, num_workers=4, initial_seed=1000 + i))
+            for i in range(4)
+        ]
+        self.assertEqual(sorted(counts, reverse=True), [3, 2, 2, 2])
+        self.assertEqual(sum(counts), 9)
+
+    def test_workers_produce_disjoint_anchor_sequences(self):
+        # Same batches_per_epoch per worker, different initial_seed → different
+        # anchor choices. Without the per-worker re-seed, both workers would
+        # replay the pickled-at-construction RNG and yield identical sequences.
+        worker_0 = self._run_shard(6, worker_id=0, num_workers=2, initial_seed=1001)
+        worker_1 = self._run_shard(6, worker_id=1, num_workers=2, initial_seed=2002)
+        anchors_0 = [b["batch_stats"]["anchor_query_id"] for b in worker_0]
+        anchors_1 = [b["batch_stats"]["anchor_query_id"] for b in worker_1]
+        self.assertEqual(len(anchors_0), 3)
+        self.assertEqual(len(anchors_1), 3)
+        self.assertNotEqual(anchors_0, anchors_1)
 
 
 if __name__ == "__main__":

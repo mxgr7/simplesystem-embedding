@@ -1,5 +1,6 @@
 import random
 
+import torch
 from torch.utils.data import IterableDataset
 
 
@@ -486,7 +487,18 @@ class AnchorQueryBatchDataset(IterableDataset):
         self.batches_per_epoch = int(batches_per_epoch)
 
     def __iter__(self):
-        for _ in range(self.batches_per_epoch):
+        info = torch.utils.data.get_worker_info()
+        if info is None:
+            n_batches = self.batches_per_epoch
+        else:
+            base, rem = divmod(self.batches_per_epoch, info.num_workers)
+            n_batches = base + (1 if info.id < rem else 0)
+            # torch.initial_seed() is derived from (base_seed, worker_id) and
+            # rotated per epoch by the DataLoader, so this gives each worker a
+            # disjoint, epoch-varying RNG stream. Without this, every worker
+            # replays the identical sequence from the pickled builder state.
+            self.batch_builder.randomizer.seed(torch.initial_seed())
+        for _ in range(n_batches):
             yield self.batch_builder.build_batch()
 
     def __len__(self):
