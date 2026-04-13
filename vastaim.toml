@@ -7,3 +7,12 @@ remote_workdir = "~/workspaces/simplesystem/embedding/main"
 local_env_file = "./.env"
 project_commands = ["aws s3 sync s3://mxgr/simplesystem/data/ ~/workspaces/simplesystem/data/ --exclude '*' --include 'queries_offers_labeled.parquet'"]
 
+[projects.simplesystem.s3_backup]
+bucket = "mxgr-vastaim"
+prefix = "simplesystem_home"
+aws_profile = "vastaim-backup"
+paths = ["/home/max"]
+exclude = ["*.pyc", "__pycache__", "*/.cache/*"]
+restic_password = "pw"
+
+
