@@ -1,0 +1,6 @@
+defaults:
+  - base
+
+output_dim: 256
+loss_type: distill
+teacher_checkpoint: checkpoints/powerful-shad-91/best-step=6056-val_full_catalog_ndcg_at_5=0.7247.ckpt
