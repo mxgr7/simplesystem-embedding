@@ -5,7 +5,7 @@ import hydra
 import lightning as L
 import torch
 from dotenv import load_dotenv
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import MLFlowLogger
 from omegaconf import OmegaConf
 
@@ -68,6 +68,22 @@ def _resolve_checkpoint_monitor(cfg):
     return "val/by_batch/exact_mrr"
 
 
+class DatasetStatsLogger(Callback):
+    def __init__(self):
+        self._logged = False
+
+    def setup(self, trainer, pl_module, stage):
+        if self._logged or trainer.datamodule is None:
+            return
+        dataset_stats = getattr(trainer.datamodule, "dataset_stats", None)
+        if not dataset_stats:
+            return
+        trainer.logger.log_hyperparams(
+            {f"dataset/{k}": v for k, v in dataset_stats.items()}
+        )
+        self._logged = True
+
+
 def build_callbacks(cfg, logger):
     checkpoint_dir = Path(cfg.trainer.checkpoint_dir) / _resolve_checkpoint_run_name(
         logger
@@ -93,6 +109,7 @@ def build_callbacks(cfg, logger):
     return [
         checkpoint_callback,
         LearningRateMonitor(logging_interval="step"),
+        DatasetStatsLogger(),
     ]
 
 
@@ -108,7 +125,12 @@ def run(cfg):
     datamodule = EmbeddingDataModule(cfg)
     model = EmbeddingModule(cfg)
     logger = build_logger(cfg)
-    print(f"MLflow run directory: {logger.experiment.get_run(logger.run_id).info.artifact_uri}")
+    # Materialize the MLflow run before build_callbacks reads logger.run_id.
+    _ = logger.experiment
+    logging.info(
+        "MLflow run artifact URI: %s",
+        logger.experiment.get_run(logger.run_id).info.artifact_uri,
+    )
     callbacks = build_callbacks(cfg, logger)
 
     trainer = L.Trainer(
@@ -128,12 +150,6 @@ def run(cfg):
     )
 
     logger.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
-
-    datamodule.setup(stage="fit")
-    if datamodule.dataset_stats:
-        logger.log_hyperparams(
-            {f"dataset/{k}": v for k, v in datamodule.dataset_stats.items()}
-        )
 
     if cfg.trainer.validate_before_training:
         original_finalize = logger.finalize
