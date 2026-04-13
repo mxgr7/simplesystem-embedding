@@ -82,5 +82,19 @@ on every subsequent run.
 - **Regularization** (`weight_decay=0.1` or LR cooldown for last 2 ep).
 - **Re-mining iteration**: mine a second pool from the #1 winner if that run
   beats current SOTA by more than the pool-staleness-implied gap.
+- **ANCE-style in-training negative refresh**: re-mine the SHN pool from the
+  *trainee's own* checkpoint every N epochs (or every K steps) instead of
+  once up front from a different encoder. Motivation: on the current
+  `unequaled-pig-542` vs `adorable-mole-653` comparison, the negatives mined
+  once from the stronger baseline have a visibly lower score distribution
+  in the trainee's geometry (mean cosine 0.35 vs 0.43 at the same rank
+  window) — "semi-hard" is defined relative to the miner, so a geometry
+  mismatch turns them into effectively easy negatives and weakens the
+  per-step signal. False-negative rate is ~2.7% in both pools, so label
+  noise is *not* the cause. Cheap halfway alternative to test first:
+  warm-start the trainee from the baseline checkpoint so the initial
+  geometry matches the miner. Full ANCE refresh is the proper fix but
+  needs a mining hook inside the training loop and a decision on refresh
+  cadence (tradeoff: mining cost vs staleness).
 - **Triplet revisit**: only if a new base model or dataset changes the
   structural picture above.
