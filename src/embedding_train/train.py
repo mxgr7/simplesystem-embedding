@@ -126,7 +126,7 @@ def build_callbacks(cfg, logger):
         filename=f"best-step={{step}}-{safe_monitor}={{{monitor}:.4f}}",
         monitor=monitor,
         mode="max",
-        save_top_k=3,
+        save_top_k=1,
         save_last=True,
         auto_insert_metric_name=False,
     )
