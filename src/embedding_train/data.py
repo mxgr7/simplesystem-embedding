@@ -1,5 +1,9 @@
+import hashlib
+import json
+import pickle
 import random
 import sys
+from pathlib import Path
 from typing import cast
 
 import pandas as pd
@@ -28,6 +32,8 @@ from embedding_train.rendering import RowTextRenderer
 
 VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query", "random_query_pool"}
 VALID_VAL_SPLIT_MODES = {"offer_connected_component", "query_id"}
+PREPARED_RECORDS_CACHE_SCHEMA_VERSION = 1
+DEFAULT_PREPARED_RECORDS_CACHE_DIR = ".cache/prepared_dataset"
 
 
 def build_setup_progress(total_rows):
@@ -147,47 +153,9 @@ class EmbeddingDataModule(LightningDataModule):
         if self.train_dataset is not None and self.val_dataset is not None:
             return
 
-        frame = pd.read_parquet(self.cfg.data.path)
-
-        if "_rn" in frame.columns:
-            frame = frame.drop(columns=["_rn"])
-
-        if self.cfg.data.limit_rows:
-            frame = frame.head(int(self.cfg.data.limit_rows))
-
-        columns = list(frame.columns)
-        all_records = []
+        all_records, skipped_rows = self._load_or_prepare_records()
         train_records = []
         val_records = []
-        skipped_rows = 0
-        total_rows = len(frame)
-
-        with build_setup_progress(total_rows) as progress:
-            task_id = progress.add_task(
-                "Preparing dataset",
-                total=max(1, total_rows),
-                prepared_rows=0,
-                skipped_rows=0,
-            )
-
-            for processed_rows, values in enumerate(
-                frame.itertuples(index=False, name=None), start=1
-            ):
-                row = dict(zip(columns, values))
-                record = self._build_record(row)
-                if record is None:
-                    skipped_rows += 1
-                else:
-                    all_records.append(record)
-
-                update_setup_progress(
-                    progress,
-                    task_id,
-                    processed_rows,
-                    max(1, total_rows),
-                    len(all_records),
-                    skipped_rows,
-                )
 
         if self.val_split_mode == "query_id":
             train_records, val_records, split_stats = self._split_records_by_query_id(
@@ -417,6 +385,131 @@ class EmbeddingDataModule(LightningDataModule):
             hard_negative_records_by_query=self.hard_negative_records_by_query,
         )
         return PairDataset(pool_builder.build_pool())
+
+    def _load_or_prepare_records(self):
+        cache_path = self._prepared_records_cache_path()
+
+        if cache_path is not None and cache_path.exists():
+            try:
+                with cache_path.open("rb") as handle:
+                    cached = pickle.load(handle)
+                print(
+                    f"Loaded prepared dataset from cache: {cache_path} "
+                    f"({len(cached['records'])} records, "
+                    f"{cached['skipped_rows']} skipped)",
+                    file=sys.stderr,
+                )
+                return cached["records"], cached["skipped_rows"]
+            except Exception as exc:
+                print(
+                    f"Failed to load prepared dataset cache at {cache_path}: {exc}. "
+                    "Rebuilding.",
+                    file=sys.stderr,
+                )
+
+        all_records, skipped_rows = self._prepare_records()
+
+        if cache_path is not None:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+                with tmp_path.open("wb") as handle:
+                    pickle.dump(
+                        {"records": all_records, "skipped_rows": skipped_rows},
+                        handle,
+                        protocol=pickle.HIGHEST_PROTOCOL,
+                    )
+                tmp_path.replace(cache_path)
+                print(
+                    f"Cached prepared dataset to: {cache_path}",
+                    file=sys.stderr,
+                )
+            except Exception as exc:
+                print(
+                    f"Failed to write prepared dataset cache to {cache_path}: {exc}",
+                    file=sys.stderr,
+                )
+
+        return all_records, skipped_rows
+
+    def _prepare_records(self):
+        frame = pd.read_parquet(self.cfg.data.path)
+
+        if "_rn" in frame.columns:
+            frame = frame.drop(columns=["_rn"])
+
+        if self.cfg.data.limit_rows:
+            frame = frame.head(int(self.cfg.data.limit_rows))
+
+        columns = list(frame.columns)
+        all_records = []
+        skipped_rows = 0
+        total_rows = len(frame)
+
+        with build_setup_progress(total_rows) as progress:
+            task_id = progress.add_task(
+                "Preparing dataset",
+                total=max(1, total_rows),
+                prepared_rows=0,
+                skipped_rows=0,
+            )
+
+            for processed_rows, values in enumerate(
+                frame.itertuples(index=False, name=None), start=1
+            ):
+                row = dict(zip(columns, values))
+                record = self._build_record(row)
+                if record is None:
+                    skipped_rows += 1
+                else:
+                    all_records.append(record)
+
+                update_setup_progress(
+                    progress,
+                    task_id,
+                    processed_rows,
+                    max(1, total_rows),
+                    len(all_records),
+                    skipped_rows,
+                )
+
+        return all_records, skipped_rows
+
+    def _prepared_records_cache_path(self):
+        data_cfg = self.cfg.data
+
+        if not bool(data_cfg.get("cache_prepared_dataset", True)):
+            return None
+
+        source_path = Path(str(data_cfg.path))
+        try:
+            stat_result = source_path.stat()
+        except OSError:
+            return None
+
+        cache_dir_cfg = data_cfg.get(
+            "prepare_cache_dir", DEFAULT_PREPARED_RECORDS_CACHE_DIR
+        )
+        cache_dir = Path(str(cache_dir_cfg))
+
+        key_payload = {
+            "schema_version": PREPARED_RECORDS_CACHE_SCHEMA_VERSION,
+            "source_path": str(source_path.resolve()),
+            "source_mtime_ns": stat_result.st_mtime_ns,
+            "source_size": stat_result.st_size,
+            "limit_rows": data_cfg.limit_rows,
+            "query_id_column": str(data_cfg.get("query_id_column", "query_id")),
+            "offer_id_column": str(
+                data_cfg.get("offer_id_column", "offer_id_b64")
+            ),
+            "query_template": str(data_cfg.query_template),
+            "offer_template": str(data_cfg.offer_template),
+            "positive_label": str(data_cfg.positive_label),
+            "clean_html": bool(data_cfg.clean_html),
+        }
+        serialized = json.dumps(key_payload, sort_keys=True, default=str)
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+        return cache_dir / f"prepared-{digest}.pkl"
 
     def _build_record(self, row):
         return self.row_renderer.build_training_record(row)

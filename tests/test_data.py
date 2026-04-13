@@ -1,6 +1,8 @@
 import io
+import tempfile
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -57,6 +59,7 @@ def build_cfg(**data_overrides):
                 "limit_rows": None,
                 "query_template": "{{ query_term }}",
                 "offer_template": "{{ name }}",
+                "cache_prepared_dataset": False,
                 **data_overrides,
             },
         }
@@ -369,6 +372,71 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             datamodule.setup()
 
         self.assertIn("Preparing dataset", stderr.getvalue())
+
+    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    def test_prepared_records_cache_is_reused_when_parameters_are_unchanged(
+        self, from_pretrained
+    ):
+        from_pretrained.return_value = _TokenizerStub()
+        frame = self.build_frame()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            parquet_path = tmp_path / "dataset.parquet"
+            frame.to_parquet(parquet_path)
+            cache_dir = tmp_path / "prepared_cache"
+
+            def make_datamodule():
+                return EmbeddingDataModule(
+                    build_cfg(
+                        path=str(parquet_path),
+                        val_fraction=0.0,
+                        cache_prepared_dataset=True,
+                        prepare_cache_dir=str(cache_dir),
+                    )
+                )
+
+            first = make_datamodule()
+            first_stderr = io.StringIO()
+            with redirect_stderr(first_stderr):
+                first.setup()
+
+            self.assertIn("Preparing dataset", first_stderr.getvalue())
+            cache_files = list(cache_dir.glob("prepared-*.pkl"))
+            self.assertEqual(len(cache_files), 1)
+
+            second = make_datamodule()
+            with patch(
+                "embedding_train.data.EmbeddingDataModule._prepare_records"
+            ) as prepare_records:
+                second_stderr = io.StringIO()
+                with redirect_stderr(second_stderr):
+                    second.setup()
+                prepare_records.assert_not_called()
+
+            self.assertIn(
+                "Loaded prepared dataset from cache", second_stderr.getvalue()
+            )
+            self.assertEqual(
+                len(second.train_dataset.records), len(first.train_dataset.records)
+            )
+
+            third = EmbeddingDataModule(
+                build_cfg(
+                    path=str(parquet_path),
+                    val_fraction=0.0,
+                    cache_prepared_dataset=True,
+                    prepare_cache_dir=str(cache_dir),
+                    query_template="changed: {{ query_term }}",
+                )
+            )
+            third_stderr = io.StringIO()
+            with redirect_stderr(third_stderr):
+                third.setup()
+
+            self.assertIn("Preparing dataset", third_stderr.getvalue())
+            cache_files_after = list(cache_dir.glob("prepared-*.pkl"))
+            self.assertEqual(len(cache_files_after), 2)
 
     @patch("embedding_train.data.pd.read_parquet")
     @patch("embedding_train.data.AutoTokenizer.from_pretrained")
