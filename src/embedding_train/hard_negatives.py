@@ -158,7 +158,9 @@ def load_mining_model(args):
     return model, cfg
 
 
-def build_positive_offer_ids_by_query(input_path, positive_label, query_id_column, limit_rows):
+def build_positive_offer_ids_by_query(
+    input_path, positive_label, query_id_column, offer_id_column, limit_rows
+):
     parquet_file = pq.ParquetFile(input_path)
     positive_offer_ids_by_query = {}
     processed_rows = 0
@@ -175,7 +177,7 @@ def build_positive_offer_ids_by_query(input_path, positive_label, query_id_colum
 
         for row in rows:
             query_id = str(row.get(query_id_column, "") or "").strip()
-            offer_id = str(row.get("offer_id_b64", "") or "").strip()
+            offer_id = str(row.get(offer_id_column, "") or "").strip()
             label = str(row.get("label", "") or "").strip()
 
             if not query_id or not offer_id:
@@ -318,7 +320,11 @@ def run_hard_negative_mining(args):
 
     print("Building positive offer sets from training data...")
     positive_offer_ids_by_query = build_positive_offer_ids_by_query(
-        args.input, positive_label, query_id_column, args.limit_rows,
+        args.input,
+        positive_label,
+        query_id_column,
+        offer_id_column,
+        args.limit_rows,
     )
     print(f"  queries with positives: {len(positive_offer_ids_by_query)}")
 
