@@ -5,3 +5,4 @@ precision: bf16-mixed
 max_epochs: 8
 val_check_interval: 1.0
 validate_before_training: false
+enable_checkpointing: false

@@ -105,6 +105,14 @@ class DatasetStatsLogger(Callback):
 
 
 def build_callbacks(cfg, logger):
+    callbacks = [
+        LearningRateMonitor(logging_interval="step"),
+        DatasetStatsLogger(),
+    ]
+
+    if not getattr(cfg.trainer, "enable_checkpointing", True):
+        return callbacks
+
     checkpoint_dir = Path(cfg.trainer.checkpoint_dir) / _resolve_checkpoint_run_name(
         logger
     )
@@ -126,11 +134,7 @@ def build_callbacks(cfg, logger):
         f"last-step={{step}}-{safe_monitor}={{{monitor}:.4f}}"
     )
 
-    return [
-        checkpoint_callback,
-        LearningRateMonitor(logging_interval="step"),
-        DatasetStatsLogger(),
-    ]
+    return [checkpoint_callback, *callbacks]
 
 
 @hydra.main(version_base="1.3", config_path=str(CONFIG_DIR), config_name="config")
@@ -164,6 +168,9 @@ def run(cfg):
         limit_train_batches=cfg.trainer.limit_train_batches,
         limit_val_batches=cfg.trainer.limit_val_batches,
         val_check_interval=cfg.trainer.val_check_interval,
+        enable_checkpointing=bool(
+            getattr(cfg.trainer, "enable_checkpointing", True)
+        ),
         default_root_dir=str(Path.cwd()),
         logger=logger,
         callbacks=callbacks,
