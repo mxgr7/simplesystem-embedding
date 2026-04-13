@@ -1,205 +1,86 @@
 # Next experiments
 
-Context: `model.triplet_negative_selection` now toggles between `semi_hard`
-(default) and `hardest` in `in_batch_triplet_loss`. We need to validate that
-the new default is actually better before committing to it for the next
-production run, and understand how it interacts with batch size, LR, and the
-offline-mined semi-hard pool.
+Triplet is parked (see below). The next SOTA candidate is contrastive on the
+fresh SHN pool.
 
-## 1. Baseline vs semi-hard triplet (A/B)
+## Recent runs
 
-Goal: confirm the new default beats the old behavior on the same budget.
+| run | loss | SHN pool | epochs | peak MRR | nDCG@10 | Recall@10 | notes |
+|---|---|---|---|---|---|---|---|
+| `adorable-mole-653` (`e7809027…`) | contrastive | `placid-snake-749` | 10 | **0.816** | 0.740 | 0.931 | current SOTA, peaked ep ~7.5 |
+| `respected-bass-254` (`680d0bfe…`) | triplet/`semi_hard` | stale `placid-snake-749` | 5 (killed) | 0.7478 (ep 4) | 0.6742 | 0.8505 | regressed ep 5 |
+| `nosy-smelt-449` (`2a7cebd9…`) | triplet/`semi_hard` | fresh `adorable-mole-653` | 4 (killed) | 0.7329 (ep 3) | 0.6588 | 0.8321 | regressed ep 4 |
+| `beautiful-bear-447` (`eae167e0…`) | triplet/`hardest` | fresh `adorable-mole-653` | 3 (killed) | 0.7163 (ep 2) | 0.6544 | 0.8403 | regressed ep 3, loss locked at margin |
 
-Run two matched runs, identical seed, config, data, steps:
+All: `intfloat/multilingual-e5-base`, bs=256, lr=1e-5, warmup_ratio=0.33
+per-epoch.
 
-```bash
-embedding-train model.loss_type=triplet model.triplet_negative_selection=hardest
-embedding-train model.loss_type=triplet model.triplet_negative_selection=semi_hard
-```
+## Triplet is parked
 
-Compare at matched `records_seen`:
-- `val/ndcg_at_5`, `val/exact_mrr`, `val/exact_recall_at_10`
-- `train/loss` trajectory shape (semi-hard should be smoother, lower variance)
-- Collapse check: any run where `train/loss` drops near 0 in the first epoch
-  while val metrics stagnate is the failure mode semi-hard is meant to avoid —
-  expect to see it in `hardest`, not in `semi_hard`.
+Three triplet runs across two negative-selection modes and two pool-freshness
+conditions all peak in the 0.72–0.75 MRR band and regress within one epoch of
+the peak. Contrastive with identical config hits 0.816 smoothly. Gap is
+~0.08 MRR and one-directional.
 
-Decision rule: keep `semi_hard` as default if it matches or beats `hardest` on
-val; revert otherwise.
+Observations that shaped the call:
 
-## 2. Semi-hard vs contrastive on the same data
+- Fresh pool fixed the data confound (`train/triplet_semi_hard_fallback_share
+  = 0.0` on the new pool vs meaningful fallback on the stale one). Retrieval
+  still regressed, so stale pool was never the root cause.
+- `hardest` mode's train loss parks at the margin (~0.20 with margin=0.2)
+  because the hardest negative on a hard-mined pool usually sits at or above
+  the positive. Loss signal is useless in that mode; retrieval still tracks
+  semi-hard within 0.003 MRR but collapses one epoch earlier.
+- Val loss decouples from `val/full_catalog/*` on every triplet run — val
+  loss keeps improving (or stays parked) while retrieval regresses.
+- `train/triplet_valid_anchor_count` is only 2–20 per batch of 256. Triplet
+  structurally uses far less of each batch than contrastive's in-batch
+  negatives do.
 
-Goal: sanity-check that the semi-hard triplet is in the same league as the
-current `contrastive` default. If it isn't, the toggle work is moot.
+The triplet implementation stays in the tree — it's tested and cheap to keep.
+Revisit only on a different base model, a different dataset, or a
+qualitatively different batching format (not another tuning knob on this
+setup).
 
-```bash
-embedding-train model.loss_type=contrastive
-embedding-train model.loss_type=triplet model.triplet_negative_selection=semi_hard
-```
+## Tooling — close before the next launch
 
-Match LR, batch size, steps, seed. Report val metrics side by side. Contrastive
-has been the workhorse, so treat it as the bar to clear.
+- ~~`triplet_semi_hard_fallback_share` metric~~ — done in `2c537fe`. Triplet
+  runs log fallback share/count + valid-anchor count (train and val).
+- **`ModelCheckpoint`** with `save_top_k>=1`, monitor `val/full_catalog/mrr`.
+  Every overshoot so far has lost its peak weights.
+- **`EarlyStopping`** on the same monitor, patience ~2 epochs. Stops the
+  regression tail automatically and pays off on contrastive runs too.
 
-## 3. Batch-size sensitivity for semi-hard
+## Experiments
 
-Goal: check whether semi-hard's reliance on "enough candidates below positive"
-introduces a floor on useful batch size.
+In priority order. All inherit `adorable-mole-653`'s config (e5-base, bs=256,
+lr=1e-5, warmup_ratio=0.33) unless noted.
 
-Sweep batch size at fixed steps and LR:
+### 1. Contrastive on the fresh SHN pool
 
-```bash
-embedding-train model.loss_type=triplet data.batch_size=32
-embedding-train model.loss_type=triplet data.batch_size=64
-embedding-train model.loss_type=triplet data.batch_size=128
-```
+The pool mined from `adorable-mole-653` is ready
+(`semi_hard_negatives-adorable-mole-653.parquet`, 21k queries / 210k records).
+Re-train contrastive on it — most likely source of lift, since the current
+SOTA was trained on a pool mined from a 6-MRR-points-weaker encoder and its
+`batch_semi_hard_negative_share ≈ 0.04` suggested the old pool barely
+contributed.
 
-Log and inspect:
-- `train/by_batch/batch_semi_hard_negative_share` — how often the mined pool
-  is actually drawn from
-- Frequency of the semi-hard fallback path (all negatives above positive).
-  **Gap:** we currently don't log this. If this experiment matters, add a
-  `triplet_semi_hard_fallback_share` metric in `in_batch_triplet_loss` (count
-  rows where `has_semi_hard` is False, divide by `valid_rows.sum()`) before
-  running the sweep.
+### 2. Schedule audit: 8 vs 10 epochs
 
-Hypothesis: fallback share drops monotonically with batch size. If it's >30%
-at the chosen production batch size, semi-hard is effectively acting like
-`hardest` for a meaningful slice of the batch.
+`adorable-mole-653` peaked ~ep 7.5 with the tail flat. Re-run #1 at
+`trainer.max_epochs=8`. If gap < 0.005 MRR, make 8 the default — saves 20%
+on every subsequent run.
 
-## 4. LR sensitivity
+### 3. Warmup sweep
 
-Goal: does semi-hard need a different LR than contrastive/hardest?
+`warmup_ratio ∈ {0.1, 0.2, 0.33, 0.5}` once #1 and #2 have landed.
 
-Small sweep on top of the winner from experiment 1:
+### Deferred (only if the above leaves a clear gap)
 
-```bash
-embedding-train model.loss_type=triplet optimizer.lr=1.0e-5
-embedding-train model.loss_type=triplet optimizer.lr=2.0e-5   # current default
-embedding-train model.loss_type=triplet optimizer.lr=4.0e-5
-```
-
-Watch for plateau in `train/loss`: if semi-hard plateaus earlier at the
-default LR, the 4e-5 run should pull ahead.
-
-## 5. Interaction with offline-mined (semi-)hard negatives
-
-Goal: the offline mining pipeline (`embedding-mine-hard-negatives`) produces
-both hard and semi-hard rows, and `AnchorQueryBatchBuilder` already seeds
-batches with them. In-batch semi-hard triplet selection is a second filter on
-top of that. Do they compose or fight?
-
-Four-cell matrix:
-
-| mined negatives | in-batch selection | expected behavior |
-|---|---|---|
-| none              | `hardest`   | legacy |
-| none              | `semi_hard` | current change, unaugmented |
-| `hard_negative`   | `semi_hard` | hard pool + softened filter |
-| `semi_hard_negative` | `semi_hard` | full semi-hard stack |
-
-Run each with matched steps/batch/LR. Key question: does the offline
-semi-hard pool already provide enough of the stability benefit that the
-in-batch filter stops mattering? If yes, we could simplify back to `hardest`
-in-batch selection when a mined semi-hard pool is configured.
-
-## 6. Strict FaceNet band (stretch)
-
-Goal: the current implementation uses the loose `sim < pos_sim` definition.
-FaceNet's strict band is `pos_sim - margin < sim < pos_sim`. Try it as an
-opt-in if experiments 1–5 show semi-hard winning clearly.
-
-Implementation sketch: extend `negative_selection` with a `facenet_band` mode
-that ANDs the existing `below_positive_mask` with `sim > pos_sim - margin`,
-keeping the same pool-hardest fallback. Not worth the complexity unless the
-loose variant already looks promising.
-
-## 7. Follow-ups from `adorable-mole-653` (contrastive, 10-epoch SHN)
-
-Context: `adorable-mole-653` (run_id `e7809027a96b47e2bc33fda1778d9cb8`) is the
-current SOTA on the full-catalog eval — MRR 0.816, nDCG@10 0.740, Recall@10
-0.931. It's `intfloat/multilingual-e5-base` + contrastive loss, bs=256,
-lr=1e-5, warmup_ratio=0.33 per-epoch, 10 epochs, with SHN pool
-`semi_hard_negatives-placid-snake-749.parquet`. Two observations from its
-curves drive the next ideas:
-
-- Val metrics peaked at epoch ~7.5 (MRR 0.819) and the last three evals
-  oscillate slightly below the peak. Train loss ticked up on the final epoch
-  (0.590 → 0.611). Mild late-epoch plateau / hint of overfit.
-- `batch_semi_hard_negative_share ≈ 0.040` — only ~10 of ~246 in-batch
-  negatives per step come from the curated SHN pool. The lift over
-  `secretive-squid-635` (same SHN file, 6 epochs, MRR 0.761) looks like it
-  comes mostly from the longer schedule + per-epoch warmup, *not* from the
-  mined pool doing heavy lifting at its current ratio.
-
-### 7a. Shorter schedule at matched quality
-
-Hypothesis: 8 epochs captures ~99% of the 10-epoch quality at 20% less
-compute. Re-run adorable-mole-653's config with `trainer.max_epochs=8` and
-compare peak + final val metrics. If the gap is <0.005 MRR, make 8 the new
-default and stop burning the extra two epochs.
-
-### 7b. Warmup ratio sweep
-
-`warmup_ratio=0.33` (per-epoch, set in `7eb28a2`) is the suspected lever
-behind the jump from `secretive-squid-635` (0.761) to `adorable-mole-653`
-(0.816), but we've only tested one value. Sweep {0.1, 0.2, 0.33, 0.5} at
-fixed 8 epochs / bs=256 / lr=1e-5. Watch early-epoch val curves — the point
-is whether a shorter warmup gets us to the same peak faster, or a longer one
-delays the plateau.
-
-### 7c. Re-mine SHNs from the current checkpoint
-
-The SHN pool was mined from `placid-snake-749` (MRR 0.760), which is ~6 MRR
-points behind the current encoder. That pool's "semi-hard" rows are almost
-certainly *easy* for adorable-mole-653 — which would explain why the in-batch
-SHN share is so low and why the contribution of the mined pool looks muted.
-
-Action: run `embedding-mine-hard-negatives` with adorable-mole-653's
-checkpoint as the scoring model, produce a fresh
-`semi_hard_negatives-adorable-mole-653.parquet`, and re-train with the new
-pool at the 8-epoch schedule. This is the single change I'd expect to move
-the needle most.
-
-### 7d. Raise the in-batch SHN share
-
-Orthogonal to 7c: `data.n_neg_samples_per_query=2` means each query seeds at
-most 2 curated SHN rows per batch. Try `n_neg_samples_per_query ∈ {4, 8}`
-and confirm the `batch_semi_hard_negative_share_epoch` metric actually rises
-(it's log-gated on `data.log_batch_stats`). Only worth running *after* 7c —
-flooding stale negatives is pointless.
-
-### 7e. Light regularization pass (only if 7a–7d don't resolve the plateau)
-
-The final-epoch train-loss uptick is small but real. If shorter schedule +
-fresh SHNs don't already flatten it, try one of: `optimizer.weight_decay=0.1`
-(up from 0.01), or `optimizer.lr=5e-6` for the last 2 epochs via
-`override_lr_on_resume`. Don't do both at once. Low priority — the plateau
-is ~0.003 MRR, which is inside run-to-run noise.
-
-### Order for these
-
-1. 7c (re-mine SHNs) — biggest expected lift, unblocks 7d.
-2. 7a (8 vs 10 epochs) — cheap, immediately actionable, reduces the cost of
-   every subsequent experiment.
-3. 7d (SHN share) on top of 7c's pool.
-4. 7b (warmup sweep) once the data-side levers are settled.
-5. 7e only if a plateau is still visible after the above.
-
-## Logging / tooling gaps to close first
-
-- Add `triplet_semi_hard_fallback_share` to the loss so experiment 3 can be
-  evaluated without re-running with instrumentation.
-- Consider logging the mean gap `pos_sim - selected_neg_sim` per batch — a
-  direct signal for how aggressively the filter is biting. Also cheap.
-
-## Order of operations
-
-1. Add the fallback-share metric (prerequisite for 3 and honest analysis of 1).
-2. Experiment 1 (A/B on the toggle) — this is the call on whether the default
-   change was correct. Block the merge/release on it if needed.
-3. Experiment 2 (sanity vs contrastive).
-4. Experiment 5 (composition with mined pool) — informs whether we keep both
-   layers or simplify.
-5. Experiments 3 and 4 only if 1 is inconclusive or we see the failure modes
-   they're designed to catch.
-6. Experiment 6 only if there's a clear reason to tighten further.
+- **Batch-size sensitivity** at production batch size.
+- **LR sensitivity** (`{5e-6, 1e-5, 2e-5}`).
+- **Regularization** (`weight_decay=0.1` or LR cooldown for last 2 ep).
+- **Re-mining iteration**: mine a second pool from the #1 winner if that run
+  beats current SOTA by more than the pool-staleness-implied gap.
+- **Triplet revisit**: only if a new base model or dataset changes the
+  structural picture above.
