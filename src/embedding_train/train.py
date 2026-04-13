@@ -161,6 +161,7 @@ def run(cfg):
         accelerator=cfg.trainer.accelerator,
         devices=cfg.trainer.devices,
         max_epochs=int(cfg.trainer.max_epochs),
+        max_time=getattr(cfg.trainer, "max_time", None),
         precision=cfg.trainer.precision,
         log_every_n_steps=int(cfg.trainer.log_every_n_steps),
         accumulate_grad_batches=int(cfg.trainer.accumulate_grad_batches),
