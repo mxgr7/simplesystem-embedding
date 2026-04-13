@@ -11,6 +11,7 @@ from embedding_train.model import (
     EmbeddingModule,
     load_embedding_module_from_checkpoint,
     resolve_scheduler_name,
+    resolve_triplet_negative_selection,
     resolve_warmup_steps,
 )
 
@@ -441,6 +442,40 @@ class EmbeddingModuleProjectionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "output_dim must be at least 1"):
             EmbeddingModule(build_cfg(model={"output_dim": 0}))
+
+
+class TripletNegativeSelectionResolverTests(unittest.TestCase):
+    def test_defaults_to_semi_hard_when_value_is_missing(self):
+        self.assertEqual(resolve_triplet_negative_selection(None), "semi_hard")
+
+    def test_accepts_semi_hard_and_hardest(self):
+        self.assertEqual(resolve_triplet_negative_selection("semi_hard"), "semi_hard")
+        self.assertEqual(resolve_triplet_negative_selection("HARDEST"), "hardest")
+
+    def test_rejects_unknown_values(self):
+        with self.assertRaisesRegex(
+            ValueError, "Unsupported triplet_negative_selection"
+        ):
+            resolve_triplet_negative_selection("super_hard")
+
+    @patch("embedding_train.model.AutoModel.from_pretrained")
+    def test_embedding_module_reads_triplet_negative_selection_from_cfg(
+        self, from_pretrained
+    ):
+        from_pretrained.return_value = _EncoderStub()
+        cfg = build_cfg(
+            model={"loss_type": "triplet", "triplet_negative_selection": "hardest"}
+        )
+        module = EmbeddingModule(cfg)
+        self.assertEqual(module.triplet_negative_selection, "hardest")
+
+    @patch("embedding_train.model.AutoModel.from_pretrained")
+    def test_embedding_module_defaults_triplet_negative_selection_when_absent(
+        self, from_pretrained
+    ):
+        from_pretrained.return_value = _EncoderStub()
+        module = EmbeddingModule(build_cfg())
+        self.assertEqual(module.triplet_negative_selection, "semi_hard")
 
 
 class OptimizerSchedulerTests(unittest.TestCase):

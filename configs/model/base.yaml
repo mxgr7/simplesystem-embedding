@@ -4,4 +4,5 @@ pooling: mean
 loss_type: contrastive
 similarity_scale: 20.0
 triplet_margin: 0.2
+triplet_negative_selection: semi_hard
 gradient_checkpointing: false

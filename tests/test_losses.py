@@ -136,6 +136,116 @@ class InBatchTripletLossTests(unittest.TestCase):
 
         self.assertEqual(loss.item(), 0.0)
 
+    def test_semi_hard_prefers_hardest_negative_below_positive_similarity(self):
+        query_embeddings = torch.tensor(
+            [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]
+        )
+        offer_embeddings = torch.tensor(
+            [[0.8, 0.0], [1.5, 0.0], [0.5, 0.0], [0.3, 0.0]]
+        )
+        labels = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        query_ids = ["q1", "q1", "q1", "q2"]
+
+        loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            negative_selection="semi_hard",
+        )
+
+        # hardest below-positive same-query negative has sim 0.5:
+        # relu(0.5 - 0.8 + 0.2) = 0.0
+        self.assertTrue(torch.isclose(loss, torch.tensor(0.0), atol=1e-6))
+
+    def test_hardest_mode_selects_above_positive_negative(self):
+        query_embeddings = torch.tensor(
+            [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]
+        )
+        offer_embeddings = torch.tensor(
+            [[0.8, 0.0], [1.5, 0.0], [0.5, 0.0], [0.3, 0.0]]
+        )
+        labels = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        query_ids = ["q1", "q1", "q1", "q2"]
+
+        loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            negative_selection="hardest",
+        )
+
+        # hardest same-query negative has sim 1.5:
+        # relu(1.5 - 0.8 + 0.2) = 0.9
+        self.assertTrue(torch.isclose(loss, torch.tensor(0.9), atol=1e-6))
+
+    def test_semi_hard_falls_back_to_hardest_when_all_negatives_above_positive(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+        offer_embeddings = torch.tensor([[0.8, 0.0], [1.5, 0.0]])
+        labels = torch.tensor([1.0, 0.0])
+        query_ids = ["q1", "q1"]
+
+        loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            negative_selection="semi_hard",
+        )
+
+        # no same-query negative sits below positive (0.8), so semi-hard
+        # falls back to the hardest in the pool (1.5):
+        # relu(1.5 - 0.8 + 0.2) = 0.9
+        self.assertTrue(torch.isclose(loss, torch.tensor(0.9), atol=1e-6))
+
+    def test_default_negative_selection_is_semi_hard(self):
+        query_embeddings = torch.tensor(
+            [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]
+        )
+        offer_embeddings = torch.tensor(
+            [[0.8, 0.0], [1.5, 0.0], [0.5, 0.0], [0.3, 0.0]]
+        )
+        labels = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        query_ids = ["q1", "q1", "q1", "q2"]
+
+        default_loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+        )
+        semi_hard_loss = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            negative_selection="semi_hard",
+        )
+
+        self.assertTrue(torch.isclose(default_loss, semi_hard_loss, atol=1e-6))
+
+    def test_rejects_unknown_negative_selection(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        offer_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        labels = torch.tensor([1.0, 0.0])
+        query_ids = ["q1", "q2"]
+
+        with self.assertRaisesRegex(ValueError, "Unsupported negative_selection"):
+            in_batch_triplet_loss(
+                query_embeddings,
+                offer_embeddings,
+                query_ids,
+                labels,
+                margin=0.2,
+                negative_selection="super_hard",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

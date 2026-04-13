@@ -62,6 +62,23 @@ def resolve_loss_type(loss_type):
     raise ValueError(f"Unsupported loss type: {loss_type}")
 
 
+VALID_TRIPLET_NEGATIVE_SELECTIONS = {"semi_hard", "hardest"}
+
+
+def resolve_triplet_negative_selection(value):
+    if value is None:
+        return "semi_hard"
+
+    normalized = str(value).strip().lower()
+    if normalized in VALID_TRIPLET_NEGATIVE_SELECTIONS:
+        return normalized
+
+    choices = "|".join(sorted(VALID_TRIPLET_NEGATIVE_SELECTIONS))
+    raise ValueError(
+        f"Unsupported triplet_negative_selection: {value}. Expected one of {choices}"
+    )
+
+
 def resolve_output_dim(output_dim):
     if output_dim is None:
         return None
@@ -192,6 +209,9 @@ class EmbeddingModule(L.LightningModule):
         super().__init__()
         self.cfg = cfg
         self.loss_type = resolve_loss_type(cfg.model.loss_type)
+        self.triplet_negative_selection = resolve_triplet_negative_selection(
+            getattr(cfg.model, "triplet_negative_selection", None)
+        )
         self.model_dtype = resolve_model_dtype(cfg.trainer.precision)
         self.validation_mode = resolve_validation_mode(
             getattr(cfg.trainer, "validation_mode", "full_catalog")
@@ -854,6 +874,7 @@ class EmbeddingModule(L.LightningModule):
                 batch["query_ids"],
                 batch["labels"],
                 margin=float(self.cfg.model.triplet_margin),
+                negative_selection=self.triplet_negative_selection,
             )
 
         raise RuntimeError(f"Unsupported loss type: {self.loss_type}")
