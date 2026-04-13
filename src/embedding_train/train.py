@@ -1,4 +1,5 @@
 import logging
+import subprocess
 from pathlib import Path
 
 import hydra
@@ -18,8 +19,24 @@ from embedding_train.model import (
 )
 
 
-CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_DIR = REPO_ROOT / "configs"
 MLFLOW_RUN_NAME_TAG = "mlflow.runName"
+
+
+def _resolve_git_branch():
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    branch = result.stdout.strip()
+    return branch or None
 
 
 def configure_logging(log_level):
@@ -33,7 +50,10 @@ def configure_logging(log_level):
 
 
 def build_logger(cfg):
-    tags = OmegaConf.to_container(cfg.logger.tags, resolve=True)
+    tags = OmegaConf.to_container(cfg.logger.tags, resolve=True) or {}
+    branch = _resolve_git_branch()
+    if branch:
+        tags["git_branch"] = branch
     return MLFlowLogger(
         experiment_name=cfg.logger.experiment_name,
         tracking_uri=cfg.logger.tracking_uri,
