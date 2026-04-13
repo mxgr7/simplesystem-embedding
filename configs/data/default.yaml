@@ -1,4 +1,4 @@
-path: /Users/max/Clients/simplesystem/data/queries_offers_labeled.parquet
+path: ../../data/queries_offers_labeled.parquet
 positive_label: Exact
 query_id_column: query_id
 offer_id_column: offer_id_b64

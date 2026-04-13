@@ -5,4 +5,5 @@ local_project_root = "../"
 remote_project_root = "~/workspaces/simplesystem/embedding"
 remote_workdir = "~/workspaces/simplesystem/embedding/main"
 local_env_file = "./.env"
+project_commands = ["aws s3 sync s3://mxgr/simplesystem/data/ ~/workspaces/simplesystem/data/ --exclude '*' --include 'queries_offers_labeled.parquet'"]
 
