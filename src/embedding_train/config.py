@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import hydra
+from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 
 
@@ -13,9 +14,16 @@ def load_base_config():
 
 
 def build_config_from_hyperparameters(hyperparameters):
-    cfg = load_base_config()
-
     if hyperparameters is None:
-        return cfg
+        return load_base_config()
 
-    return OmegaConf.merge(cfg, OmegaConf.create(hyperparameters))
+    hparams_cfg = OmegaConf.create(hyperparameters)
+
+    # Hparams are persisted with resolve=True, so they already contain every
+    # field a module needs. When we're inside an active @hydra.main run (e.g.
+    # loading a teacher during student training), re-initializing Hydra to
+    # compose the base config would raise, so skip the merge in that case.
+    if GlobalHydra.instance().is_initialized():
+        return hparams_cfg
+
+    return OmegaConf.merge(load_base_config(), hparams_cfg)
