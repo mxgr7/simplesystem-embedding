@@ -247,6 +247,7 @@ class EmbeddingModule(L.LightningModule):
             self.projection = torch.nn.Linear(
                 self.encoder_hidden_size,
                 self.output_dim,
+                bias=False,
                 dtype=self.model_dtype,
             )
 
