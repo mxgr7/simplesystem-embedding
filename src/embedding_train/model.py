@@ -212,6 +212,7 @@ class EmbeddingModule(L.LightningModule):
         self.triplet_negative_selection = resolve_triplet_negative_selection(
             getattr(cfg.model, "triplet_negative_selection", None)
         )
+        self._last_triplet_stats = None
         self.model_dtype = resolve_model_dtype(cfg.trainer.precision)
         self.validation_mode = resolve_validation_mode(
             getattr(cfg.trainer, "validation_mode", "full_catalog")
@@ -293,10 +294,12 @@ class EmbeddingModule(L.LightningModule):
             batch_size=batch_size,
         )
         batch_stats_to_log = self.log_training_batch_stats(batch)
+        triplet_stats_to_log = self.log_triplet_stats("train", batch_size)
         self.pending_train_record_metrics = {
             loss_metric_name: loss.detach(),
             train_metric_name: loss.detach(),
             **batch_stats_to_log,
+            **triplet_stats_to_log,
         }
         return loss
 
@@ -368,6 +371,7 @@ class EmbeddingModule(L.LightningModule):
             prog_bar=True,
             batch_size=batch_size,
         )
+        self.log_triplet_stats("val", batch_size)
 
         cpu_scores = scores.detach().cpu().tolist()
         raw_labels = batch["raw_labels"]
@@ -766,6 +770,40 @@ class EmbeddingModule(L.LightningModule):
 
         return stats_to_log
 
+    def log_triplet_stats(self, split, batch_size):
+        if self.loss_type != "triplet":
+            return {}
+
+        stats = self._last_triplet_stats
+        if not stats:
+            return {}
+
+        on_step = split == "train"
+        stats_to_log = {
+            self.batch_aligned_metric_name(
+                split, "triplet_valid_anchor_count"
+            ): float(stats["valid_anchor_count"]),
+            self.batch_aligned_metric_name(
+                split, "triplet_semi_hard_fallback_count"
+            ): float(stats["semi_hard_fallback_count"]),
+            self.batch_aligned_metric_name(
+                split, "triplet_semi_hard_fallback_share"
+            ): float(stats["semi_hard_fallback_share"]),
+        }
+
+        for name, value in stats_to_log.items():
+            self.log(
+                name,
+                value,
+                on_step=on_step,
+                on_epoch=True,
+                prog_bar=False,
+                batch_size=batch_size,
+            )
+
+        self._last_triplet_stats = None
+        return stats_to_log
+
     def resolve_batch_record_count(self, batch):
         local_batch_size = int(batch["labels"].size(0))
 
@@ -868,14 +906,17 @@ class EmbeddingModule(L.LightningModule):
             )
 
         if self.loss_type == "triplet":
-            return in_batch_triplet_loss(
+            loss, stats = in_batch_triplet_loss(
                 query_embeddings,
                 offer_embeddings,
                 batch["query_ids"],
                 batch["labels"],
                 margin=float(self.cfg.model.triplet_margin),
                 negative_selection=self.triplet_negative_selection,
+                return_stats=True,
             )
+            self._last_triplet_stats = stats
+            return loss
 
         raise RuntimeError(f"Unsupported loss type: {self.loss_type}")
 

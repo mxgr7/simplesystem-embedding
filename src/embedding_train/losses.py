@@ -40,6 +40,7 @@ def in_batch_triplet_loss(
     labels,
     margin,
     negative_selection="semi_hard",
+    return_stats=False,
 ):
     if negative_selection not in {"semi_hard", "hardest"}:
         raise ValueError(
@@ -60,13 +61,16 @@ def in_batch_triplet_loss(
     valid_rows = positive_anchors & (has_same_query_negative | has_cross_query_negative)
 
     if not valid_rows.any():
-        return similarities.sum() * 0.0
+        loss = similarities.sum() * 0.0
+        if return_stats:
+            return loss, _empty_triplet_stats()
+        return loss
 
     positive_scores = similarities.diagonal()
-    same_query_negative_scores = _select_pool_negative_scores(
+    same_query_negative_scores, same_query_has_semi_hard = _select_pool_negative_scores(
         similarities, same_query_negative_mask, positive_scores, negative_selection
     )
-    cross_query_negative_scores = _select_pool_negative_scores(
+    cross_query_negative_scores, cross_query_has_semi_hard = _select_pool_negative_scores(
         similarities, cross_query_negative_mask, positive_scores, negative_selection
     )
     selected_negative_scores = torch.where(
@@ -77,7 +81,37 @@ def in_batch_triplet_loss(
     losses = F.relu(
         selected_negative_scores[valid_rows] - positive_scores[valid_rows] + margin
     )
-    return losses.mean()
+    loss = losses.mean()
+
+    if not return_stats:
+        return loss
+
+    selected_pool_has_semi_hard = torch.where(
+        has_same_query_negative,
+        same_query_has_semi_hard,
+        cross_query_has_semi_hard,
+    )
+    valid_anchor_count = int(valid_rows.sum().item())
+    semi_hard_fallback_count = int(
+        ((~selected_pool_has_semi_hard) & valid_rows).sum().item()
+    )
+    semi_hard_fallback_share = (
+        semi_hard_fallback_count / valid_anchor_count if valid_anchor_count else 0.0
+    )
+
+    return loss, {
+        "valid_anchor_count": valid_anchor_count,
+        "semi_hard_fallback_count": semi_hard_fallback_count,
+        "semi_hard_fallback_share": semi_hard_fallback_share,
+    }
+
+
+def _empty_triplet_stats():
+    return {
+        "valid_anchor_count": 0,
+        "semi_hard_fallback_count": 0,
+        "semi_hard_fallback_share": 0.0,
+    }
 
 
 def _select_pool_negative_scores(
@@ -88,7 +122,10 @@ def _select_pool_negative_scores(
     ).values
 
     if negative_selection == "hardest":
-        return hardest_pool_scores
+        # In hardest mode the "semi-hard found" indicator is meaningless, so we
+        # report all anchors as having a semi-hard candidate to keep the
+        # fallback-share metric a no-op for this mode.
+        return hardest_pool_scores, torch.ones_like(positive_scores, dtype=torch.bool)
 
     # Semi-hard: prefer the hardest negative whose similarity is still below
     # the positive's. Negatives already above the positive dominate gradients
@@ -101,7 +138,10 @@ def _select_pool_negative_scores(
     ).max(dim=1).values
     has_semi_hard = below_positive_mask.any(dim=1)
 
-    return torch.where(has_semi_hard, hardest_semi_hard_scores, hardest_pool_scores)
+    selected_scores = torch.where(
+        has_semi_hard, hardest_semi_hard_scores, hardest_pool_scores
+    )
+    return selected_scores, has_semi_hard
 
 
 def _query_group_ids(query_ids, device):

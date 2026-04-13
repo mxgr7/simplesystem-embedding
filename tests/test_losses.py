@@ -230,6 +230,126 @@ class InBatchTripletLossTests(unittest.TestCase):
 
         self.assertTrue(torch.isclose(default_loss, semi_hard_loss, atol=1e-6))
 
+    def test_return_stats_reports_zero_fallback_when_semi_hard_negative_exists(self):
+        query_embeddings = torch.tensor(
+            [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]
+        )
+        offer_embeddings = torch.tensor(
+            [[0.8, 0.0], [1.5, 0.0], [0.5, 0.0], [0.3, 0.0]]
+        )
+        labels = torch.tensor([1.0, 0.0, 0.0, 0.0])
+        query_ids = ["q1", "q1", "q1", "q2"]
+
+        loss, stats = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            negative_selection="semi_hard",
+            return_stats=True,
+        )
+
+        self.assertEqual(stats["valid_anchor_count"], 1)
+        self.assertEqual(stats["semi_hard_fallback_count"], 0)
+        self.assertEqual(stats["semi_hard_fallback_share"], 0.0)
+        self.assertTrue(torch.isclose(loss, torch.tensor(0.0), atol=1e-6))
+
+    def test_return_stats_counts_fallback_when_no_semi_hard_negative_exists(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+        offer_embeddings = torch.tensor([[0.8, 0.0], [1.5, 0.0]])
+        labels = torch.tensor([1.0, 0.0])
+        query_ids = ["q1", "q1"]
+
+        loss, stats = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            negative_selection="semi_hard",
+            return_stats=True,
+        )
+
+        self.assertEqual(stats["valid_anchor_count"], 1)
+        self.assertEqual(stats["semi_hard_fallback_count"], 1)
+        self.assertEqual(stats["semi_hard_fallback_share"], 1.0)
+        self.assertTrue(torch.isclose(loss, torch.tensor(0.9), atol=1e-6))
+
+    def test_return_stats_reports_zero_fallback_in_hardest_mode(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+        offer_embeddings = torch.tensor([[0.8, 0.0], [1.5, 0.0]])
+        labels = torch.tensor([1.0, 0.0])
+        query_ids = ["q1", "q1"]
+
+        _, stats = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            negative_selection="hardest",
+            return_stats=True,
+        )
+
+        # In hardest mode the "fallback" concept is meaningless, so the metric
+        # is fixed to 0 to avoid polluting cross-mode dashboards.
+        self.assertEqual(stats["valid_anchor_count"], 1)
+        self.assertEqual(stats["semi_hard_fallback_count"], 0)
+        self.assertEqual(stats["semi_hard_fallback_share"], 0.0)
+
+    def test_return_stats_returns_zeros_when_no_valid_triplets(self):
+        query_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        offer_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        labels = torch.tensor([0.0, 0.0])
+        query_ids = ["q1", "q2"]
+
+        loss, stats = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            return_stats=True,
+        )
+
+        self.assertEqual(stats["valid_anchor_count"], 0)
+        self.assertEqual(stats["semi_hard_fallback_count"], 0)
+        self.assertEqual(stats["semi_hard_fallback_share"], 0.0)
+        self.assertEqual(loss.item(), 0.0)
+
+    def test_return_stats_fallback_share_is_partial_when_some_anchors_lack_semi_hard(
+        self,
+    ):
+        # Two positive anchors (rows 0 and 3), each with their own same-query pool:
+        # - row 0 / q1: same-query negatives at sim 1.5 (above pos 0.8) and 0.5
+        #   (below). Has a semi-hard negative.
+        # - row 3 / q2: same-query negative at sim 1.4 (above pos 0.7).
+        #   No same-query negative is below the positive. With no cross-query
+        #   negative below either, this row falls back.
+        query_embeddings = torch.tensor(
+            [[1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]
+        )
+        offer_embeddings = torch.tensor(
+            [[0.8, 0.0], [1.5, 0.0], [0.5, 0.0], [0.7, 0.0], [1.4, 0.0]]
+        )
+        labels = torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0])
+        query_ids = ["q1", "q1", "q1", "q2", "q2"]
+
+        _, stats = in_batch_triplet_loss(
+            query_embeddings,
+            offer_embeddings,
+            query_ids,
+            labels,
+            margin=0.2,
+            negative_selection="semi_hard",
+            return_stats=True,
+        )
+
+        self.assertEqual(stats["valid_anchor_count"], 2)
+        self.assertEqual(stats["semi_hard_fallback_count"], 1)
+        self.assertAlmostEqual(stats["semi_hard_fallback_share"], 0.5)
+
     def test_rejects_unknown_negative_selection(self):
         query_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
         offer_embeddings = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
