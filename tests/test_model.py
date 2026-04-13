@@ -166,15 +166,20 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
                 "train/by_batch/batch_same_query_negative_count",
                 "train/by_batch/batch_cross_query_negative_count",
                 "train/by_batch/batch_hard_negative_count",
+                "train/by_batch/batch_semi_hard_negative_count",
                 "train/by_batch/batch_hard_negative_share",
+                "train/by_batch/batch_semi_hard_negative_share",
             ],
         )
-        self.assertEqual([entry["value"] for entry in module.logged], [1.0, 1.0, 1.0, 0.0, 0.0])
+        self.assertEqual(
+            [entry["value"] for entry in module.logged],
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        )
         self.assertTrue(all(entry["kwargs"]["on_step"] for entry in module.logged))
         self.assertTrue(all(entry["kwargs"]["on_epoch"] for entry in module.logged))
         self.assertEqual(
             [entry["kwargs"]["batch_size"] for entry in module.logged],
-            [3, 3, 3, 3, 3],
+            [3, 3, 3, 3, 3, 3, 3],
         )
         self.assertEqual(
             stats_to_log,
@@ -183,7 +188,9 @@ class EmbeddingModuleBatchLoggingTests(unittest.TestCase):
                 "train/by_batch/batch_same_query_negative_count": 1,
                 "train/by_batch/batch_cross_query_negative_count": 1,
                 "train/by_batch/batch_hard_negative_count": 0,
+                "train/by_batch/batch_semi_hard_negative_count": 0,
                 "train/by_batch/batch_hard_negative_share": 0.0,
+                "train/by_batch/batch_semi_hard_negative_share": 0.0,
             },
         )
         self.assertEqual(module.record_metrics, [])

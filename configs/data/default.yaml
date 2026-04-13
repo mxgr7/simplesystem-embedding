@@ -16,6 +16,7 @@ val_split_mode: query_id
 clean_html: true
 limit_rows: null
 hard_negatives_path: null
+semi_hard_negatives_path: null
 cache_prepared_dataset: true
 prepare_cache_dir: .cache/prepared_dataset
 

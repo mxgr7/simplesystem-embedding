@@ -30,12 +30,17 @@ from embedding_train.model import EmbeddingModule, load_embedding_module_from_ch
 from embedding_train.rendering import RowTextRenderer
 
 
+HARD_NEGATIVE_PROVENANCE = "hard_negative"
+SEMI_HARD_NEGATIVE_PROVENANCE = "semi_hard_negative"
+VALID_PROVENANCE_VALUES = (HARD_NEGATIVE_PROVENANCE, SEMI_HARD_NEGATIVE_PROVENANCE)
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description=(
-            "Mine hard negatives for retrieval training. "
+            "Mine hard or semi-hard negatives for retrieval training. "
             "Encodes queries, searches a FAISS index, excludes known positives, "
-            "and writes the top-ranked remaining offers as hard negatives."
+            "and writes the offers in a configurable rank band as negatives."
         )
     )
     parser.add_argument(
@@ -90,7 +95,37 @@ def build_arg_parser():
         "--max-negatives-per-query",
         type=int,
         default=10,
-        help="Maximum hard negatives to keep per query after positive exclusion.",
+        help="Maximum negatives to keep per query after positive exclusion.",
+    )
+    parser.add_argument(
+        "--rank-start",
+        type=int,
+        default=0,
+        help=(
+            "Zero-based start of the rank band to keep after positive exclusion "
+            "(inclusive). 0 keeps from the very top (hard negatives); a higher "
+            "value drops the top hardest items to produce semi-hard negatives."
+        ),
+    )
+    parser.add_argument(
+        "--rank-end",
+        type=int,
+        default=None,
+        help=(
+            "Zero-based end of the rank band to keep after positive exclusion "
+            "(exclusive). When omitted, defaults to rank-start + "
+            "max-negatives-per-query, so --max-negatives-per-query keeps "
+            "controlling the count."
+        ),
+    )
+    parser.add_argument(
+        "--provenance",
+        default=HARD_NEGATIVE_PROVENANCE,
+        choices=list(VALID_PROVENANCE_VALUES),
+        help=(
+            "Provenance label written to every output row. Use "
+            f"'{SEMI_HARD_NEGATIVE_PROVENANCE}' for rank bands that skip the top."
+        ),
     )
     parser.add_argument(
         "--nprobe",
@@ -228,14 +263,32 @@ def mine_hard_negatives_from_results(
     positive_offer_ids_by_query,
     offer_id_column,
     max_negatives_per_query,
+    rank_start=0,
+    rank_end=None,
+    provenance=HARD_NEGATIVE_PROVENANCE,
 ):
+    if rank_start < 0:
+        raise ValueError("rank_start must be non-negative")
+    if rank_end is not None and rank_end <= rank_start:
+        raise ValueError("rank_end must be greater than rank_start")
+    if provenance not in VALID_PROVENANCE_VALUES:
+        raise ValueError(
+            f"provenance must be one of {VALID_PROVENANCE_VALUES}, got {provenance}"
+        )
+
+    if rank_end is None:
+        rank_end = rank_start + max_negatives_per_query
+
+    band_capacity = rank_end - rank_start
+    per_query_cap = min(max_negatives_per_query, band_capacity)
     result_rows = []
 
     for query_row, query_scores, query_indices in zip(query_rows, scores, indices):
         query_id = query_row["query_id"]
         query_text = query_row["query_text"]
         positive_offer_ids = positive_offer_ids_by_query.get(query_id, set())
-        negatives_kept = 0
+        non_positive_rank = 0
+        kept_in_band = 0
 
         for score, faiss_id in zip(query_scores, query_indices):
             if int(faiss_id) < 0:
@@ -252,17 +305,26 @@ def mine_hard_negatives_from_results(
             if offer_id in positive_offer_ids:
                 continue
 
-            negatives_kept += 1
+            current_rank = non_positive_rank
+            non_positive_rank += 1
+
+            if current_rank < rank_start:
+                continue
+            if current_rank >= rank_end:
+                break
+
+            kept_in_band += 1
             result_rows.append({
                 "query_id": query_id,
                 "query_text": query_text,
                 "offer_id": offer_id,
                 "offer_text": str(metadata_row.get("offer_text", "")),
                 "score": float(score),
-                "rank": negatives_kept,
+                "rank": current_rank + 1,
+                "provenance": provenance,
             })
 
-            if negatives_kept >= max_negatives_per_query:
+            if kept_in_band >= per_query_cap:
                 break
 
     return result_rows
@@ -277,6 +339,7 @@ def build_output_table(rows):
             "offer_text": pa.array([], type=pa.string()),
             "score": pa.array([], type=pa.float32()),
             "rank": pa.array([], type=pa.int32()),
+            "provenance": pa.array([], type=pa.string()),
         })
 
     return pa.table({
@@ -286,6 +349,10 @@ def build_output_table(rows):
         "offer_text": pa.array([r["offer_text"] for r in rows], type=pa.string()),
         "score": pa.array([r["score"] for r in rows], type=pa.float32()),
         "rank": pa.array([r["rank"] for r in rows], type=pa.int32()),
+        "provenance": pa.array(
+            [r.get("provenance", HARD_NEGATIVE_PROVENANCE) for r in rows],
+            type=pa.string(),
+        ),
     })
 
 
@@ -293,11 +360,33 @@ def run_hard_negative_mining(args):
     device = resolve_device(args.device)
     top_k = int(args.top_k)
     max_negatives_per_query = int(args.max_negatives_per_query)
+    rank_start = int(args.rank_start)
+    rank_end = int(args.rank_end) if args.rank_end is not None else None
+    provenance = str(args.provenance)
 
     if top_k < 1:
         raise ValueError("--top-k must be at least 1")
     if max_negatives_per_query < 1:
         raise ValueError("--max-negatives-per-query must be at least 1")
+    if rank_start < 0:
+        raise ValueError("--rank-start must be non-negative")
+    if rank_end is not None and rank_end <= rank_start:
+        raise ValueError("--rank-end must be greater than --rank-start")
+
+    effective_rank_end = (
+        rank_end if rank_end is not None else rank_start + max_negatives_per_query
+    )
+    if top_k < effective_rank_end:
+        raise ValueError(
+            f"--top-k ({top_k}) must be at least the rank-band end "
+            f"({effective_rank_end}); raise --top-k or lower the band."
+        )
+    if rank_start > 0 and provenance == HARD_NEGATIVE_PROVENANCE:
+        print(
+            "WARNING: --rank-start > 0 but provenance is 'hard_negative'. "
+            "Pass --provenance semi_hard_negative if these rows are semi-hard.",
+            file=sys.stderr,
+        )
 
     artifact_paths, manifest, index, metadata_by_id = load_index_artifact(args.index)
     apply_search_parameters(
@@ -397,6 +486,9 @@ def run_hard_negative_mining(args):
                     positive_offer_ids_by_query,
                     offer_id_column,
                     max_negatives_per_query,
+                    rank_start=rank_start,
+                    rank_end=rank_end,
+                    provenance=provenance,
                 )
 
                 if result_rows:
@@ -419,9 +511,12 @@ def run_hard_negative_mining(args):
             "device": str(device),
             "queries_searched": total_queries_searched,
             "queries_with_positives": len(positive_offer_ids_by_query),
-            "hard_negatives_mined": total_mined,
+            "negatives_mined": total_mined,
             "max_negatives_per_query": max_negatives_per_query,
             "top_k": top_k,
+            "rank_start": rank_start,
+            "rank_end": effective_rank_end,
+            "provenance": provenance,
             "output": str(output_path),
             "index": str(artifact_paths["index_dir"]),
         },

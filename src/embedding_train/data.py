@@ -30,6 +30,13 @@ from embedding_train.batching import (
 )
 from embedding_train.rendering import RowTextRenderer
 
+HARD_NEGATIVE_PROVENANCE = "hard_negative"
+SEMI_HARD_NEGATIVE_PROVENANCE = "semi_hard_negative"
+VALID_NEGATIVE_PROVENANCES = (
+    HARD_NEGATIVE_PROVENANCE,
+    SEMI_HARD_NEGATIVE_PROVENANCE,
+)
+
 VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query", "random_query_pool"}
 VALID_VAL_SPLIT_MODES = {"offer_connected_component", "query_id"}
 PREPARED_RECORDS_CACHE_SCHEMA_VERSION = 1
@@ -119,6 +126,7 @@ class EmbeddingDataModule(LightningDataModule):
         self.positive_records_by_query = {}
         self.negative_records_by_query = {}
         self.hard_negative_records_by_query = {}
+        self.semi_hard_negative_records_by_query = {}
         self.eligible_query_ids = []
         self.synthetic_negative_offer_pool = []
         self._validate_batching_config()
@@ -238,6 +246,13 @@ class EmbeddingDataModule(LightningDataModule):
             "hard_negative_records": sum(
                 len(records)
                 for records in self.hard_negative_records_by_query.values()
+            ),
+            "semi_hard_negative_queries": len(
+                self.semi_hard_negative_records_by_query
+            ),
+            "semi_hard_negative_records": sum(
+                len(records)
+                for records in self.semi_hard_negative_records_by_query.values()
             ),
             "val_split_mode": self.val_split_mode,
             **split_stats,
@@ -364,6 +379,7 @@ class EmbeddingDataModule(LightningDataModule):
             n_neg_samples_per_query=int(self.cfg.data.n_neg_samples_per_query),
             seed=int(self.cfg.seed),
             hard_negative_records_by_query=self.hard_negative_records_by_query,
+            semi_hard_negative_records_by_query=self.semi_hard_negative_records_by_query,
         )
         train_rows = len(self.train_dataset)
         batch_size = int(self.cfg.data.batch_size)
@@ -383,6 +399,7 @@ class EmbeddingDataModule(LightningDataModule):
             n_neg_samples_per_query=int(self.cfg.data.n_neg_samples_per_query),
             seed=int(self.cfg.seed),
             hard_negative_records_by_query=self.hard_negative_records_by_query,
+            semi_hard_negative_records_by_query=self.semi_hard_negative_records_by_query,
         )
         return PairDataset(pool_builder.build_pool())
 
@@ -741,9 +758,10 @@ class EmbeddingDataModule(LightningDataModule):
         self.negative_records_by_query = negative_records_by_query
         self.eligible_query_ids = eligible_query_ids
         self.synthetic_negative_offer_pool = synthetic_negative_offer_pool
-        self.hard_negative_records_by_query = self._load_hard_negatives(
-            positive_records_by_query
-        )
+        (
+            self.hard_negative_records_by_query,
+            self.semi_hard_negative_records_by_query,
+        ) = self._load_mined_negatives(positive_records_by_query)
 
         if (
             self.train_batching_mode in {"anchor_query", "random_query_pool"}
@@ -754,18 +772,11 @@ class EmbeddingDataModule(LightningDataModule):
                 f"n_pos_samples_per_query={n_pos_samples_per_query} positive rows"
             )
 
-    def _load_hard_negatives(self, positive_records_by_query):
+    def _load_mined_negatives(self, positive_records_by_query):
         hard_negatives_path = getattr(self.cfg.data, "hard_negatives_path", None)
-        if not hard_negatives_path:
-            return {}
-
-        frame = pd.read_parquet(hard_negatives_path)
-        required_columns = {"query_id", "offer_id", "offer_text"}
-        missing = required_columns - set(frame.columns)
-        if missing:
-            raise ValueError(
-                f"Hard negatives file is missing columns: {', '.join(sorted(missing))}"
-            )
+        semi_hard_negatives_path = getattr(
+            self.cfg.data, "semi_hard_negatives_path", None
+        )
 
         positive_offer_ids_by_query = {
             query_id: {r["offer_id"] for r in records}
@@ -773,8 +784,53 @@ class EmbeddingDataModule(LightningDataModule):
         }
 
         hard_negative_records_by_query = {}
-        loaded_count = 0
+        semi_hard_negative_records_by_query = {}
+
+        self._load_negative_sidecar(
+            hard_negatives_path,
+            positive_offer_ids_by_query,
+            hard_negative_records_by_query,
+            semi_hard_negative_records_by_query,
+            default_provenance=HARD_NEGATIVE_PROVENANCE,
+            label="hard negatives",
+        )
+        self._load_negative_sidecar(
+            semi_hard_negatives_path,
+            positive_offer_ids_by_query,
+            hard_negative_records_by_query,
+            semi_hard_negative_records_by_query,
+            default_provenance=SEMI_HARD_NEGATIVE_PROVENANCE,
+            label="semi-hard negatives",
+        )
+
+        return hard_negative_records_by_query, semi_hard_negative_records_by_query
+
+    def _load_negative_sidecar(
+        self,
+        path,
+        positive_offer_ids_by_query,
+        hard_negative_records_by_query,
+        semi_hard_negative_records_by_query,
+        default_provenance,
+        label,
+    ):
+        if not path:
+            return
+
+        frame = pd.read_parquet(path)
+        required_columns = {"query_id", "offer_id", "offer_text"}
+        missing = required_columns - set(frame.columns)
+        if missing:
+            raise ValueError(
+                f"{label.capitalize()} file is missing columns: "
+                f"{', '.join(sorted(missing))}"
+            )
+
+        has_provenance_column = "provenance" in frame.columns
+        loaded_hard = 0
+        loaded_semi_hard = 0
         excluded_count = 0
+        skipped_unknown_provenance = 0
 
         for row in frame.itertuples(index=False):
             query_id = str(getattr(row, "query_id", "") or "").strip()
@@ -788,14 +844,32 @@ class EmbeddingDataModule(LightningDataModule):
                 excluded_count += 1
                 continue
 
-            hard_negative_records_by_query.setdefault(query_id, []).append(
+            if has_provenance_column:
+                row_provenance = str(
+                    getattr(row, "provenance", "") or default_provenance
+                ).strip() or default_provenance
+            else:
+                row_provenance = default_provenance
+
+            if row_provenance == HARD_NEGATIVE_PROVENANCE:
+                target = hard_negative_records_by_query
+            elif row_provenance == SEMI_HARD_NEGATIVE_PROVENANCE:
+                target = semi_hard_negative_records_by_query
+            else:
+                skipped_unknown_provenance += 1
+                continue
+
+            target.setdefault(query_id, []).append(
                 {"offer_id": offer_id, "offer_text": offer_text}
             )
-            loaded_count += 1
+            if target is hard_negative_records_by_query:
+                loaded_hard += 1
+            else:
+                loaded_semi_hard += 1
 
         print(
-            f"Loaded hard negatives: {loaded_count} records for "
-            f"{len(hard_negative_records_by_query)} queries "
-            f"(excluded {excluded_count} positives)"
+            f"Loaded {label} from {path}: "
+            f"hard={loaded_hard} semi_hard={loaded_semi_hard} "
+            f"(excluded {excluded_count} positives, "
+            f"skipped {skipped_unknown_provenance} unknown provenance)"
         )
-        return hard_negative_records_by_query

@@ -154,6 +154,41 @@ Notes:
 - Batch stats count hard negatives separately from synthetic cross-query negatives when `data.log_batch_stats=true`
 - Refresh the mined parquet against a newer checkpoint whenever the model has moved far enough that the old negatives are no longer confusing; there is no automatic refresh during training
 - `--top-k` controls how many candidates are retrieved per query before positive exclusion; `--max-negatives-per-query` caps how many survivors are kept
+- Every output row carries a `provenance` column (`hard_negative` by default) so a single sidecar can hold both hard and semi-hard rows
+
+## Mine Semi-Hard Negatives
+
+The same CLI mines semi-hard negatives by selecting a deeper rank band of retrieved candidates. Semi-hard negatives are confusing enough to push the model but not drawn from the very top of the ranking, which avoids the false-positive and instability problems that come with using only the hardest items.
+
+```bash
+uv run embedding-mine-hard-negatives \
+  --checkpoint checkpoints/best.ckpt \
+  --index data/offer-index \
+  --input data/queries_offers_labeled.parquet \
+  --output data/semi_hard_negatives.parquet \
+  --top-k 100 \
+  --rank-start 20 \
+  --rank-end 60 \
+  --max-negatives-per-query 10 \
+  --provenance semi_hard_negative
+```
+
+Wire the output into training alongside (or instead of) hard negatives:
+
+```bash
+uv run embedding-train \
+  data.hard_negatives_path=data/hard_negatives.parquet \
+  data.semi_hard_negatives_path=data/semi_hard_negatives.parquet
+```
+
+Notes:
+
+- `--rank-start` is the zero-based start of the rank band after positive exclusion; `--rank-end` is the exclusive end. `--top-k` must be at least `--rank-end`
+- `--max-negatives-per-query` still caps the count kept per query; the band sets *where* in the ranked list those rows come from
+- Pass `--provenance semi_hard_negative` so the output rows are tagged correctly; the datamodule routes rows by their `provenance` column when present
+- `data.semi_hard_negatives_path` and `data.hard_negatives_path` can be set independently so you can train with one, the other, or both. A single parquet that contains both provenances also works under either path
+- Batch stats and MLflow log `hard_negative_count` and `semi_hard_negative_count` separately when `data.log_batch_stats=true`
+- **When to prefer hard vs. semi-hard:** use hard negatives when label coverage is reliable and you want maximum gradient signal; switch to (or add) semi-hard negatives when the very top of the ranking is dominated by unlabeled positives or near-duplicates that destabilize training
 
 ## Search Index
 
