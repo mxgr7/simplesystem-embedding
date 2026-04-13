@@ -133,6 +133,28 @@ Helpful flags:
 - `--model-name` to override the pretrained base model when `--checkpoint` is omitted
 - `--overwrite` to replace an existing artifact directory
 
+## Mine Hard Negatives
+
+Mine hard negatives offline from a built FAISS index so training batches can mix them with same-query and random negatives. The command encodes unique queries from a labeled parquet file, searches the index, drops known positives, and writes the top-ranked remaining offers to a parquet sidecar.
+
+```bash
+uv run embedding-mine-hard-negatives --index data/offer-index --input data/queries_offers_labeled.parquet --output data/hard_negatives.parquet
+uv run embedding-mine-hard-negatives --checkpoint checkpoints/best.ckpt --index data/offer-index --input data/queries_offers_labeled.parquet --output data/hard_negatives.parquet --top-k 50 --max-negatives-per-query 10
+```
+
+Wire the output into training by pointing `data.hard_negatives_path` at the parquet file:
+
+```bash
+uv run embedding-train data.hard_negatives_path=data/hard_negatives.parquet
+```
+
+Notes:
+
+- Mined negatives exclude offers labeled as positives (`data.positive_label`) for the anchor query
+- Batch stats count hard negatives separately from synthetic cross-query negatives when `data.log_batch_stats=true`
+- Refresh the mined parquet against a newer checkpoint whenever the model has moved far enough that the old negatives are no longer confusing; there is no automatic refresh during training
+- `--top-k` controls how many candidates are retrieved per query before positive exclusion; `--max-negatives-per-query` caps how many survivors are kept
+
 ## Search Index
 
 Search a built index with either Parquet queries rendered through the same `query_template` used for training and evaluation, or with raw query text.
