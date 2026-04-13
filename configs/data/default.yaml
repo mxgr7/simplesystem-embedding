@@ -5,7 +5,7 @@ offer_id_column: offer_id_b64
 batch_size: 512
 train_batching_mode: anchor_query
 n_pos_samples_per_query: 2
-n_neg_samples_per_query: 2
+n_neg_samples_per_query: 4
 log_batch_stats: true
 num_workers: 8
 pin_memory: true
