@@ -6,7 +6,6 @@ similarity_scale: 20.0
 triplet_margin: 0.2
 triplet_negative_selection: semi_hard
 gradient_checkpointing: false
-compile: false
 teacher_checkpoint: null
 distill_temperature: 0.05
 compile: true
