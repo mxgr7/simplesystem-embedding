@@ -7,8 +7,8 @@ train_batching_mode: anchor_query
 n_pos_samples_per_query: 2
 n_neg_samples_per_query: 2
 log_batch_stats: true
-num_workers: 0
-pin_memory: false
+num_workers: 8
+pin_memory: true
 max_query_length: 32
 max_offer_length: 256
 val_fraction: 0.05

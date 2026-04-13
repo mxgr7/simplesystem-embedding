@@ -1,7 +1,0 @@
-defaults:
-  - default
-
-precision: "32-true"
-val_check_interval: 1.0
-validate_before_training: false
-enable_checkpointing: false
