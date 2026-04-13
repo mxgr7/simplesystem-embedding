@@ -42,46 +42,14 @@ Revisit only on a different base model, a different dataset, or a
 qualitatively different batching format (not another tuning knob on this
 setup).
 
-## Tooling — close before the next launch
-
-- ~~`triplet_semi_hard_fallback_share` metric~~ — done in `2c537fe`. Triplet
-  runs log fallback share/count + valid-anchor count (train and val).
-- **`ModelCheckpoint`** with `save_top_k>=1`, monitor `val/full_catalog/mrr`.
-  Every overshoot so far has lost its peak weights.
-- **`EarlyStopping`** on the same monitor, patience ~2 epochs. Stops the
-  regression tail automatically and pays off on contrastive runs too.
-
 ## Experiments
 
-In priority order. All inherit `adorable-mole-653`'s config (e5-base, bs=256,
-lr=1e-5, warmup_ratio=0.33) unless noted.
-
-### 1. Contrastive on the fresh SHN pool
-
-The pool mined from `adorable-mole-653` is ready
-(`semi_hard_negatives-adorable-mole-653.parquet`, 21k queries / 210k records).
-Re-train contrastive on it — most likely source of lift, since the current
-SOTA was trained on a pool mined from a 6-MRR-points-weaker encoder and its
-`batch_semi_hard_negative_share ≈ 0.04` suggested the old pool barely
-contributed.
-
-### 2. Schedule audit: 8 vs 10 epochs
-
-`adorable-mole-653` peaked ~ep 7.5 with the tail flat. Re-run #1 at
-`trainer.max_epochs=8`. If gap < 0.005 MRR, make 8 the default — saves 20%
-on every subsequent run.
-
-### 3. Warmup sweep
-
-`warmup_ratio ∈ {0.1, 0.2, 0.33, 0.5}` once #1 and #2 have landed.
-
-### Deferred (only if the above leaves a clear gap)
+All inherit `adorable-mole-653`'s config (e5-base, bs=256, lr=1e-5,
+warmup_ratio=0.33) unless noted.
 
 - **Batch-size sensitivity** at production batch size.
 - **LR sensitivity** (`{5e-6, 1e-5, 2e-5}`).
 - **Regularization** (`weight_decay=0.1` or LR cooldown for last 2 ep).
-- **Re-mining iteration**: mine a second pool from the #1 winner if that run
-  beats current SOTA by more than the pool-staleness-implied gap.
 - **ANCE-style in-training negative refresh**: re-mine the SHN pool from the
   *trainee's own* checkpoint every N epochs (or every K steps) instead of
   once up front from a different encoder. Motivation: on the current
