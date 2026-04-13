@@ -37,12 +37,18 @@ uv run embedding-train trainer.max_time=00:00:20:00 trainer.max_epochs=1000
 - Edit anything under `configs/` — model choice, loss, optimizer, LR schedule, batch size, pooling, projection dim, gradient checkpointing, etc.
 - Edit `src/embedding_train/train.py`, `model.py`, `losses.py`, `batching.py`, `data.py` — architecture, training loop, negative mining, loss math.
 - Add or rewire existing hard/semi-hard negative files via `data.hard_negatives_path` / `data.semi_hard_negatives_path`.
+- Run the supporting CLIs documented in `README.md` to generate new training inputs:
+  - `uv run embedding-index-build --checkpoint <ckpt> --input <offers.parquet> --output ../../data/offer-index-<run-name>`
+  - `uv run embedding-mine-hard-negatives --checkpoint <ckpt> --index ../../data/offer-index-<run-name> --input ../../data/queries_offers_labeled.parquet --output ../../data/hard_negatives-<run-name>.parquet`
+  - Same CLI with `--rank-start/--rank-end/--provenance semi_hard_negative` for semi-hard mining.
+  - You may also use `embedding-infer` for sanity-checking a checkpoint's embeddings.
 
 **What you CANNOT do:**
 - Modify `src/embedding_train/eval.py`, `metrics.py`, `catalog_benchmark.py`, or `faiss_index.py`. These define the ground-truth metric.
 - Modify `configs/trainer/default.yaml` fields that control evaluation: `validation_mode`, `validation_metric`, `validation_similarity`, `validation_relevant_labels`, `validation_catalog_sample`. You may override other trainer fields freely.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Change the evaluation parquet path or label mapping.
+- Run `embedding-eval`, `embedding-catalog-benchmark`, or `embedding-index-search` as part of the keep/discard decision. These are useful for investigation but are NOT the ground-truth signal — MLflow `val/full_catalog/ndcg_at_5` from the training run is.
 
 **The goal is simple: get the highest `val_ndcg_at_5`** (note: higher is better, opposite direction from the original bpb setup). Since the time budget is fixed, you don't need to worry about training time — every run is bounded by `trainer.max_time`. The only constraint is that the code runs without crashing and finishes within the budget.
 
@@ -51,6 +57,43 @@ uv run embedding-train trainer.max_time=00:00:20:00 trainer.max_epochs=1000
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Removing something and getting equal or better results is a great outcome. A ~0.001 improvement from deleting code is worth keeping; the same improvement from 20 lines of hacks is not.
 
 **The first run**: Your very first run should always be to establish the baseline, so run the training script as-is (no config overrides except `trainer.max_time` and `trainer.max_epochs` as above).
+
+## Mining new negatives (occasional, not every iteration)
+
+Once you have a decent checkpoint, you can build an index from it and mine a fresh pool of hard or semi-hard negatives for subsequent training runs. `NOTES.md` documents this as the "Re-mining iteration" strategy and explains why it's high-leverage: the current SOTA was trained against a pool mined from a much weaker encoder, so the pool is almost certainly stale.
+
+**When to do this**: when you've plateaued on the current negative pool (say, 3–4 consecutive runs without improvement) and haven't re-mined in a while. Not every iteration — each mining cycle costs extra wall-clock on top of a normal training run and makes the comparison to previous runs less clean.
+
+**Workflow**:
+
+1. Pick the best checkpoint so far (`checkpoints/<run-name>/best-step=...ckpt`).
+2. Build an offer index from it:
+   ```bash
+   uv run embedding-index-build \
+     --checkpoint checkpoints/<run-name>/best-...ckpt \
+     --input ../../data/queries_offers_labeled.parquet \
+     --output ../../data/offer-index-<run-name>
+   ```
+3. Mine hard or semi-hard negatives against that index:
+   ```bash
+   uv run embedding-mine-hard-negatives \
+     --checkpoint checkpoints/<run-name>/best-...ckpt \
+     --index ../../data/offer-index-<run-name> \
+     --input ../../data/queries_offers_labeled.parquet \
+     --output ../../data/semi_hard_negatives-<run-name>.parquet \
+     --top-k 100 --rank-start 20 --rank-end 60 \
+     --max-negatives-per-query 10 \
+     --provenance semi_hard_negative
+   ```
+4. Point the next training run at it:
+   ```bash
+   uv run embedding-train \
+     trainer.max_time=00:00:20:00 trainer.max_epochs=1000 \
+     data.semi_hard_negatives_path=../../data/semi_hard_negatives-<run-name>.parquet
+   ```
+5. In `results.tsv`, mention the pool in the description (e.g. `contrastive + semi-hard pool mined from <run-name>`) so you can tell apart runs trained against different pools.
+
+**Do not** commit mined parquets or built indexes to git. They go under `../../data/` (same tree as the labeled parquet) and stay untracked. A timing-out or crashed mine does not count as an experiment — just retry or skip it.
 
 ## Reading results
 
