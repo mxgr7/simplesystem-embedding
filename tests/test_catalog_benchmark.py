@@ -101,8 +101,10 @@ def build_cfg():
                 "max_query_length": 32,
                 "max_offer_length": 64,
                 "positive_label": "Exact",
-                "query_id_column": "query_id",
-                "offer_id_column": "offer_id_b64",
+                "column_mapping": {
+                    "query_id": "query_id",
+                    "offer_id": "offer_id_b64",
+                },
             },
         }
     )

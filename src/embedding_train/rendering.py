@@ -8,16 +8,39 @@ from embedding_train.text import (
 )
 
 
+DEFAULT_COLUMN_MAPPING = {
+    "query_id": "query_id",
+    "offer_id": "offer_id_b64",
+    "query_term": "query_term",
+    "name": "name",
+    "manufacturer_name": "manufacturer_name",
+    "manufacturer_article_number": "manufacturer_article_number",
+    "manufacturer_article_type": "manufacturer_article_type",
+    "article_number": "article_number",
+    "ean": "ean",
+    "category_paths": "category_paths",
+    "description": "description",
+    "label": "label",
+}
+
+
+def resolve_column_mapping(data_cfg):
+    raw = data_cfg.get("column_mapping", None) if hasattr(data_cfg, "get") else None
+    mapping = dict(DEFAULT_COLUMN_MAPPING)
+    if raw is None:
+        return mapping
+    items = raw.items() if hasattr(raw, "items") else dict(raw).items()
+    for canonical, source in items:
+        source_name = str(source).strip()
+        if source_name:
+            mapping[str(canonical)] = source_name
+    return mapping
+
+
 class RowTextRenderer:
     def __init__(self, data_cfg):
         self.data_cfg = data_cfg
-        self.query_id_column = (
-            str(data_cfg.get("query_id_column", "query_id")).strip() or "query_id"
-        )
-        self.offer_id_column = (
-            str(data_cfg.get("offer_id_column", "offer_id_b64")).strip()
-            or "offer_id_b64"
-        )
+        self.column_mapping = resolve_column_mapping(data_cfg)
         self.query_template = build_template(data_cfg.query_template)
         self.offer_template = build_template(data_cfg.offer_template)
         self.column_rename = dict(data_cfg.get("column_rename", None) or {})
@@ -31,8 +54,8 @@ class RowTextRenderer:
             return None
 
         return {
-            "query_id": normalize_text(context.get(self.query_id_column)),
-            "offer_id": normalize_text(context.get(self.offer_id_column)),
+            "query_id": normalize_text(context.get("query_id")),
+            "offer_id": normalize_text(context.get("offer_id")),
             "query_text": query_text,
             "offer_text": offer_text,
             "label": (
@@ -58,6 +81,12 @@ class RowTextRenderer:
 
         for key, value in row.items():
             context[self.column_rename.get(key, key)] = self._safe_value(value)
+
+        for canonical, source in self.column_mapping.items():
+            if source in row:
+                context[canonical] = self._safe_value(row.get(source))
+            elif canonical not in context:
+                context[canonical] = ""
 
         context["query_term"] = normalize_text(context.get("query_term"))
         context["name"] = normalize_text(context.get("name"))

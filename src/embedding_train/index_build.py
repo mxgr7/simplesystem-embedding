@@ -36,6 +36,7 @@ from embedding_train.infer import (
     IncrementalParquetWriter,
     build_tokenizer,
     encode_texts,
+    default_copy_columns_from_renderer,
     parse_copy_columns,
     resolve_device,
 )
@@ -497,7 +498,11 @@ def run_index_build(args):
     total_rows = parquet_file.metadata.num_rows
     if args.limit_rows is not None:
         total_rows = min(total_rows, int(args.limit_rows))
-    copy_columns = parse_copy_columns(args.copy_columns, parquet_file.schema.names)
+    copy_columns = parse_copy_columns(
+        args.copy_columns,
+        parquet_file.schema.names,
+        default_copy_columns_from_renderer(renderer),
+    )
 
     max_offer_length = int(args.max_offer_length) or int(cfg.data.max_offer_length)
 

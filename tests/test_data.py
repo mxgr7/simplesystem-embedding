@@ -42,8 +42,10 @@ def build_cfg(**data_overrides):
             "data": {
                 "path": "/tmp/dataset.parquet",
                 "positive_label": "Exact",
-                "query_id_column": "query_id",
-                "offer_id_column": "offer_id_b64",
+                "column_mapping": {
+                    "query_id": "query_id",
+                    "offer_id": "offer_id_b64",
+                },
                 "batch_size": 16,
                 "train_batching_mode": "anchor_query",
                 "n_pos_samples_per_query": 2,
@@ -183,8 +185,10 @@ class RowTextRendererTests(unittest.TestCase):
     def test_record_builder_supports_configurable_id_columns(self, from_pretrained):
         from_pretrained.return_value = _TokenizerStub()
         cfg = build_cfg(
-            query_id_column="search_id",
-            offer_id_column="listing_id",
+            column_mapping={
+                "query_id": "search_id",
+                "offer_id": "listing_id",
+            },
         )
         renderer = RowTextRenderer(cfg.data)
         datamodule = EmbeddingDataModule(cfg)

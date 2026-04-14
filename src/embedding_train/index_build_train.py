@@ -33,6 +33,7 @@ from embedding_train.index_build import (
 from embedding_train.infer import (
     build_tokenizer,
     encode_texts,
+    default_copy_columns_from_renderer,
     parse_copy_columns,
     resolve_device,
 )
@@ -101,7 +102,11 @@ def train_index(args):
     tokenizer = build_tokenizer(cfg.model.model_name)
     renderer = RowTextRenderer(cfg.data)
     parquet_file = ParquetSource(args.input)
-    copy_columns = parse_copy_columns("", parquet_file.schema.names)
+    copy_columns = parse_copy_columns(
+        "",
+        parquet_file.schema.names,
+        default_copy_columns_from_renderer(renderer),
+    )
     max_offer_length = int(args.max_offer_length) or int(cfg.data.max_offer_length)
 
     print(

@@ -20,8 +20,12 @@ from embedding_train.precision import (
 from embedding_train.rendering import RowTextRenderer
 
 
-DEFAULT_COPY_COLUMNS = ["query_id", "offer_id_b64", "label"]
+DEFAULT_COPY_COLUMN_KEYS = ("query_id", "offer_id", "label")
 VALID_INFERENCE_MODES = {"query", "offer", "pair_score"}
+
+
+def default_copy_columns_from_renderer(renderer):
+    return [renderer.column_mapping[key] for key in DEFAULT_COPY_COLUMN_KEYS]
 
 
 def resolve_inference_mode(mode):
@@ -151,12 +155,13 @@ def resolve_device(device_name):
     return torch.device(device_name)
 
 
-def parse_copy_columns(raw_value, available_columns):
+def parse_copy_columns(raw_value, available_columns, default_columns=None):
     if raw_value:
         selected = [value.strip() for value in raw_value.split(",") if value.strip()]
     else:
+        default_columns = default_columns or []
         selected = [
-            column for column in DEFAULT_COPY_COLUMNS if column in available_columns
+            column for column in default_columns if column in available_columns
         ]
 
     missing_columns = [column for column in selected if column not in available_columns]
@@ -595,7 +600,11 @@ def run_inference(args):
     renderer = RowTextRenderer(cfg.data)
 
     parquet_file = ParquetSource(args.input)
-    copy_columns = parse_copy_columns(args.copy_columns, parquet_file.schema.names)
+    copy_columns = parse_copy_columns(
+        args.copy_columns,
+        parquet_file.schema.names,
+        default_copy_columns_from_renderer(renderer),
+    )
     writer = IncrementalParquetWriter(args.output, args.compression, args.overwrite)
 
     offer_max_length = int(args.max_offer_length) or int(cfg.data.max_offer_length)

@@ -670,8 +670,10 @@ class CollateTextPassthroughTests(unittest.TestCase):
                 "data": {
                     "path": "/tmp/x.parquet",
                     "positive_label": "Exact",
-                    "query_id_column": "query_id",
-                    "offer_id_column": "offer_id_b64",
+                    "column_mapping": {
+                        "query_id": "query_id",
+                        "offer_id": "offer_id_b64",
+                    },
                     "batch_size": 2,
                     "train_batching_mode": "random_pairs",
                     "n_pos_samples_per_query": 1,

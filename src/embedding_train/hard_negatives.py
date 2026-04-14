@@ -27,7 +27,7 @@ from embedding_train.infer import (
     resolve_device,
 )
 from embedding_train.model import EmbeddingModule, load_embedding_module_from_checkpoint
-from embedding_train.rendering import RowTextRenderer
+from embedding_train.rendering import RowTextRenderer, resolve_column_mapping
 
 
 HARD_NEGATIVE_PROVENANCE = "hard_negative"
@@ -403,8 +403,8 @@ def run_hard_negative_mining(args):
     tokenizer = build_tokenizer(cfg.model.model_name)
     renderer = RowTextRenderer(cfg.data)
     expected_dim = int(manifest["embedding_dim"])
-    query_id_column = str(cfg.data.get("query_id_column", "query_id")).strip() or "query_id"
-    offer_id_column = str(cfg.data.get("offer_id_column", "offer_id_b64")).strip() or "offer_id_b64"
+    query_id_column = renderer.column_mapping["query_id"]
+    offer_id_column = renderer.column_mapping["offer_id"]
     positive_label = str(cfg.data.positive_label)
 
     print("Building positive offer sets from training data...")

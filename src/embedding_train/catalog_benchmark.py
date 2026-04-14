@@ -163,12 +163,12 @@ def collect_benchmark_data(args, renderer):
         for row in rows:
             query_id = resolve_row_identifier(
                 row,
-                renderer.query_id_column,
+                renderer.column_mapping["query_id"],
                 ["query_id"],
             )
             offer_id = resolve_row_identifier(
                 row,
-                renderer.offer_id_column,
+                renderer.column_mapping["offer_id"],
                 ["offer_id_b64", "offer_id", "item_id"],
             )
             raw_label = normalize_text(row.get("label"))

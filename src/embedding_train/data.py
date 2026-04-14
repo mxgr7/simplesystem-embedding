@@ -28,7 +28,7 @@ from embedding_train.batching import (
     RandomQueryPoolBuilder,
     build_batch_stats,
 )
-from embedding_train.rendering import RowTextRenderer
+from embedding_train.rendering import RowTextRenderer, resolve_column_mapping
 
 HARD_NEGATIVE_PROVENANCE = "hard_negative"
 SEMI_HARD_NEGATIVE_PROVENANCE = "semi_hard_negative"
@@ -504,8 +504,7 @@ class EmbeddingDataModule(LightningDataModule):
                 semi_hard_stat.st_size if semi_hard_stat is not None else None
             ),
             "limit_rows": data_cfg.limit_rows,
-            "query_id_column": str(data_cfg.get("query_id_column", "query_id")),
-            "offer_id_column": str(data_cfg.get("offer_id_column", "offer_id_b64")),
+            "column_mapping": resolve_column_mapping(data_cfg),
             "query_template": str(data_cfg.query_template),
             "offer_template": str(data_cfg.offer_template),
             "positive_label": str(data_cfg.positive_label),
@@ -632,10 +631,7 @@ class EmbeddingDataModule(LightningDataModule):
             "source_mtime_ns": stat_result.st_mtime_ns,
             "source_size": stat_result.st_size,
             "limit_rows": data_cfg.limit_rows,
-            "query_id_column": str(data_cfg.get("query_id_column", "query_id")),
-            "offer_id_column": str(
-                data_cfg.get("offer_id_column", "offer_id_b64")
-            ),
+            "column_mapping": resolve_column_mapping(data_cfg),
             "query_template": str(data_cfg.query_template),
             "offer_template": str(data_cfg.offer_template),
             "positive_label": str(data_cfg.positive_label),
