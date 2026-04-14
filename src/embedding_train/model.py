@@ -758,7 +758,7 @@ class EmbeddingModule(L.LightningModule):
             ]
             param_groups = [
                 {"params": encoder_params, "lr": base_lr},
-                {"params": list(self.projection.parameters()), "lr": base_lr * 10.0},
+                {"params": list(self.projection.parameters()), "lr": base_lr * 30.0},
             ]
         else:
             param_groups = [{"params": list(self.parameters()), "lr": base_lr}]
