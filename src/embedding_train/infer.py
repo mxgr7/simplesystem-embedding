@@ -634,7 +634,6 @@ def _encode_from_numpy(
     )
 
     chunk_starts = list(range(0, n, encode_batch_size))
-
     use_pinned = device.type == "cuda"
 
     def pad_chunk_numpy(start):
@@ -670,7 +669,6 @@ def _encode_from_numpy(
                     for name, tensor in cpu_inputs.items()
                 }
                 embeddings = model.encode(device_inputs)
-                # Keep on GPU — cat + unsort on GPU, single D2H at end
                 encoded_batches.append(embeddings.detach())
 
     all_embeddings = torch.cat(encoded_batches, dim=0)
