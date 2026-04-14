@@ -18,7 +18,7 @@ To set up a new experiment, work with the user to:
    - `src/embedding_train/data.py` — datamodule, hard/semi-hard negative wiring.
    - `src/embedding_train/eval.py` and `metrics.py` — **read-only**: this is the evaluation harness and must not be modified.
 4. **Verify data exists**: confirm the labeled parquet referenced by `configs/data/default.yaml` is readable, and that the MLflow server at the URI in `configs/logger/mlflow.yaml` is reachable (`curl -s <uri>` or use the `mlflow` skill). If either is missing, stop and tell the human.
-5. **Initialize results.tsv**: create `results.tsv` with just the header row. The baseline will be recorded after the first run.
+5. **Initialize results.tsv**: create `results.tsv` with just the header row (if it doesn't exist yet). The baseline will be recorded after the first run.
 6. **Confirm and go**: confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
@@ -155,7 +155,8 @@ LOOP FOREVER:
 4. Run: `uv run embedding-train trainer.max_time=00:00:20:00 trainer.max_epochs=1000 > run.log 2>&1`.
 5. Read out the results via MLflow and/or `grep` on `run.log`.
 6. If the grep output is empty / the MLflow run is missing, the run crashed. Read `tail -n 80 run.log` and attempt a fix. If you can't, skip it.
-7. Record the row in `results.tsv` (NOTE: do not commit `results.tsv`, leave it untracked).
+7. Record the row in `results.tsv` (NOTE: do not commit your changes to `results.tsv`, that's up to the human to review & commit).
+8. Add and/or update any notable insights in `NOTES.md` (also do not commit your changes to `NOTES.md`).
 8. If `val_ndcg_at_5` improved (higher), "advance" the branch — keep the commit.
 9. If it's equal or worse, `git reset --hard` back to where you started.
 
