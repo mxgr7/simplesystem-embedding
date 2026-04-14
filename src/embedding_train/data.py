@@ -40,6 +40,7 @@ VALID_NEGATIVE_PROVENANCES = (
 VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query", "random_query_pool"}
 VALID_VAL_SPLIT_MODES = {"offer_connected_component", "query_id"}
 PREPARED_RECORDS_CACHE_SCHEMA_VERSION = 1
+RANDOM_QUERY_POOL_CACHE_SCHEMA_VERSION = 1
 DEFAULT_PREPARED_RECORDS_CACHE_DIR = ".cache/prepared_dataset"
 
 
@@ -390,6 +391,25 @@ class EmbeddingDataModule(LightningDataModule):
         if self.train_dataset is None:
             raise RuntimeError("train_dataset is not initialized. Call setup() first.")
 
+        cache_path = self._random_query_pool_cache_path()
+
+        if cache_path is not None and cache_path.exists():
+            try:
+                with cache_path.open("rb") as handle:
+                    pool_records = pickle.load(handle)
+                print(
+                    f"Loaded random query pool from cache: {cache_path} "
+                    f"({len(pool_records)} records)",
+                    file=sys.stderr,
+                )
+                return PairDataset(pool_records)
+            except Exception as exc:
+                print(
+                    f"Failed to load random query pool cache at {cache_path}: {exc}. "
+                    "Rebuilding.",
+                    file=sys.stderr,
+                )
+
         pool_builder = RandomQueryPoolBuilder(
             positive_records_by_query=self.positive_records_by_query,
             negative_records_by_query=self.negative_records_by_query,
@@ -401,7 +421,104 @@ class EmbeddingDataModule(LightningDataModule):
             hard_negative_records_by_query=self.hard_negative_records_by_query,
             semi_hard_negative_records_by_query=self.semi_hard_negative_records_by_query,
         )
-        return PairDataset(pool_builder.build_pool())
+        pool_records = pool_builder.build_pool()
+
+        if cache_path is not None:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+                with tmp_path.open("wb") as handle:
+                    pickle.dump(
+                        pool_records, handle, protocol=pickle.HIGHEST_PROTOCOL
+                    )
+                tmp_path.replace(cache_path)
+                print(
+                    f"Cached random query pool to: {cache_path}",
+                    file=sys.stderr,
+                )
+            except Exception as exc:
+                print(
+                    f"Failed to write random query pool cache to {cache_path}: {exc}",
+                    file=sys.stderr,
+                )
+
+        return PairDataset(pool_records)
+
+    def _random_query_pool_cache_path(self):
+        data_cfg = self.cfg.data
+
+        if not bool(data_cfg.get("cache_prepared_dataset", True)):
+            return None
+
+        source_path = Path(str(data_cfg.path))
+        try:
+            source_stat = source_path.stat()
+        except OSError:
+            return None
+
+        def sidecar_stat(path_value):
+            if not path_value:
+                return None, None
+            sidecar_path = Path(str(path_value))
+            try:
+                sidecar_stat_result = sidecar_path.stat()
+            except OSError:
+                return None, None
+            return sidecar_path, sidecar_stat_result
+
+        hard_path, hard_stat = sidecar_stat(
+            getattr(data_cfg, "hard_negatives_path", None)
+        )
+        semi_hard_path, semi_hard_stat = sidecar_stat(
+            getattr(data_cfg, "semi_hard_negatives_path", None)
+        )
+
+        cache_dir_cfg = data_cfg.get(
+            "prepare_cache_dir", DEFAULT_PREPARED_RECORDS_CACHE_DIR
+        )
+        cache_dir = Path(str(cache_dir_cfg))
+
+        key_payload = {
+            "schema_version": RANDOM_QUERY_POOL_CACHE_SCHEMA_VERSION,
+            "source_path": str(source_path.resolve()),
+            "source_mtime_ns": source_stat.st_mtime_ns,
+            "source_size": source_stat.st_size,
+            "hard_negatives_path": (
+                str(hard_path.resolve()) if hard_path is not None else None
+            ),
+            "hard_negatives_mtime_ns": (
+                hard_stat.st_mtime_ns if hard_stat is not None else None
+            ),
+            "hard_negatives_size": (
+                hard_stat.st_size if hard_stat is not None else None
+            ),
+            "semi_hard_negatives_path": (
+                str(semi_hard_path.resolve())
+                if semi_hard_path is not None
+                else None
+            ),
+            "semi_hard_negatives_mtime_ns": (
+                semi_hard_stat.st_mtime_ns if semi_hard_stat is not None else None
+            ),
+            "semi_hard_negatives_size": (
+                semi_hard_stat.st_size if semi_hard_stat is not None else None
+            ),
+            "limit_rows": data_cfg.limit_rows,
+            "query_id_column": str(data_cfg.get("query_id_column", "query_id")),
+            "offer_id_column": str(data_cfg.get("offer_id_column", "offer_id_b64")),
+            "query_template": str(data_cfg.query_template),
+            "offer_template": str(data_cfg.offer_template),
+            "positive_label": str(data_cfg.positive_label),
+            "clean_html": bool(data_cfg.clean_html),
+            "val_fraction": float(data_cfg.val_fraction),
+            "val_split_mode": str(data_cfg.val_split_mode),
+            "seed": int(self.cfg.seed),
+            "n_pos_samples_per_query": int(data_cfg.n_pos_samples_per_query),
+            "n_neg_samples_per_query": int(data_cfg.n_neg_samples_per_query),
+        }
+        serialized = json.dumps(key_payload, sort_keys=True, default=str)
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+        return cache_dir / f"random_query_pool-{digest}.pkl"
 
     def _load_or_prepare_records(self):
         cache_path = self._prepared_records_cache_path()

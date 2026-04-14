@@ -111,22 +111,43 @@ class QuerySamplingBuilder:
             for query_id, records in negative_records_by_query.items()
         }
         self.eligible_query_ids = list(eligible_query_ids)
-        self.synthetic_offer_pool = [
-            dict(record) for record in synthetic_negative_offer_pool
-        ]
-        self.hard_negative_records_by_query = {
-            query_id: list(records)
-            for query_id, records in (hard_negative_records_by_query or {}).items()
-        }
-        self.semi_hard_negative_records_by_query = {
-            query_id: list(records)
-            for query_id, records in (semi_hard_negative_records_by_query or {}).items()
-        }
+        self.synthetic_offer_pool = list(synthetic_negative_offer_pool)
         self.n_pos_samples_per_query = int(n_pos_samples_per_query)
         self.n_neg_samples_per_query = int(n_neg_samples_per_query)
         self.randomizer = random.Random(seed)
 
         self._validate_eligible_queries()
+
+        self._query_text_by_query_id = self._build_query_text_index()
+        self.hard_negative_records_by_query = self._prebuild_mined_records(
+            hard_negative_records_by_query, build_hard_negative_record
+        )
+        self.semi_hard_negative_records_by_query = self._prebuild_mined_records(
+            semi_hard_negative_records_by_query, build_semi_hard_negative_record
+        )
+
+    def _build_query_text_index(self):
+        index = {}
+        for query_id, records in self.positive_records_by_query.items():
+            if records:
+                index[query_id] = records[0]["query_text"]
+        for query_id, records in self.negative_records_by_query.items():
+            if query_id not in index and records:
+                index[query_id] = records[0]["query_text"]
+        return index
+
+    def _prebuild_mined_records(self, raw_by_query, builder_fn):
+        prebuilt = {}
+        if not raw_by_query:
+            return prebuilt
+        for query_id, raw_records in raw_by_query.items():
+            query_text = self._query_text_by_query_id.get(query_id)
+            if query_text is None or not raw_records:
+                continue
+            prebuilt[query_id] = [
+                builder_fn(query_id, query_text, raw) for raw in raw_records
+            ]
+        return prebuilt
 
     def _validate_eligible_queries(self):
         if not self.eligible_query_ids:
@@ -161,7 +182,6 @@ class QuerySamplingBuilder:
             self.semi_hard_negative_records_by_query.get(anchor_query_id, [])
         )
         anchor_query_text = self._resolve_anchor_query_text(anchor_query_id)
-        synthetic_offer_candidates = self._shuffled_copy(self.synthetic_offer_pool)
 
         if len(anchor_positive_records) < self.n_pos_samples_per_query:
             raise ValueError(
@@ -185,21 +205,13 @@ class QuerySamplingBuilder:
                 )
                 continue
 
-            if anchor_hard_negative_records and self._append_hard_negative(
-                records,
-                anchor_query_id,
-                anchor_query_text,
-                anchor_hard_negative_records,
-                used_offer_ids,
+            if anchor_hard_negative_records and self._append_prebuilt_negative(
+                records, anchor_hard_negative_records, used_offer_ids
             ):
                 continue
 
-            if anchor_semi_hard_negative_records and self._append_semi_hard_negative(
-                records,
-                anchor_query_id,
-                anchor_query_text,
-                anchor_semi_hard_negative_records,
-                used_offer_ids,
+            if anchor_semi_hard_negative_records and self._append_prebuilt_negative(
+                records, anchor_semi_hard_negative_records, used_offer_ids
             ):
                 continue
 
@@ -207,7 +219,6 @@ class QuerySamplingBuilder:
                 records,
                 anchor_query_id,
                 anchor_query_text,
-                synthetic_offer_candidates,
                 used_offer_ids,
             )
 
@@ -218,53 +229,19 @@ class QuerySamplingBuilder:
             "remaining_hard_negative_records": anchor_hard_negative_records,
             "remaining_semi_hard_negative_records": anchor_semi_hard_negative_records,
             "anchor_query_text": anchor_query_text,
-            "synthetic_offer_candidates": synthetic_offer_candidates,
             "used_offer_ids": used_offer_ids,
         }
 
     def _append_real_record(self, batch, record, used_offer_ids):
-        batch.append(dict(record))
+        batch.append(record)
         used_offer_ids.add(record["offer_id"])
 
-    def _append_hard_negative(
-        self,
-        batch,
-        anchor_query_id,
-        anchor_query_text,
-        hard_negative_candidates,
-        used_offer_ids,
-    ):
-        while hard_negative_candidates:
-            candidate = hard_negative_candidates.pop()
+    def _append_prebuilt_negative(self, batch, candidates, used_offer_ids):
+        while candidates:
+            candidate = candidates.pop()
             if candidate["offer_id"] in used_offer_ids:
                 continue
-            batch.append(
-                build_hard_negative_record(
-                    anchor_query_id, anchor_query_text, candidate
-                )
-            )
-            used_offer_ids.add(candidate["offer_id"])
-            return True
-
-        return False
-
-    def _append_semi_hard_negative(
-        self,
-        batch,
-        anchor_query_id,
-        anchor_query_text,
-        semi_hard_negative_candidates,
-        used_offer_ids,
-    ):
-        while semi_hard_negative_candidates:
-            candidate = semi_hard_negative_candidates.pop()
-            if candidate["offer_id"] in used_offer_ids:
-                continue
-            batch.append(
-                build_semi_hard_negative_record(
-                    anchor_query_id, anchor_query_text, candidate
-                )
-            )
+            batch.append(candidate)
             used_offer_ids.add(candidate["offer_id"])
             return True
 
@@ -275,13 +252,10 @@ class QuerySamplingBuilder:
         batch,
         anchor_query_id,
         anchor_query_text,
-        synthetic_offer_candidates,
         used_offer_ids,
     ):
         synthetic_offer = self._sample_synthetic_offer(
-            anchor_query_id,
-            synthetic_offer_candidates,
-            used_offer_ids,
+            anchor_query_id, used_offer_ids
         )
 
         batch.append(
@@ -291,11 +265,18 @@ class QuerySamplingBuilder:
         )
         used_offer_ids.add(synthetic_offer["offer_id"])
 
-    def _sample_synthetic_offer(
-        self, anchor_query_id, synthetic_offer_candidates, used_offer_ids
-    ):
-        while synthetic_offer_candidates:
-            offer = synthetic_offer_candidates.pop()
+    def _sample_synthetic_offer(self, anchor_query_id, used_offer_ids):
+        pool = self.synthetic_offer_pool
+        pool_size = len(pool)
+        if pool_size == 0:
+            raise ValueError(
+                "No synthetic offers available to sample a negative from"
+            )
+        # Rejection-sample from the full pool by random index, so we don't
+        # copy+shuffle the entire pool on every call.
+        max_attempts = max(pool_size * 2, 1024)
+        for _ in range(max_attempts):
+            offer = pool[self.randomizer.randrange(pool_size)]
             if offer["offer_source_query_id"] == anchor_query_id:
                 continue
             if offer["offer_id"] in used_offer_ids:
@@ -307,15 +288,10 @@ class QuerySamplingBuilder:
         )
 
     def _resolve_anchor_query_text(self, anchor_query_id):
-        positive_records = self.positive_records_by_query.get(anchor_query_id, [])
-        if positive_records:
-            return positive_records[0]["query_text"]
-
-        negative_records = self.negative_records_by_query.get(anchor_query_id, [])
-        if negative_records:
-            return negative_records[0]["query_text"]
-
-        raise ValueError(f"Anchor query has no records: {anchor_query_id}")
+        query_text = self._query_text_by_query_id.get(anchor_query_id)
+        if query_text is None:
+            raise ValueError(f"Anchor query has no records: {anchor_query_id}")
+        return query_text
 
     def _shuffled_copy(self, items):
         shuffled = list(items)
@@ -364,7 +340,6 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
             "remaining_semi_hard_negative_records"
         ]
         anchor_query_text = build_context["anchor_query_text"]
-        synthetic_offer_candidates = build_context["synthetic_offer_candidates"]
         used_offer_ids = build_context["used_offer_ids"]
 
         while len(batch) < self.batch_size and (
@@ -385,10 +360,8 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
                 )
 
         while len(batch) < self.batch_size and anchor_hard_negative_records:
-            appended = self._append_hard_negative(
+            appended = self._append_prebuilt_negative(
                 batch,
-                anchor_query_id,
-                anchor_query_text,
                 anchor_hard_negative_records,
                 used_offer_ids,
             )
@@ -396,10 +369,8 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
                 break
 
         while len(batch) < self.batch_size and anchor_semi_hard_negative_records:
-            appended = self._append_semi_hard_negative(
+            appended = self._append_prebuilt_negative(
                 batch,
-                anchor_query_id,
-                anchor_query_text,
                 anchor_semi_hard_negative_records,
                 used_offer_ids,
             )
@@ -411,7 +382,6 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
                 batch,
                 anchor_query_id,
                 anchor_query_text,
-                synthetic_offer_candidates,
                 used_offer_ids,
             )
 
@@ -432,52 +402,70 @@ class AnchorQueryBatchBuilder(QuerySamplingBuilder):
 class RandomQueryPoolBuilder(QuerySamplingBuilder):
     def build_pool(self):
         records = []
-        query_ids = self._shuffled_copy(self.eligible_query_ids)
 
-        for query_id in query_ids:
-            query_records = self._build_query_records(query_id)
-            records.extend(query_records)
+        for query_id in self.eligible_query_ids:
+            query_text = self._query_text_by_query_id[query_id]
+            real_positives = self.positive_records_by_query.get(query_id, [])
+            real_negatives = self.negative_records_by_query.get(query_id, [])
+            hard_negatives = self.hard_negative_records_by_query.get(query_id, [])
+            semi_hard_negatives = self.semi_hard_negative_records_by_query.get(
+                query_id, []
+            )
 
-        self.randomizer.shuffle(records)
-        return records
+            used_offer_ids = set()
 
-    def _build_query_records(self, query_id):
-        build_context = self._build_query_minimum_records(query_id)
-        records = build_context["records"]
-        remaining_positive_records = build_context["remaining_positive_records"]
-        remaining_negative_records = build_context["remaining_negative_records"]
-        remaining_hard_negative_records = build_context["remaining_hard_negative_records"]
-        remaining_semi_hard_negative_records = build_context[
-            "remaining_semi_hard_negative_records"
-        ]
-        anchor_query_text = build_context["anchor_query_text"]
+            for record in real_positives:
+                offer_id = record["offer_id"]
+                if offer_id in used_offer_ids:
+                    continue
+                used_offer_ids.add(offer_id)
+                records.append(record)
 
-        extra_records = []
-        for record in remaining_positive_records:
-            extra_records.append(dict(record))
+            real_negatives_added = 0
+            for record in real_negatives:
+                offer_id = record["offer_id"]
+                if offer_id in used_offer_ids:
+                    continue
+                used_offer_ids.add(offer_id)
+                records.append(record)
+                real_negatives_added += 1
 
-        for record in remaining_negative_records:
-            extra_records.append(dict(record))
+            hard_negatives_added = 0
+            for record in hard_negatives:
+                offer_id = record["offer_id"]
+                if offer_id in used_offer_ids:
+                    continue
+                used_offer_ids.add(offer_id)
+                records.append(record)
+                hard_negatives_added += 1
 
-        used_offer_ids = build_context["used_offer_ids"]
-        for candidate in remaining_hard_negative_records:
-            if candidate["offer_id"] not in used_offer_ids:
-                extra_records.append(
-                    build_hard_negative_record(query_id, anchor_query_text, candidate)
+            semi_hard_negatives_added = 0
+            for record in semi_hard_negatives:
+                offer_id = record["offer_id"]
+                if offer_id in used_offer_ids:
+                    continue
+                used_offer_ids.add(offer_id)
+                records.append(record)
+                semi_hard_negatives_added += 1
+
+            available_negatives = (
+                real_negatives_added
+                + hard_negatives_added
+                + semi_hard_negatives_added
+            )
+            synthetic_needed = self.n_neg_samples_per_query - available_negatives
+            for _ in range(synthetic_needed):
+                synthetic_offer = self._sample_synthetic_offer(
+                    query_id, used_offer_ids
                 )
-                used_offer_ids.add(candidate["offer_id"])
-
-        for candidate in remaining_semi_hard_negative_records:
-            if candidate["offer_id"] not in used_offer_ids:
-                extra_records.append(
-                    build_semi_hard_negative_record(
-                        query_id, anchor_query_text, candidate
+                records.append(
+                    build_synthetic_negative_record(
+                        query_id, query_text, synthetic_offer
                     )
                 )
-                used_offer_ids.add(candidate["offer_id"])
+                used_offer_ids.add(synthetic_offer["offer_id"])
 
-        self.randomizer.shuffle(extra_records)
-        records.extend(extra_records)
+        self.randomizer.shuffle(records)
         return records
 
 
