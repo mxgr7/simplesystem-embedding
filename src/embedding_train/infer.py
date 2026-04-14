@@ -234,15 +234,19 @@ def build_tokenizer(model_name):
 
 def _pad_and_stack(token_ids_batch, pad_token_id):
     """Pad a list of token ID lists to the batch max length, return input_ids + attention_mask tensors."""
+    import numpy as np
     max_len = max(len(ids) for ids in token_ids_batch)
     batch_size = len(token_ids_batch)
-    input_ids = torch.full((batch_size, max_len), pad_token_id, dtype=torch.long)
-    attention_mask = torch.zeros(batch_size, max_len, dtype=torch.long)
+    input_ids = np.full((batch_size, max_len), pad_token_id, dtype=np.int64)
+    attention_mask = np.zeros((batch_size, max_len), dtype=np.int64)
     for i, ids in enumerate(token_ids_batch):
         length = len(ids)
-        input_ids[i, :length] = torch.tensor(ids, dtype=torch.long)
+        input_ids[i, :length] = ids
         attention_mask[i, :length] = 1
-    return {"input_ids": input_ids, "attention_mask": attention_mask}
+    return {
+        "input_ids": torch.from_numpy(input_ids),
+        "attention_mask": torch.from_numpy(attention_mask),
+    }
 
 
 def encode_texts(
