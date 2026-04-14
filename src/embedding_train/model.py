@@ -329,9 +329,25 @@ class EmbeddingModule(L.LightningModule):
         return query_embeddings, offer_embeddings, scores
 
     def training_step(self, batch, batch_idx):
-        query_embeddings, query_raw = self.encode_with_raw(batch["query_inputs"])
-        offer_embeddings, offer_raw = self.encode_with_raw(batch["offer_inputs"])
-        scores = (query_embeddings * offer_embeddings).sum(dim=1)
+        aux_raw_loss_weight = self.cfg.model.get("aux_raw_loss_weight", None)
+        aux_alpha = (
+            float(aux_raw_loss_weight) if aux_raw_loss_weight is not None else 0.0
+        )
+        use_aux_loss = aux_alpha > 0.0
+
+        if use_aux_loss:
+            query_embeddings, query_raw = self.encode_with_raw(
+                batch["query_inputs"]
+            )
+            offer_embeddings, offer_raw = self.encode_with_raw(
+                batch["offer_inputs"]
+            )
+            scores = (query_embeddings * offer_embeddings).sum(dim=1)
+        else:
+            query_embeddings, offer_embeddings, scores = self(
+                batch["query_inputs"], batch["offer_inputs"]
+            )
+
         batch_size = batch["labels"].size(0)
         loss_metric_name = self.batch_aligned_metric_name(
             "train", f"{self.loss_type}_loss"
@@ -339,36 +355,41 @@ class EmbeddingModule(L.LightningModule):
         train_metric_name = self.batch_aligned_metric_name("train", "loss")
         self.assert_finite(batch["labels"], "labels", batch_idx)
         self.assert_finite(scores, "scores", batch_idx)
+
         projected_loss = self.compute_loss(
             batch,
             query_embeddings,
             offer_embeddings,
             scores,
         )
-        raw_loss = self.compute_loss(
-            batch,
-            query_raw,
-            offer_raw,
-            (query_raw * offer_raw).sum(dim=1),
-        )
-        aux_alpha = float(getattr(self.cfg.model, "aux_raw_loss_weight", 0.5))
-        loss = projected_loss + aux_alpha * raw_loss
-        self.log(
-            self.batch_aligned_metric_name("train", "projected_loss"),
-            projected_loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=False,
-            batch_size=batch_size,
-        )
-        self.log(
-            self.batch_aligned_metric_name("train", "raw_loss"),
-            raw_loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=False,
-            batch_size=batch_size,
-        )
+
+        if use_aux_loss:
+            raw_loss = self.compute_loss(
+                batch,
+                query_raw,
+                offer_raw,
+                (query_raw * offer_raw).sum(dim=1),
+            )
+            loss = projected_loss + aux_alpha * raw_loss
+            self.log(
+                self.batch_aligned_metric_name("train", "projected_loss"),
+                projected_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                batch_size=batch_size,
+            )
+            self.log(
+                self.batch_aligned_metric_name("train", "raw_loss"),
+                raw_loss,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                batch_size=batch_size,
+            )
+        else:
+            loss = projected_loss
+
         self.assert_finite(loss, "train_loss", batch_idx)
         self.log(
             loss_metric_name,
@@ -775,14 +796,21 @@ class EmbeddingModule(L.LightningModule):
     def configure_optimizers(self):
         base_lr = float(self.cfg.optimizer.lr)
         weight_decay = float(self.cfg.optimizer.weight_decay)
-        if self.projection is not None:
+        projection_lr_multiplier = self.cfg.optimizer.get(
+            "projection_lr_multiplier", None
+        )
+        if projection_lr_multiplier is not None and self.projection is not None:
+            multiplier = float(projection_lr_multiplier)
             projection_param_ids = {id(p) for p in self.projection.parameters()}
             encoder_params = [
                 p for p in self.parameters() if id(p) not in projection_param_ids
             ]
             param_groups = [
                 {"params": encoder_params, "lr": base_lr},
-                {"params": list(self.projection.parameters()), "lr": base_lr * 30.0},
+                {
+                    "params": list(self.projection.parameters()),
+                    "lr": base_lr * multiplier,
+                },
             ]
         else:
             param_groups = [{"params": list(self.parameters()), "lr": base_lr}]
@@ -1050,13 +1078,24 @@ class EmbeddingModule(L.LightningModule):
         raise RuntimeError(f"Unsupported loss type: {self.loss_type}")
 
     def encode(self, inputs):
-        return self.encode_with_raw(inputs)[0]
+        outputs = self.encoder(**inputs)
+        self.assert_finite(outputs.last_hidden_state, "last_hidden_state")
+        pooled = self.pool_last_hidden_state(
+            outputs.last_hidden_state, inputs["attention_mask"]
+        )
+        self.assert_finite(pooled, "pooled_embeddings")
+        projected = self.project_embeddings(pooled)
+        self.assert_finite(projected, "projected_embeddings")
+        normalized = F.normalize(projected, p=2, dim=1)
+        self.assert_finite(normalized, "normalized_embeddings")
+        return normalized
 
     def encode_with_raw(self, inputs):
         """Return (projected_normalized, raw_normalized). The raw output is
         the L2-normalized pre-projection pooled embedding, used for the
-        auxiliary 768-d contrastive loss during training. Shares the single
-        encoder forward pass."""
+        auxiliary 768-d contrastive loss during training when
+        `model.aux_raw_loss_weight` is set. Shares the single encoder
+        forward pass."""
         outputs = self.encoder(**inputs)
         self.assert_finite(outputs.last_hidden_state, "last_hidden_state")
         pooled = self.pool_last_hidden_state(

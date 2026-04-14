@@ -4,3 +4,9 @@ scheduler: constant_with_warmup
 warmup_ratio: 0.33
 warmup_steps: null
 override_lr_on_resume: false
+# Multiplier on `lr` applied only to the projection head parameter group
+# via a second AdamW param group. null disables the split (all parameters
+# share `lr`). Apr14 finding: with output_dim=128 pinned, setting this to
+# 30.0 lifts val/full_catalog/ndcg_at_5 by ~0.014 over the unified-lr
+# baseline. See NOTES.md "Apr14 strategic lessons".
+projection_lr_multiplier: 30.0

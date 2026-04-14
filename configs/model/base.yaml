@@ -9,4 +9,10 @@ gradient_checkpointing: false
 teacher_checkpoint: null
 distill_temperature: 0.05
 compile: true
+# Weight on the auxiliary 768-d contrastive loss computed from the
+# pre-projection pooled embedding during training. null (or 0) disables
+# the auxiliary path entirely and training reverts to the single-loss
+# flow on the projected 128-d output. Apr14 finding: with
+# output_dim=128 pinned, 0.5 is the peak (0.3 -0.004, 1.0 -0.007). See
+# NOTES.md "Apr14 strategic lessons".
 aux_raw_loss_weight: 0.5
