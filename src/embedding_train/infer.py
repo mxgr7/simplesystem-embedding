@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
@@ -148,7 +149,7 @@ def build_arg_parser():
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Emit detailed profiling stats (padding efficiency, token throughput, etc.)",
+        help="Run torch.profiler and emit CUDA kernel-level timing breakdown.",
     )
     return parser
 
@@ -298,7 +299,6 @@ def _worker_render_and_tokenize(item):
 
 def _pad_and_stack(token_ids_batch, pad_token_id):
     """Pad a list of token ID lists to the batch max length, return input_ids + attention_mask tensors."""
-    import numpy as np
     max_len = max(len(ids) for ids in token_ids_batch)
     batch_size = len(token_ids_batch)
     input_ids = np.full((batch_size, max_len), pad_token_id, dtype=np.int64)
@@ -313,67 +313,19 @@ def _pad_and_stack(token_ids_batch, pad_token_id):
     }
 
 
-def encode_texts(
-    model,
-    tokenizer,
-    texts,
-    max_length,
-    encode_batch_size,
-    device,
-    phase_times=None,
-):
-    if not texts:
-        return torch.empty(0)
-
+def _encode_sorted_batches(sorted_ids, encode_batch_size, pad_token_id, model, device):
+    """Run GPU forward pass on pre-sorted token ID lists. Returns list of embedding tensors."""
+    chunk_starts = list(range(0, len(sorted_ids), encode_batch_size))
     encoded_batches = []
     amp_context = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         if device.type == "cuda"
         else nullcontext()
     )
-    profile = phase_times is not None
-    sync_cuda = profile and device.type == "cuda"
-    pad_token_id = tokenizer.pad_token_id or 0
-
-    # Phase 1: Tokenize all texts at once without padding (3x faster)
-    t_tok = time.perf_counter() if profile else 0.0
-    all_encodings = tokenizer(
-        texts,
-        padding=False,
-        truncation=True,
-        max_length=max_length,
-    )
-    all_input_ids = all_encodings["input_ids"]
-    if profile:
-        phase_times["encode_tokenize"] = (
-            phase_times.get("encode_tokenize", 0.0)
-            + time.perf_counter()
-            - t_tok
-        )
-
-    # Phase 2: Sort by token length for optimal batching
-    sort_start = time.perf_counter() if profile else 0.0
-    sort_order = sorted(range(len(all_input_ids)), key=lambda i: len(all_input_ids[i]))
-    sorted_ids = [all_input_ids[i] for i in sort_order]
-    if profile:
-        phase_times["encode_sort"] = (
-            phase_times.get("encode_sort", 0.0) + time.perf_counter() - sort_start
-        )
-
-    # Phase 3: Batch encode with local padding
-    chunk_starts = list(range(0, len(sorted_ids), encode_batch_size))
 
     def pad_chunk(start):
-        t_pad = time.perf_counter() if profile else 0.0
         chunk = sorted_ids[start : start + encode_batch_size]
-        result = _pad_and_stack(chunk, pad_token_id)
-        if profile:
-            phase_times["encode_pad"] = (
-                phase_times.get("encode_pad", 0.0)
-                + time.perf_counter()
-                - t_pad
-            )
-        return result
+        return _pad_and_stack(chunk, pad_token_id)
 
     with ThreadPoolExecutor(max_workers=1) as pad_executor:
         prefetched = pad_executor.submit(pad_chunk, chunk_starts[0])
@@ -384,75 +336,48 @@ def encode_texts(
                 if i + 1 < len(chunk_starts):
                     prefetched = pad_executor.submit(pad_chunk, chunk_starts[i + 1])
 
-                if profile:
-                    t_h2d = time.perf_counter()
                 device_inputs = {
                     name: tensor.to(device, non_blocking=True)
                     for name, tensor in cpu_inputs.items()
                 }
-                if sync_cuda:
-                    torch.cuda.synchronize()
-                if profile:
-                    phase_times["encode_h2d"] = (
-                        phase_times.get("encode_h2d", 0.0)
-                        + time.perf_counter()
-                        - t_h2d
-                    )
-                    attn_mask = cpu_inputs["attention_mask"]
-                    total_tokens = attn_mask.numel()
-                    real_tokens = int(attn_mask.sum())
-                    phase_times["_total_tokens"] = (
-                        phase_times.get("_total_tokens", 0) + total_tokens
-                    )
-                    phase_times["_real_tokens"] = (
-                        phase_times.get("_real_tokens", 0) + real_tokens
-                    )
-                    phase_times["_max_seq_len_sum"] = (
-                        phase_times.get("_max_seq_len_sum", 0) + attn_mask.shape[1]
-                    )
-                    phase_times["_num_encode_batches"] = (
-                        phase_times.get("_num_encode_batches", 0) + 1
-                    )
-                    phase_times["_num_sequences"] = (
-                        phase_times.get("_num_sequences", 0) + attn_mask.shape[0]
-                    )
-                    t_fwd = time.perf_counter()
-
                 embeddings = model.encode(device_inputs)
-
-                if sync_cuda:
-                    torch.cuda.synchronize()
-                if profile:
-                    phase_times["encode_forward"] = (
-                        phase_times.get("encode_forward", 0.0)
-                        + time.perf_counter()
-                        - t_fwd
-                    )
-                    t_cpu = time.perf_counter()
-
                 encoded_batches.append(embeddings.detach().cpu().to(dtype=torch.float32))
 
-                if profile:
-                    phase_times["encode_to_cpu"] = (
-                        phase_times.get("encode_to_cpu", 0.0)
-                        + time.perf_counter()
-                        - t_cpu
-                    )
+    return encoded_batches
+
+
+def encode_texts(
+    model,
+    tokenizer,
+    texts,
+    max_length,
+    encode_batch_size,
+    device,
+):
+    if not texts:
+        return torch.empty(0)
+
+    pad_token_id = tokenizer.pad_token_id or 0
+
+    # Tokenize all texts at once without padding
+    all_input_ids = tokenizer(
+        texts, padding=False, truncation=True, max_length=max_length,
+    )["input_ids"]
+
+    # Sort by token length for optimal batching
+    sort_order = sorted(range(len(all_input_ids)), key=lambda i: len(all_input_ids[i]))
+    sorted_ids = [all_input_ids[i] for i in sort_order]
+
+    encoded_batches = _encode_sorted_batches(
+        sorted_ids, encode_batch_size, pad_token_id, model, device,
+    )
 
     sorted_embeddings = torch.cat(encoded_batches, dim=0)
-    unsort_start = time.perf_counter() if profile else 0.0
     inverse_order = torch.empty(len(sort_order), dtype=torch.long)
     inverse_order[torch.tensor(sort_order, dtype=torch.long)] = torch.arange(
         len(sort_order), dtype=torch.long
     )
-    result = sorted_embeddings.index_select(0, inverse_order)
-    if profile:
-        phase_times["encode_sort"] = (
-            phase_times.get("encode_sort", 0.0)
-            + time.perf_counter()
-            - unsort_start
-        )
-    return result
+    return sorted_embeddings.index_select(0, inverse_order)
 
 
 def resolve_embedding_arrow_type(embedding_precision):
@@ -588,14 +513,12 @@ def process_rows(
     device,
     row_number,
     embedding_precision,
-    phase_times=None,
 ):
     prepared_rows = []
     query_texts = []
     offer_texts = []
     skipped_rows = 0
 
-    prep_start = time.perf_counter() if phase_times is not None else 0.0
     for row in rows:
         context = renderer.build_context(row)
         prepared_row = {"row_number": row_number}
@@ -644,74 +567,36 @@ def process_rows(
         query_texts.append(query_text)
         offer_texts.append(offer_text)
 
-    if phase_times is not None:
-        phase_times["prepare_rows"] = (
-            phase_times.get("prepare_rows", 0.0) + time.perf_counter() - prep_start
-        )
-
     if not prepared_rows:
         return None, row_number, skipped_rows
 
-    encode_start = time.perf_counter() if phase_times is not None else 0.0
     if mode == "query":
         embeddings = encode_texts(
-            model,
-            tokenizer,
-            query_texts,
-            query_max_length,
-            encode_batch_size,
-            device,
-            phase_times=phase_times,
+            model, tokenizer, query_texts, query_max_length, encode_batch_size, device,
         )
         output_values = serialize_embeddings(
-            quantize_embeddings(embeddings, embedding_precision),
-            embedding_precision,
+            quantize_embeddings(embeddings, embedding_precision), embedding_precision,
         )
         embedding_dim = embeddings.size(1)
     elif mode == "offer":
         embeddings = encode_texts(
-            model,
-            tokenizer,
-            offer_texts,
-            offer_max_length,
-            encode_batch_size,
-            device,
-            phase_times=phase_times,
+            model, tokenizer, offer_texts, offer_max_length, encode_batch_size, device,
         )
         output_values = serialize_embeddings(
-            quantize_embeddings(embeddings, embedding_precision),
-            embedding_precision,
+            quantize_embeddings(embeddings, embedding_precision), embedding_precision,
         )
         embedding_dim = embeddings.size(1)
     else:
         query_embeddings = encode_texts(
-            model,
-            tokenizer,
-            query_texts,
-            query_max_length,
-            encode_batch_size,
-            device,
-            phase_times=phase_times,
+            model, tokenizer, query_texts, query_max_length, encode_batch_size, device,
         )
         offer_embeddings = encode_texts(
-            model,
-            tokenizer,
-            offer_texts,
-            offer_max_length,
-            encode_batch_size,
-            device,
-            phase_times=phase_times,
+            model, tokenizer, offer_texts, offer_max_length, encode_batch_size, device,
         )
         output_values = score_embedding_pairs(
-            query_embeddings,
-            offer_embeddings,
-            embedding_precision,
+            query_embeddings, offer_embeddings, embedding_precision,
         ).tolist()
         embedding_dim = query_embeddings.size(1)
-    if phase_times is not None:
-        phase_times["encode"] = (
-            phase_times.get("encode", 0.0) + time.perf_counter() - encode_start
-        )
 
     table = build_output_table(
         prepared_rows,
@@ -725,16 +610,117 @@ def process_rows(
     return table, row_number, skipped_rows
 
 
+def _encode_from_numpy(
+    flat_ids, lengths, prepared_rows, model, encode_batch_size,
+    device, pad_token_id, output_column, input_schema, embedding_precision, mode,
+):
+    """Sort pre-tokenized numpy-packed IDs by length, pad, forward, build table."""
+    n = len(lengths)
+    if n == 0:
+        return None
+
+    offsets = np.empty(n + 1, dtype=np.int64)
+    offsets[0] = 0
+    np.cumsum(lengths.astype(np.int64), out=offsets[1:])
+
+    sort_order = np.argsort(lengths, kind="mergesort")
+    sorted_lengths = lengths[sort_order]
+
+    encoded_batches = []
+    amp_context = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if device.type == "cuda"
+        else nullcontext()
+    )
+
+    chunk_starts = list(range(0, n, encode_batch_size))
+
+    def pad_chunk_numpy(start):
+        end = min(start + encode_batch_size, n)
+        batch_size = end - start
+        max_len = int(sorted_lengths[end - 1])
+        input_ids_np = np.full((batch_size, max_len), pad_token_id, dtype=np.int64)
+        attn_mask_np = np.zeros((batch_size, max_len), dtype=np.int64)
+        for i in range(batch_size):
+            idx = int(sort_order[start + i])
+            l = int(lengths[idx])
+            s = int(offsets[idx])
+            input_ids_np[i, :l] = flat_ids[s:s + l]
+            attn_mask_np[i, :l] = 1
+        return {
+            "input_ids": torch.from_numpy(input_ids_np),
+            "attention_mask": torch.from_numpy(attn_mask_np),
+        }
+
+    with ThreadPoolExecutor(max_workers=1) as pad_executor:
+        prefetched = pad_executor.submit(pad_chunk_numpy, chunk_starts[0])
+
+        with torch.inference_mode(), amp_context:
+            for i, _ in enumerate(chunk_starts):
+                cpu_inputs = prefetched.result()
+                if i + 1 < len(chunk_starts):
+                    prefetched = pad_executor.submit(pad_chunk_numpy, chunk_starts[i + 1])
+
+                device_inputs = {
+                    name: tensor.to(device, non_blocking=True)
+                    for name, tensor in cpu_inputs.items()
+                }
+                embeddings = model.encode(device_inputs)
+                encoded_batches.append(embeddings.detach().cpu().to(dtype=torch.float32))
+
+    all_embeddings = torch.cat(encoded_batches, dim=0)
+    inverse = torch.empty(n, dtype=torch.long)
+    inverse[torch.from_numpy(sort_order.astype(np.int64))] = torch.arange(n, dtype=torch.long)
+    embeddings = all_embeddings.index_select(0, inverse)
+
+    output_values = serialize_embeddings(
+        quantize_embeddings(embeddings, embedding_precision), embedding_precision,
+    )
+    return build_output_table(
+        prepared_rows, output_column, output_values, mode,
+        input_schema, embedding_precision, embeddings.size(1),
+    )
+
+
 def _run_with_workers(
     pool, parquet_file, column_rename, limit_rows,
     read_batch_size, encode_batch_size, row_number,
     model, device, pad_token_id, output_column, renamed_schema,
-    embedding_precision, mode, writer, phase_times,
+    embedding_precision, mode, writer,
 ):
-    """Stream parquet → multiprocess text rendering → GPU encode → write."""
+    """Stream parquet → multiprocess text rendering → GPU encode → write.
+
+    Accumulates multiple worker results before encoding to reduce GPU idle gaps.
+    """
+    ACCUMULATE_TARGET = 4096
+
     processed_rows = 0
     written_rows = 0
     skipped_rows = 0
+
+    accumulated_prepared = []
+    accumulated_flat_ids = []
+    accumulated_lengths = []
+
+    def flush_accumulated():
+        nonlocal written_rows
+        if not accumulated_prepared:
+            return
+        all_flat = np.concatenate(accumulated_flat_ids)
+        all_lengths = np.concatenate(accumulated_lengths)
+
+        table = _encode_from_numpy(
+            all_flat, all_lengths, list(accumulated_prepared),
+            model, encode_batch_size, device, pad_token_id,
+            output_column, renamed_schema, embedding_precision, mode,
+        )
+        if table is not None:
+            writer.write_table(table)
+            written_rows += table.num_rows
+
+        accumulated_prepared.clear()
+        accumulated_flat_ids.clear()
+        accumulated_lengths.clear()
 
     # Collect batches of work items for imap
     def batch_items():
@@ -754,7 +740,6 @@ def _run_with_workers(
             row_number += len(rows)
             yield (rows, rn)
 
-    # Workers render text + tokenize; main thread runs GPU
     for prepared_rows, packed_token_ids, batch_skipped, _ in pool.imap(
         _worker_render_and_tokenize, batch_items(), chunksize=1
     ):
@@ -763,151 +748,17 @@ def _run_with_workers(
         if not prepared_rows:
             continue
 
-        # Unpack numpy token_ids back to list-of-lists
         flat_ids, lengths = packed_token_ids
-        token_ids = []
-        offset = 0
-        for length in lengths:
-            token_ids.append(flat_ids[offset:offset + length].tolist())
-            offset += length
+        accumulated_prepared.extend(prepared_rows)
+        accumulated_flat_ids.append(flat_ids)
+        accumulated_lengths.append(lengths)
 
-        encode_start = time.perf_counter()
-        table = _encode_token_ids_and_build_table(
-            token_ids, prepared_rows, model, encode_batch_size,
-            device, pad_token_id, output_column, renamed_schema,
-            embedding_precision, mode, phase_times=phase_times,
-        )
-        phase_times["encode"] += time.perf_counter() - encode_start
+        if len(accumulated_prepared) >= ACCUMULATE_TARGET:
+            flush_accumulated()
 
-        if table is None:
-            continue
+    flush_accumulated()
 
-        t_write = time.perf_counter()
-        writer.write_table(table)
-        phase_times["write"] += time.perf_counter() - t_write
-        written_rows += table.num_rows
-
-    phase_times["_written_rows"] = written_rows
-    phase_times["_processed_rows"] = processed_rows
-    phase_times["_skipped_rows"] = skipped_rows
-
-
-def _encode_token_ids_and_build_table(
-    all_token_ids,
-    prepared_rows,
-    model,
-    encode_batch_size,
-    device,
-    pad_token_id,
-    output_column,
-    input_schema,
-    embedding_precision,
-    mode,
-    phase_times=None,
-):
-    """Sort pre-tokenized IDs by length, pad locally, run GPU forward, build output table."""
-    import numpy as np
-
-    if not all_token_ids:
-        return None
-
-    profile = phase_times is not None
-    sync_cuda = profile and device.type == "cuda"
-    amp_context = (
-        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-        if device.type == "cuda"
-        else nullcontext()
-    )
-
-    sort_start = time.perf_counter() if profile else 0.0
-    sort_order = sorted(range(len(all_token_ids)), key=lambda i: len(all_token_ids[i]))
-    sorted_ids = [all_token_ids[i] for i in sort_order]
-    if profile:
-        phase_times["encode_sort"] = (
-            phase_times.get("encode_sort", 0.0) + time.perf_counter() - sort_start
-        )
-
-    chunk_starts = list(range(0, len(sorted_ids), encode_batch_size))
-    encoded_batches = []
-
-    def pad_chunk(start):
-        t_pad = time.perf_counter() if profile else 0.0
-        chunk = sorted_ids[start : start + encode_batch_size]
-        result = _pad_and_stack(chunk, pad_token_id)
-        if profile:
-            phase_times["encode_pad"] = (
-                phase_times.get("encode_pad", 0.0) + time.perf_counter() - t_pad
-            )
-        return result
-
-    with ThreadPoolExecutor(max_workers=1) as pad_executor:
-        prefetched = pad_executor.submit(pad_chunk, chunk_starts[0])
-
-        with torch.inference_mode(), amp_context:
-            for i, _ in enumerate(chunk_starts):
-                cpu_inputs = prefetched.result()
-                if i + 1 < len(chunk_starts):
-                    prefetched = pad_executor.submit(pad_chunk, chunk_starts[i + 1])
-
-                if profile:
-                    t_h2d = time.perf_counter()
-                device_inputs = {
-                    name: tensor.to(device, non_blocking=True)
-                    for name, tensor in cpu_inputs.items()
-                }
-                if sync_cuda:
-                    torch.cuda.synchronize()
-                if profile:
-                    phase_times["encode_h2d"] = (
-                        phase_times.get("encode_h2d", 0.0)
-                        + time.perf_counter() - t_h2d
-                    )
-                    attn_mask = cpu_inputs["attention_mask"]
-                    total_tokens = attn_mask.numel()
-                    real_tokens = int(attn_mask.sum())
-                    phase_times["_total_tokens"] = phase_times.get("_total_tokens", 0) + total_tokens
-                    phase_times["_real_tokens"] = phase_times.get("_real_tokens", 0) + real_tokens
-                    phase_times["_max_seq_len_sum"] = phase_times.get("_max_seq_len_sum", 0) + attn_mask.shape[1]
-                    phase_times["_num_encode_batches"] = phase_times.get("_num_encode_batches", 0) + 1
-                    phase_times["_num_sequences"] = phase_times.get("_num_sequences", 0) + attn_mask.shape[0]
-                    t_fwd = time.perf_counter()
-
-                embeddings = model.encode(device_inputs)
-
-                if sync_cuda:
-                    torch.cuda.synchronize()
-                if profile:
-                    phase_times["encode_forward"] = (
-                        phase_times.get("encode_forward", 0.0)
-                        + time.perf_counter() - t_fwd
-                    )
-                    t_cpu = time.perf_counter()
-
-                encoded_batches.append(embeddings.detach().cpu().to(dtype=torch.float32))
-
-                if profile:
-                    phase_times["encode_to_cpu"] = (
-                        phase_times.get("encode_to_cpu", 0.0)
-                        + time.perf_counter() - t_cpu
-                    )
-
-    sorted_embeddings = torch.cat(encoded_batches, dim=0)
-    inverse_order = torch.empty(len(sort_order), dtype=torch.long)
-    inverse_order[torch.tensor(sort_order, dtype=torch.long)] = torch.arange(
-        len(sort_order), dtype=torch.long
-    )
-    embeddings = sorted_embeddings.index_select(0, inverse_order)
-
-    output_values = serialize_embeddings(
-        quantize_embeddings(embeddings, embedding_precision),
-        embedding_precision,
-    )
-    embedding_dim = embeddings.size(1)
-
-    return build_output_table(
-        prepared_rows, output_column, output_values,
-        mode, input_schema, embedding_precision, embedding_dim,
-    )
+    return written_rows, processed_rows, skipped_rows
 
 
 def run_inference(args):
@@ -970,79 +821,78 @@ def run_inference(args):
     written_rows = 0
     skipped_rows = 0
 
-    phase_times = {
-        "prepare_rows": 0.0,
-        "encode": 0.0,
-        "write": 0.0,
-    }
-
     read_batch_size = int(args.read_batch_size)
     encode_batch_size = int(args.encode_batch_size)
 
+    use_profile = getattr(args, "profile", False)
+    profiler = None
+    if use_profile:
+        profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=True,
+            with_stack=False,
+        )
+
+    wall_start = time.perf_counter()
+    prof_ctx = profiler if profiler is not None else nullcontext()
+
     try:
-        if pool is not None:
-            # --- Multiprocess path: workers render text + tokenize ---
-            _run_with_workers(
-                pool, parquet_file, column_rename, args.limit_rows,
-                read_batch_size, encode_batch_size, row_number,
-                model, device, pad_token_id, output_column, renamed_schema,
-                embedding_precision, mode, writer, phase_times,
-            )
-        else:
-            # --- Single-process path (original) ---
-            for batch in parquet_file.iter_batches(batch_size=read_batch_size):
-                batch = apply_column_rename(batch, column_rename)
-                rows = batch.to_pylist()
-                if args.limit_rows is not None:
-                    remaining_rows = int(args.limit_rows) - processed_rows
-                    if remaining_rows <= 0:
-                        break
-                    rows = rows[:remaining_rows]
-
-                processed_rows += len(rows)
-                if not rows:
-                    break
-
-                table, row_number, batch_skipped_rows = process_rows(
-                    rows=rows,
-                    renderer=renderer,
-                    mode=mode,
-                    output_column=output_column,
-                    copy_columns=copy_columns,
-                    include_text=bool(args.include_text),
-                    input_schema=renamed_schema,
-                    query_max_length=query_max_length,
-                    offer_max_length=offer_max_length,
-                    tokenizer=tokenizer,
-                    model=model,
-                    encode_batch_size=encode_batch_size,
-                    device=device,
-                    row_number=row_number,
-                    embedding_precision=embedding_precision,
-                    phase_times=phase_times,
+        with prof_ctx:
+            if pool is not None:
+                written_rows, processed_rows, skipped_rows = _run_with_workers(
+                    pool, parquet_file, column_rename, args.limit_rows,
+                    read_batch_size, encode_batch_size, row_number,
+                    model, device, pad_token_id, output_column, renamed_schema,
+                    embedding_precision, mode, writer,
                 )
-                skipped_rows += batch_skipped_rows
+            else:
+                for batch in parquet_file.iter_batches(batch_size=read_batch_size):
+                    batch = apply_column_rename(batch, column_rename)
+                    rows = batch.to_pylist()
+                    if args.limit_rows is not None:
+                        remaining_rows = int(args.limit_rows) - processed_rows
+                        if remaining_rows <= 0:
+                            break
+                        rows = rows[:remaining_rows]
 
-                if table is None:
-                    continue
+                    processed_rows += len(rows)
+                    if not rows:
+                        break
 
-                t_write = time.perf_counter()
-                writer.write_table(table)
-                phase_times["write"] += time.perf_counter() - t_write
-                written_rows += table.num_rows
+                    table, row_number, batch_skipped_rows = process_rows(
+                        rows=rows,
+                        renderer=renderer,
+                        mode=mode,
+                        output_column=output_column,
+                        copy_columns=copy_columns,
+                        include_text=bool(args.include_text),
+                        input_schema=renamed_schema,
+                        query_max_length=query_max_length,
+                        offer_max_length=offer_max_length,
+                        tokenizer=tokenizer,
+                        model=model,
+                        encode_batch_size=encode_batch_size,
+                        device=device,
+                        row_number=row_number,
+                        embedding_precision=embedding_precision,
+                    )
+                    skipped_rows += batch_skipped_rows
+
+                    if table is None:
+                        continue
+
+                    writer.write_table(table)
+                    written_rows += table.num_rows
     finally:
         if pool is not None:
             pool.terminate()
             pool.join()
         writer.close()
 
-    # Compute stats from phase_times (multiprocess path writes directly)
-    if pool is not None:
-        written_rows = phase_times.pop("_written_rows", 0)
-        processed_rows = phase_times.pop("_processed_rows", 0)
-        skipped_rows = phase_times.pop("_skipped_rows", 0)
-
-    wall_time = phase_times["prepare_rows"] + phase_times["encode"] + phase_times["write"]
+    wall_time = time.perf_counter() - wall_start
     rows_per_sec = written_rows / wall_time if wall_time > 0 else 0
 
     print(
@@ -1057,39 +907,16 @@ def run_inference(args):
             "output": str(args.output),
         },
     )
-    print(
-        "Phase times (s):",
-        {name: round(value, 3) for name, value in phase_times.items() if not name.startswith("_")},
-    )
+    print(f"Wall time: {wall_time:.1f}s")
     print(f"Throughput: {rows_per_sec:.1f} rows/sec")
 
-    if getattr(args, "profile", False) and phase_times.get("_total_tokens"):
-        total_tok = phase_times["_total_tokens"]
-        real_tok = phase_times["_real_tokens"]
-        n_batches = phase_times["_num_encode_batches"]
-        n_seqs = phase_times["_num_sequences"]
-        avg_max_seq = phase_times["_max_seq_len_sum"] / n_batches if n_batches else 0
-        fwd_time = phase_times.get("encode_forward", 0)
-        tok_time = phase_times.get("encode_tokenize", 0)
-        print("\n--- Detailed Profile ---")
-        print(f"  Encode batches:        {n_batches}")
-        print(f"  Total sequences:       {n_seqs}")
-        print(f"  Avg batch max_seq_len: {avg_max_seq:.1f}")
-        print(f"  Real tokens:           {real_tok:,}")
-        print(f"  Total tokens (padded): {total_tok:,}")
-        print(f"  Padding efficiency:    {real_tok/total_tok*100:.1f}%")
-        print(f"  Tokens/sec (real):     {real_tok/fwd_time:,.0f}" if fwd_time > 0 else "")
-        print(f"  Tokens/sec (padded):   {total_tok/fwd_time:,.0f}" if fwd_time > 0 else "")
-        print(f"  Seqs/sec (forward):    {n_seqs/fwd_time:,.0f}" if fwd_time > 0 else "")
-        print(f"  Seqs/sec (tokenizer):  {n_seqs/tok_time:,.0f}" if tok_time > 0 else "")
-        print(f"  Time breakdown:")
-        print(f"    prepare_rows:  {phase_times['prepare_rows']:7.3f}s ({phase_times['prepare_rows']/wall_time*100:5.1f}%)")
-        print(f"    tokenize:      {tok_time:7.3f}s ({tok_time/wall_time*100:5.1f}%)")
-        print(f"    h2d transfer:  {phase_times.get('encode_h2d',0):7.3f}s ({phase_times.get('encode_h2d',0)/wall_time*100:5.1f}%)")
-        print(f"    forward:       {fwd_time:7.3f}s ({fwd_time/wall_time*100:5.1f}%)")
-        print(f"    d2h transfer:  {phase_times.get('encode_to_cpu',0):7.3f}s ({phase_times.get('encode_to_cpu',0)/wall_time*100:5.1f}%)")
-        print(f"    sort:          {phase_times.get('encode_sort',0):7.3f}s ({phase_times.get('encode_sort',0)/wall_time*100:5.1f}%)")
-        print(f"    write:         {phase_times['write']:7.3f}s ({phase_times['write']/wall_time*100:5.1f}%)")
+    if profiler is not None:
+        print("\n--- torch.profiler CUDA kernel summary ---")
+        print(
+            profiler.key_averages().table(
+                sort_by="cuda_time_total", row_limit=25,
+            )
+        )
 
 
 def main(argv=None):
