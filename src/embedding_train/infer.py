@@ -635,6 +635,8 @@ def _encode_from_numpy(
 
     chunk_starts = list(range(0, n, encode_batch_size))
 
+    use_pinned = device.type == "cuda"
+
     def pad_chunk_numpy(start):
         end = min(start + encode_batch_size, n)
         batch_size = end - start
@@ -647,10 +649,12 @@ def _encode_from_numpy(
             s = int(offsets[idx])
             input_ids_np[i, :l] = flat_ids[s:s + l]
             attn_mask_np[i, :l] = 1
-        return {
-            "input_ids": torch.from_numpy(input_ids_np),
-            "attention_mask": torch.from_numpy(attn_mask_np),
-        }
+        ids_t = torch.from_numpy(input_ids_np)
+        mask_t = torch.from_numpy(attn_mask_np)
+        if use_pinned:
+            ids_t = ids_t.pin_memory()
+            mask_t = mask_t.pin_memory()
+        return {"input_ids": ids_t, "attention_mask": mask_t}
 
     with ThreadPoolExecutor(max_workers=1) as pad_executor:
         prefetched = pad_executor.submit(pad_chunk_numpy, chunk_starts[0])
@@ -666,12 +670,14 @@ def _encode_from_numpy(
                     for name, tensor in cpu_inputs.items()
                 }
                 embeddings = model.encode(device_inputs)
-                encoded_batches.append(embeddings.detach().cpu().to(dtype=torch.float32))
+                # Keep on GPU — cat + unsort on GPU, single D2H at end
+                encoded_batches.append(embeddings.detach())
 
     all_embeddings = torch.cat(encoded_batches, dim=0)
-    inverse = torch.empty(n, dtype=torch.long)
-    inverse[torch.from_numpy(sort_order.astype(np.int64))] = torch.arange(n, dtype=torch.long)
-    embeddings = all_embeddings.index_select(0, inverse)
+    inverse = torch.from_numpy(sort_order.astype(np.int64)).to(device)
+    inverse_perm = torch.empty(n, dtype=torch.long, device=device)
+    inverse_perm[inverse] = torch.arange(n, dtype=torch.long, device=device)
+    embeddings = all_embeddings.index_select(0, inverse_perm).cpu().to(dtype=torch.float32)
 
     output_values = serialize_embeddings(
         quantize_embeddings(embeddings, embedding_precision), embedding_precision,
