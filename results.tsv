@@ -1,0 +1,29 @@
+commit	val_ndcg_at_5	memory_gb	status	description
+a87e2c0	0.682308	50.0	keep	baseline (e5-base, contrastive, bs=256, lr=1e-5, warmup_ratio=0.33, SHN pool placid-snake-749)
+b33aacc	0.617028	50.0	discard	lr=2e-5 — peaked early at 0.6595 then regressed, overshoots short budget
+f02164f	0.698000	50.0	keep	bf16-mixed precision (+0.016, ~43% more steps in budget)
+11e50a6	0.705400	55.0	keep	batch_size=512 (+0.007, more in-batch negatives)
+5fa7118	0.000000	0.0	crash	batch_size=1024 OOM at 79GB
+940dc97	0.000000	0.0	crash	batch_size=768 also OOMs at 79GB
+4311400	0.701000	55.0	discard	similarity_scale=30 (-0.004, too sharp)
+5a3638d	0.698400	50.0	discard	max_offer_length=192 (-0.007, truncation cost > step gain)
+d29bdc0	0.667000	30.0	discard	gradient_checkpointing=true bs=1024 — only 950 steps, GC too slow
+daf1fd8	0.705500	55.0	discard	weight_decay=0.1 — within noise (+0.0001)
+03d3698	0.670000	55.0	discard	n_pos=1 n_neg=3 — hurts, 1 positive per query weakens contrastive signal
+213463a	0.708900	55.0	keep	n_neg_samples_per_query=4 (+0.004, more SHN per anchor group)
+8d84cab	0.697400	55.0	discard	n_neg_samples_per_query=6 — too few queries per batch
+3c8b623	0.702600	55.0	discard	lr=5e-6 — undershoots
+ea394e8	0.683300	55.0	discard	lr=1.5e-5 — overshoots at bs=512
+63e4f12	0.689600	55.0	discard	fresh SHN pool mined from big-stoat-600 — my miner weaker than placid-snake-749 miner
+5b91968	-	-	keep	infra: save_top_k=1 to limit disk usage (no metric impact)
+ef01163	0.680700	55.0	discard	warmup_steps=0 — warmup actually matters, no-warmup destabilizes
+c6131a0	0.763700	55.0	keep	random_query_pool batching (+0.055, diverse in-batch negatives)
+c2aaf35	0.762900	55.0	discard	lr=2e-5 + RQP — within noise vs lr=1e-5
+87fe454	0.768200	55.0	keep	fresh SHN pool mined from defiant-mink-296 (+0.005)
+d7e4318	0.753200	55.0	discard	output_dim=256 projection head (-0.015, projection hurts)
+7a4d498	0.765100	55.0	discard	hard+semi-hard combo (-0.003, rank 0-20 has false positives)
+0fbe7dd	0.761900	55.0	discard	iterative mine from valuable-cod-204 — plateaued
+9aa8988	0.764900	65.0	discard	batch_size=640 — within noise, fewer steps cost outweighs larger batch gain
+d438346	0.766400	55.0	discard	compile=false — within noise, compile marginally helps
+4ca1512	0.767400	55.0	discard	num_workers=16 — within noise, data loading not a bottleneck
+2fa1395	0.750600	55.0	discard	n_pos_samples_per_query=3 — too few queries per batch
