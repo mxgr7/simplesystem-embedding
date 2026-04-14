@@ -138,6 +138,11 @@ def build_arg_parser():
         action="store_true",
         help="Overwrite the output file if it already exists.",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Emit detailed profiling stats (padding efficiency, token throughput, etc.)",
+    )
     return parser
 
 
@@ -300,6 +305,25 @@ def encode_texts(
                         phase_times.get("encode_h2d", 0.0)
                         + time.perf_counter()
                         - t_h2d
+                    )
+                    # Track padding efficiency
+                    attn_mask = cpu_inputs["attention_mask"]
+                    total_tokens = attn_mask.numel()
+                    real_tokens = int(attn_mask.sum())
+                    phase_times["_total_tokens"] = (
+                        phase_times.get("_total_tokens", 0) + total_tokens
+                    )
+                    phase_times["_real_tokens"] = (
+                        phase_times.get("_real_tokens", 0) + real_tokens
+                    )
+                    phase_times["_max_seq_len_sum"] = (
+                        phase_times.get("_max_seq_len_sum", 0) + attn_mask.shape[1]
+                    )
+                    phase_times["_num_encode_batches"] = (
+                        phase_times.get("_num_encode_batches", 0) + 1
+                    )
+                    phase_times["_num_sequences"] = (
+                        phase_times.get("_num_sequences", 0) + attn_mask.shape[0]
                     )
                     t_fwd = time.perf_counter()
 
@@ -704,6 +728,9 @@ def run_inference(args):
     finally:
         writer.close()
 
+    wall_time = phase_times["prepare_rows"] + phase_times["encode"] + phase_times["write"]
+    rows_per_sec = written_rows / wall_time if wall_time > 0 else 0
+
     print(
         "Inference complete:",
         {
@@ -718,8 +745,37 @@ def run_inference(args):
     )
     print(
         "Phase times (s):",
-        {name: round(value, 3) for name, value in phase_times.items()},
+        {name: round(value, 3) for name, value in phase_times.items() if not name.startswith("_")},
     )
+    print(f"Throughput: {rows_per_sec:.1f} rows/sec")
+
+    if getattr(args, "profile", False) and phase_times.get("_total_tokens"):
+        total_tok = phase_times["_total_tokens"]
+        real_tok = phase_times["_real_tokens"]
+        n_batches = phase_times["_num_encode_batches"]
+        n_seqs = phase_times["_num_sequences"]
+        avg_max_seq = phase_times["_max_seq_len_sum"] / n_batches if n_batches else 0
+        fwd_time = phase_times.get("encode_forward", 0)
+        tok_time = phase_times.get("encode_tokenize", 0)
+        print("\n--- Detailed Profile ---")
+        print(f"  Encode batches:        {n_batches}")
+        print(f"  Total sequences:       {n_seqs}")
+        print(f"  Avg batch max_seq_len: {avg_max_seq:.1f}")
+        print(f"  Real tokens:           {real_tok:,}")
+        print(f"  Total tokens (padded): {total_tok:,}")
+        print(f"  Padding efficiency:    {real_tok/total_tok*100:.1f}%")
+        print(f"  Tokens/sec (real):     {real_tok/fwd_time:,.0f}" if fwd_time > 0 else "")
+        print(f"  Tokens/sec (padded):   {total_tok/fwd_time:,.0f}" if fwd_time > 0 else "")
+        print(f"  Seqs/sec (forward):    {n_seqs/fwd_time:,.0f}" if fwd_time > 0 else "")
+        print(f"  Seqs/sec (tokenizer):  {n_seqs/tok_time:,.0f}" if tok_time > 0 else "")
+        print(f"  Time breakdown:")
+        print(f"    prepare_rows:  {phase_times['prepare_rows']:7.3f}s ({phase_times['prepare_rows']/wall_time*100:5.1f}%)")
+        print(f"    tokenize:      {tok_time:7.3f}s ({tok_time/wall_time*100:5.1f}%)")
+        print(f"    h2d transfer:  {phase_times.get('encode_h2d',0):7.3f}s ({phase_times.get('encode_h2d',0)/wall_time*100:5.1f}%)")
+        print(f"    forward:       {fwd_time:7.3f}s ({fwd_time/wall_time*100:5.1f}%)")
+        print(f"    d2h transfer:  {phase_times.get('encode_to_cpu',0):7.3f}s ({phase_times.get('encode_to_cpu',0)/wall_time*100:5.1f}%)")
+        print(f"    sort:          {phase_times.get('encode_sort',0):7.3f}s ({phase_times.get('encode_sort',0)/wall_time*100:5.1f}%)")
+        print(f"    write:         {phase_times['write']:7.3f}s ({phase_times['write']/wall_time*100:5.1f}%)")
 
 
 def main(argv=None):
