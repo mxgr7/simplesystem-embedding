@@ -1,47 +1,47 @@
-commit	val_ndcg_at_5	memory_gb	status	description
-a87e2c0	0.682308	50.0	keep	baseline (e5-base, contrastive, bs=256, lr=1e-5, warmup_ratio=0.33, SHN pool placid-snake-749)
-b33aacc	0.617028	50.0	discard	lr=2e-5 — peaked early at 0.6595 then regressed, overshoots short budget
-f02164f	0.698000	50.0	keep	bf16-mixed precision (+0.016, ~43% more steps in budget)
-11e50a6	0.705400	55.0	keep	batch_size=512 (+0.007, more in-batch negatives)
-5fa7118	0.000000	0.0	crash	batch_size=1024 OOM at 79GB
-940dc97	0.000000	0.0	crash	batch_size=768 also OOMs at 79GB
-4311400	0.701000	55.0	discard	similarity_scale=30 (-0.004, too sharp)
-5a3638d	0.698400	50.0	discard	max_offer_length=192 (-0.007, truncation cost > step gain)
-d29bdc0	0.667000	30.0	discard	gradient_checkpointing=true bs=1024 — only 950 steps, GC too slow
-daf1fd8	0.705500	55.0	discard	weight_decay=0.1 — within noise (+0.0001)
-03d3698	0.670000	55.0	discard	n_pos=1 n_neg=3 — hurts, 1 positive per query weakens contrastive signal
-213463a	0.708900	55.0	keep	n_neg_samples_per_query=4 (+0.004, more SHN per anchor group)
-8d84cab	0.697400	55.0	discard	n_neg_samples_per_query=6 — too few queries per batch
-3c8b623	0.702600	55.0	discard	lr=5e-6 — undershoots
-ea394e8	0.683300	55.0	discard	lr=1.5e-5 — overshoots at bs=512
-63e4f12	0.689600	55.0	discard	fresh SHN pool mined from big-stoat-600 — my miner weaker than placid-snake-749 miner
-5b91968	-	-	keep	infra: save_top_k=1 to limit disk usage (no metric impact)
-ef01163	0.680700	55.0	discard	warmup_steps=0 — warmup actually matters, no-warmup destabilizes
-c6131a0	0.763700	55.0	keep	random_query_pool batching (+0.055, diverse in-batch negatives)
-c2aaf35	0.762900	55.0	discard	lr=2e-5 + RQP — within noise vs lr=1e-5
-87fe454	0.768200	55.0	keep	fresh SHN pool mined from defiant-mink-296 (+0.005)
-d7e4318	0.753200	55.0	discard	output_dim=256 projection head (-0.015, projection hurts)
-7a4d498	0.765100	55.0	discard	hard+semi-hard combo (-0.003, rank 0-20 has false positives)
-0fbe7dd	0.761900	55.0	discard	iterative mine from valuable-cod-204 — plateaued
-9aa8988	0.764900	65.0	discard	batch_size=640 — within noise, fewer steps cost outweighs larger batch gain
-d438346	0.766400	55.0	discard	compile=false — within noise, compile marginally helps
-4ca1512	0.767400	55.0	discard	num_workers=16 — within noise, data loading not a bottleneck
-2fa1395	0.750600	55.0	discard	n_pos_samples_per_query=3 — too few queries per batch
-af12696	0.718506	55.0	keep	caring-rat-72 — apr14 baseline (e5-base, contrastive, bs=512, lr=1e-5, RQP, SHN pool defiant-mink-296, output_dim=128 projection — pin)
-6e33026	0.715857	55.0	discard	stately-cow-887 — orthogonal init for projection — within noise (-0.003)
-d2e10f4	0.706000	55.0	discard	sincere-snake-677 — 2-layer MLP projection (Linear→GELU→Linear) — worse (-0.012), bottleneck wants to be linear
-f45780f	0.727200	55.0	keep	calm-fowl-219 — 10x LR for projection params (+0.009, fresh head catches up to pretrained encoder)
-b916dcc	0.732900	55.0	keep	learned-hawk-386 — 30x LR for projection params (+0.006, more is more so far)
-6fb16c8	0.728400	55.0	discard	awesome-wasp-979 — 100x LR for projection params — overshoots, 30x near optimum
-d765ce1	0.732800	55.0	discard	marvelous-mare-825 — 50x LR for projection params — within noise of 30x (plateau 30-50x)
-dbe2352	0.714100	55.0	discard	skillful-whale-673 — similarity_scale=15 (softer) — -0.019, wrong direction; 20 is optimal
-f3920f8	0.732200	55.0	discard	secretive-squid-440 — encoder lr 2e-5 with projection 30x — within noise (-0.001)
-ad2187c	0.677300	55.0	discard	fun-elk-148 — drop ean/article_number/manufacturer_article_number from offer_template — MAJOR regression (-0.056), ID fields are load-bearing (many queries are literal article nums)
-4542a0a	0.727000	55.0	discard	handsome-hawk-995 — natural-sentence offer_template (ID fields preserved) — -0.006 nDCG@5, -0.005 MRR (0.8001 vs 0.8049 champion); current "Field: value" format exposes ID tokens cleanly
-2358777	0.730400	55.0	discard	masked-stoat-726 — training-time random offer field dropout (0.2 per cat/type/brand/desc) — noise, -0.003 nDCG / -0.002 MRR (0.8031 vs 0.8049); regularizers don't help at throughput-bound budget
-02e60f1	0.729500	55.0	discard	casual-snipe-581 — warmup_ratio=0.1 — -0.003 nDCG, peaked at step 1830 (0.7322) then regressed; shorter warmup destabilizes later training
-f88f189	0.717800	70.0	discard	skittish-shark-638 — e5-large (568M) @ bs=256 — -0.015 nDCG, -0.009 MRR; only 1379 steps reached, capacity gain lost to throughput loss at 20-min budget
-c36cfc0	0.730600	55.0	discard	languid-skunk-364 — pre-projection LayerNorm (head group) — noise, -0.002 nDCG / -0.002 MRR (0.8034 vs 0.8049)
-6247f3b	0.738200	55.0	keep	angry-calf-984 — auxiliary 768-d contrastive loss on pre-projection pooled (alpha=0.5) — +0.005 nDCG, +0.001 MRR (0.8062); dual-objective preserves full-dim geometry while training 128-d bottleneck
-28b910e	0.731700	55.0	discard	incongruous-hog-822 — aux_raw_loss_weight=1.0 — -0.007 nDCG vs alpha=0.5, too aggressive; 768-d loss dominates and undertrains 128-d projection
-6687893	0.734300	55.0	discard	rebellious-wasp-133 — aux_raw_loss_weight=0.3 — -0.004 nDCG vs alpha=0.5, 0.5 is the peak
+commit	val_ndcg_at_5	memory_gb	status	run_name	description
+a87e2c0	0.682308	50.0	keep		baseline (e5-base, contrastive, bs=256, lr=1e-5, warmup_ratio=0.33, SHN pool placid-snake-749)
+b33aacc	0.617028	50.0	discard		lr=2e-5 — peaked early at 0.6595 then regressed, overshoots short budget
+f02164f	0.698000	50.0	keep		bf16-mixed precision (+0.016, ~43% more steps in budget)
+11e50a6	0.705400	55.0	keep		batch_size=512 (+0.007, more in-batch negatives)
+5fa7118	0.000000	0.0	crash		batch_size=1024 OOM at 79GB
+940dc97	0.000000	0.0	crash		batch_size=768 also OOMs at 79GB
+4311400	0.701000	55.0	discard		similarity_scale=30 (-0.004, too sharp)
+5a3638d	0.698400	50.0	discard		max_offer_length=192 (-0.007, truncation cost > step gain)
+d29bdc0	0.667000	30.0	discard		gradient_checkpointing=true bs=1024 — only 950 steps, GC too slow
+daf1fd8	0.705500	55.0	discard		weight_decay=0.1 — within noise (+0.0001)
+03d3698	0.670000	55.0	discard		n_pos=1 n_neg=3 — hurts, 1 positive per query weakens contrastive signal
+213463a	0.708900	55.0	keep		n_neg_samples_per_query=4 (+0.004, more SHN per anchor group)
+8d84cab	0.697400	55.0	discard		n_neg_samples_per_query=6 — too few queries per batch
+3c8b623	0.702600	55.0	discard		lr=5e-6 — undershoots
+ea394e8	0.683300	55.0	discard		lr=1.5e-5 — overshoots at bs=512
+63e4f12	0.689600	55.0	discard		fresh SHN pool mined from big-stoat-600 — my miner weaker than placid-snake-749 miner
+5b91968	-	-	keep		infra: save_top_k=1 to limit disk usage (no metric impact)
+ef01163	0.680700	55.0	discard		warmup_steps=0 — warmup actually matters, no-warmup destabilizes
+c6131a0	0.763700	55.0	keep		random_query_pool batching (+0.055, diverse in-batch negatives)
+c2aaf35	0.762900	55.0	discard		lr=2e-5 + RQP — within noise vs lr=1e-5
+87fe454	0.768200	55.0	keep	valuable-cod-204	fresh SHN pool mined from defiant-mink-296 (+0.005)
+d7e4318	0.753200	55.0	discard		output_dim=256 projection head (-0.015, projection hurts)
+7a4d498	0.765100	55.0	discard		hard+semi-hard combo (-0.003, rank 0-20 has false positives)
+0fbe7dd	0.761900	55.0	discard		iterative mine from valuable-cod-204 — plateaued
+9aa8988	0.764900	65.0	discard		batch_size=640 — within noise, fewer steps cost outweighs larger batch gain
+d438346	0.766400	55.0	discard		compile=false — within noise, compile marginally helps
+4ca1512	0.767400	55.0	discard		num_workers=16 — within noise, data loading not a bottleneck
+2fa1395	0.750600	55.0	discard		n_pos_samples_per_query=3 — too few queries per batch
+af12696	0.718506	55.0	keep	caring-rat-72	apr14 baseline (e5-base, contrastive, bs=512, lr=1e-5, RQP, SHN pool defiant-mink-296, output_dim=128 projection — pin)
+6e33026	0.715857	55.0	discard	stately-cow-887	orthogonal init for projection — within noise (-0.003)
+d2e10f4	0.706000	55.0	discard	sincere-snake-677	2-layer MLP projection (Linear→GELU→Linear) — worse (-0.012), bottleneck wants to be linear
+f45780f	0.727200	55.0	keep	calm-fowl-219	10x LR for projection params (+0.009, fresh head catches up to pretrained encoder)
+b916dcc	0.732900	55.0	keep	learned-hawk-386	30x LR for projection params (+0.006, more is more so far)
+6fb16c8	0.728400	55.0	discard	awesome-wasp-979	100x LR for projection params — overshoots, 30x near optimum
+d765ce1	0.732800	55.0	discard	marvelous-mare-825	50x LR for projection params — within noise of 30x (plateau 30-50x)
+dbe2352	0.714100	55.0	discard	skillful-whale-673	similarity_scale=15 (softer) — -0.019, wrong direction; 20 is optimal
+f3920f8	0.732200	55.0	discard	secretive-squid-440	encoder lr 2e-5 with projection 30x — within noise (-0.001)
+ad2187c	0.677300	55.0	discard	fun-elk-148	drop ean/article_number/manufacturer_article_number from offer_template — MAJOR regression (-0.056), ID fields are load-bearing (many queries are literal article nums)
+4542a0a	0.727000	55.0	discard	handsome-hawk-995	natural-sentence offer_template (ID fields preserved) — -0.006 nDCG@5, -0.005 MRR (0.8001 vs 0.8049 champion); current "Field: value" format exposes ID tokens cleanly
+2358777	0.730400	55.0	discard	masked-stoat-726	training-time random offer field dropout (0.2 per cat/type/brand/desc) — noise, -0.003 nDCG / -0.002 MRR (0.8031 vs 0.8049); regularizers don't help at throughput-bound budget
+02e60f1	0.729500	55.0	discard	casual-snipe-581	warmup_ratio=0.1 — -0.003 nDCG, peaked at step 1830 (0.7322) then regressed; shorter warmup destabilizes later training
+f88f189	0.717800	70.0	discard	skittish-shark-638	e5-large (568M) @ bs=256 — -0.015 nDCG, -0.009 MRR; only 1379 steps reached, capacity gain lost to throughput loss at 20-min budget
+c36cfc0	0.730600	55.0	discard	languid-skunk-364	pre-projection LayerNorm (head group) — noise, -0.002 nDCG / -0.002 MRR (0.8034 vs 0.8049)
+6247f3b	0.738200	55.0	keep	angry-calf-984	auxiliary 768-d contrastive loss on pre-projection pooled (alpha=0.5) — +0.005 nDCG, +0.001 MRR (0.8062); dual-objective preserves full-dim geometry while training 128-d bottleneck
+28b910e	0.731700	55.0	discard	incongruous-hog-822	aux_raw_loss_weight=1.0 — -0.007 nDCG vs alpha=0.5, too aggressive; 768-d loss dominates and undertrains 128-d projection
+6687893	0.734300	55.0	discard	rebellious-wasp-133	aux_raw_loss_weight=0.3 — -0.004 nDCG vs alpha=0.5, 0.5 is the peak

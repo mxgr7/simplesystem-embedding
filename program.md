@@ -121,26 +121,27 @@ If the grep output is empty or the run obviously crashed, run `tail -n 80 run.lo
 
 When an experiment is done, log it to `results.tsv` (tab-separated — commas break in descriptions).
 
-The TSV has a header row and 5 columns:
+The TSV has a header row and 6 columns:
 
 ```
-commit	val_ndcg_at_5	memory_gb	status	description
+commit	val_ndcg_at_5	memory_gb	status	run_name	description
 ```
 
 1. git commit hash (short, 7 chars)
 2. `val_ndcg_at_5` achieved (e.g. `0.612340`) — use `0.000000` for crashes
 3. peak VRAM in GB, `.1f` (e.g. `12.3`) — use `0.0` for crashes
 4. status: `keep`, `discard`, or `crash`
-5. short description of what this experiment tried
+5. MLflow run name (e.g. `learned-hawk-386`) — leave empty for crashes or infra-only rows that never created an MLflow run
+6. short description of what this experiment tried
 
 Example:
 
 ```
-commit	val_ndcg_at_5	memory_gb	status	description
-a1b2c3d	0.612340	14.2	keep	baseline
-b2c3d4e	0.618900	14.4	keep	raise LR to 3e-5 and warmup 200 steps
-c3d4e5f	0.609100	14.2	discard	switch loss_type to triplet margin=0.3
-d4e5f6g	0.000000	0.0	crash	output_dim=1024 with gradient_checkpointing=false (OOM)
+commit	val_ndcg_at_5	memory_gb	status	run_name	description
+a1b2c3d	0.612340	14.2	keep	wise-sloth-656	baseline
+b2c3d4e	0.618900	14.4	keep	calm-fowl-219	raise LR to 3e-5 and warmup 200 steps
+c3d4e5f	0.609100	14.2	discard	sincere-snake-677	switch loss_type to triplet margin=0.3
+d4e5f6g	0.000000	0.0	crash		output_dim=1024 with gradient_checkpointing=false (OOM)
 ```
 
 ## The experiment loop
