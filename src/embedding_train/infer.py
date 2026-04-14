@@ -86,8 +86,34 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--embedding-precision",
-        default="float32",
+        default="float16",
         help="Embedding export precision: float32, float16, int8, sign, or binary.",
+    )
+    parser.add_argument(
+        "--max-offer-length",
+        type=int,
+        default=0,
+        help=(
+            "Override cfg.data.max_offer_length for offer tokenization "
+            "(0 keeps config value). Lowering below the p99 of actual token "
+            "lengths trades a small fraction of truncated rows for proportional "
+            "forward-pass savings."
+        ),
+    )
+    parser.add_argument(
+        "--max-query-length",
+        type=int,
+        default=0,
+        help="Override cfg.data.max_query_length for query tokenization.",
+    )
+    parser.add_argument(
+        "--row-number-offset",
+        type=int,
+        default=0,
+        help=(
+            "Offset added to every emitted row_number. Used for sharded runs "
+            "so each worker's row_numbers are disjoint from the others."
+        ),
     )
     parser.add_argument(
         "--limit-rows",
@@ -414,12 +440,14 @@ def process_rows(
     device,
     row_number,
     embedding_precision,
+    phase_times=None,
 ):
     prepared_rows = []
     query_texts = []
     offer_texts = []
     skipped_rows = 0
 
+    prep_start = time.perf_counter() if phase_times is not None else 0.0
     for row in rows:
         context = renderer.build_context(row)
         prepared_row = {"row_number": row_number}
@@ -468,9 +496,15 @@ def process_rows(
         query_texts.append(query_text)
         offer_texts.append(offer_text)
 
+    if phase_times is not None:
+        phase_times["prepare_rows"] = (
+            phase_times.get("prepare_rows", 0.0) + time.perf_counter() - prep_start
+        )
+
     if not prepared_rows:
         return None, row_number, skipped_rows
 
+    encode_start = time.perf_counter() if phase_times is not None else 0.0
     if mode == "query":
         embeddings = encode_texts(
             model,
@@ -479,6 +513,7 @@ def process_rows(
             query_max_length,
             encode_batch_size,
             device,
+            phase_times=phase_times,
         )
         output_values = serialize_embeddings(
             quantize_embeddings(embeddings, embedding_precision),
@@ -493,6 +528,7 @@ def process_rows(
             offer_max_length,
             encode_batch_size,
             device,
+            phase_times=phase_times,
         )
         output_values = serialize_embeddings(
             quantize_embeddings(embeddings, embedding_precision),
@@ -507,6 +543,7 @@ def process_rows(
             query_max_length,
             encode_batch_size,
             device,
+            phase_times=phase_times,
         )
         offer_embeddings = encode_texts(
             model,
@@ -515,6 +552,7 @@ def process_rows(
             offer_max_length,
             encode_batch_size,
             device,
+            phase_times=phase_times,
         )
         output_values = score_embedding_pairs(
             query_embeddings,
@@ -522,6 +560,10 @@ def process_rows(
             embedding_precision,
         ).tolist()
         embedding_dim = query_embeddings.size(1)
+    if phase_times is not None:
+        phase_times["encode"] = (
+            phase_times.get("encode", 0.0) + time.perf_counter() - encode_start
+        )
 
     table = build_output_table(
         prepared_rows,
@@ -536,6 +578,8 @@ def process_rows(
 
 
 def run_inference(args):
+    from embedding_train.index_build import ParquetSource
+
     mode = resolve_inference_mode(args.mode)
     output_column = resolve_output_column(mode, args.output_column)
     device = resolve_device(args.device)
@@ -550,14 +594,23 @@ def run_inference(args):
     tokenizer = build_tokenizer(cfg.model.model_name)
     renderer = RowTextRenderer(cfg.data)
 
-    parquet_file = pq.ParquetFile(args.input)
+    parquet_file = ParquetSource(args.input)
     copy_columns = parse_copy_columns(args.copy_columns, parquet_file.schema.names)
     writer = IncrementalParquetWriter(args.output, args.compression, args.overwrite)
+
+    offer_max_length = int(args.max_offer_length) or int(cfg.data.max_offer_length)
+    query_max_length = int(args.max_query_length) or int(cfg.data.max_query_length)
+    row_number = int(getattr(args, "row_number_offset", 0) or 0)
 
     processed_rows = 0
     written_rows = 0
     skipped_rows = 0
-    row_number = 0
+
+    phase_times = {
+        "prepare_rows": 0.0,
+        "encode": 0.0,
+        "write": 0.0,
+    }
 
     try:
         for batch in parquet_file.iter_batches(batch_size=int(args.read_batch_size)):
@@ -580,21 +633,24 @@ def run_inference(args):
                 copy_columns=copy_columns,
                 include_text=bool(args.include_text),
                 input_schema=parquet_file.schema_arrow,
-                query_max_length=int(cfg.data.max_query_length),
-                offer_max_length=int(cfg.data.max_offer_length),
+                query_max_length=query_max_length,
+                offer_max_length=offer_max_length,
                 tokenizer=tokenizer,
                 model=model,
                 encode_batch_size=int(args.encode_batch_size),
                 device=device,
                 row_number=row_number,
                 embedding_precision=embedding_precision,
+                phase_times=phase_times,
             )
             skipped_rows += batch_skipped_rows
 
             if table is None:
                 continue
 
+            t_write = time.perf_counter()
             writer.write_table(table)
+            phase_times["write"] += time.perf_counter() - t_write
             written_rows += table.num_rows
     finally:
         writer.close()
@@ -610,6 +666,10 @@ def run_inference(args):
             "embedding_precision": embedding_precision,
             "output": str(args.output),
         },
+    )
+    print(
+        "Phase times (s):",
+        {name: round(value, 3) for name, value in phase_times.items()},
     )
 
 
