@@ -27,21 +27,21 @@ d7e4318	0.753200	55.0	discard	output_dim=256 projection head (-0.015, projection
 d438346	0.766400	55.0	discard	compile=false — within noise, compile marginally helps
 4ca1512	0.767400	55.0	discard	num_workers=16 — within noise, data loading not a bottleneck
 2fa1395	0.750600	55.0	discard	n_pos_samples_per_query=3 — too few queries per batch
-af12696	0.718506	55.0	keep	apr14 baseline (e5-base, contrastive, bs=512, lr=1e-5, RQP, SHN pool defiant-mink-296, output_dim=128 projection — pin)
-6e33026	0.715857	55.0	discard	orthogonal init for projection — within noise (-0.003)
-d2e10f4	0.706000	55.0	discard	2-layer MLP projection (Linear→GELU→Linear) — worse (-0.012), bottleneck wants to be linear
-f45780f	0.727200	55.0	keep	10x LR for projection params (+0.009, fresh head catches up to pretrained encoder)
-b916dcc	0.732900	55.0	keep	30x LR for projection params (+0.006, more is more so far)
-6fb16c8	0.728400	55.0	discard	100x LR for projection params — overshoots, 30x near optimum
-d765ce1	0.732800	55.0	discard	50x LR for projection params — within noise of 30x (plateau 30-50x)
-dbe2352	0.714100	55.0	discard	similarity_scale=15 (softer) — -0.019, wrong direction; 20 is optimal
-f3920f8	0.732200	55.0	discard	encoder lr 2e-5 with projection 30x — within noise (-0.001)
-ad2187c	0.677300	55.0	discard	drop ean/article_number/manufacturer_article_number from offer_template — MAJOR regression (-0.056), ID fields are load-bearing (many queries are literal article nums)
-4542a0a	0.727000	55.0	discard	natural-sentence offer_template (ID fields preserved) — -0.006 nDCG@5, -0.005 MRR (0.8001 vs 0.8049 champion); current "Field: value" format exposes ID tokens cleanly
-2358777	0.730400	55.0	discard	training-time random offer field dropout (0.2 per cat/type/brand/desc) — noise, -0.003 nDCG / -0.002 MRR (0.8031 vs 0.8049); regularizers don't help at throughput-bound budget
-02e60f1	0.729500	55.0	discard	warmup_ratio=0.1 — -0.003 nDCG, peaked at step 1830 (0.7322) then regressed; shorter warmup destabilizes later training
-f88f189	0.717800	70.0	discard	e5-large (568M) @ bs=256 — -0.015 nDCG, -0.009 MRR; only 1379 steps reached, capacity gain lost to throughput loss at 20-min budget
-c36cfc0	0.730600	55.0	discard	pre-projection LayerNorm (head group) — noise, -0.002 nDCG / -0.002 MRR (0.8034 vs 0.8049)
-6247f3b	0.738200	55.0	keep	auxiliary 768-d contrastive loss on pre-projection pooled (alpha=0.5) — +0.005 nDCG, +0.001 MRR (0.8062); dual-objective preserves full-dim geometry while training 128-d bottleneck
-28b910e	0.731700	55.0	discard	aux_raw_loss_weight=1.0 — -0.007 nDCG vs alpha=0.5, too aggressive; 768-d loss dominates and undertrains 128-d projection
-6687893	0.734300	55.0	discard	aux_raw_loss_weight=0.3 — -0.004 nDCG vs alpha=0.5, 0.5 is the peak
+af12696	0.718506	55.0	keep	caring-rat-72 — apr14 baseline (e5-base, contrastive, bs=512, lr=1e-5, RQP, SHN pool defiant-mink-296, output_dim=128 projection — pin)
+6e33026	0.715857	55.0	discard	stately-cow-887 — orthogonal init for projection — within noise (-0.003)
+d2e10f4	0.706000	55.0	discard	sincere-snake-677 — 2-layer MLP projection (Linear→GELU→Linear) — worse (-0.012), bottleneck wants to be linear
+f45780f	0.727200	55.0	keep	calm-fowl-219 — 10x LR for projection params (+0.009, fresh head catches up to pretrained encoder)
+b916dcc	0.732900	55.0	keep	learned-hawk-386 — 30x LR for projection params (+0.006, more is more so far)
+6fb16c8	0.728400	55.0	discard	awesome-wasp-979 — 100x LR for projection params — overshoots, 30x near optimum
+d765ce1	0.732800	55.0	discard	marvelous-mare-825 — 50x LR for projection params — within noise of 30x (plateau 30-50x)
+dbe2352	0.714100	55.0	discard	skillful-whale-673 — similarity_scale=15 (softer) — -0.019, wrong direction; 20 is optimal
+f3920f8	0.732200	55.0	discard	secretive-squid-440 — encoder lr 2e-5 with projection 30x — within noise (-0.001)
+ad2187c	0.677300	55.0	discard	fun-elk-148 — drop ean/article_number/manufacturer_article_number from offer_template — MAJOR regression (-0.056), ID fields are load-bearing (many queries are literal article nums)
+4542a0a	0.727000	55.0	discard	handsome-hawk-995 — natural-sentence offer_template (ID fields preserved) — -0.006 nDCG@5, -0.005 MRR (0.8001 vs 0.8049 champion); current "Field: value" format exposes ID tokens cleanly
+2358777	0.730400	55.0	discard	masked-stoat-726 — training-time random offer field dropout (0.2 per cat/type/brand/desc) — noise, -0.003 nDCG / -0.002 MRR (0.8031 vs 0.8049); regularizers don't help at throughput-bound budget
+02e60f1	0.729500	55.0	discard	casual-snipe-581 — warmup_ratio=0.1 — -0.003 nDCG, peaked at step 1830 (0.7322) then regressed; shorter warmup destabilizes later training
+f88f189	0.717800	70.0	discard	skittish-shark-638 — e5-large (568M) @ bs=256 — -0.015 nDCG, -0.009 MRR; only 1379 steps reached, capacity gain lost to throughput loss at 20-min budget
+c36cfc0	0.730600	55.0	discard	languid-skunk-364 — pre-projection LayerNorm (head group) — noise, -0.002 nDCG / -0.002 MRR (0.8034 vs 0.8049)
+6247f3b	0.738200	55.0	keep	angry-calf-984 — auxiliary 768-d contrastive loss on pre-projection pooled (alpha=0.5) — +0.005 nDCG, +0.001 MRR (0.8062); dual-objective preserves full-dim geometry while training 128-d bottleneck
+28b910e	0.731700	55.0	discard	incongruous-hog-822 — aux_raw_loss_weight=1.0 — -0.007 nDCG vs alpha=0.5, too aggressive; 768-d loss dominates and undertrains 128-d projection
+6687893	0.734300	55.0	discard	rebellious-wasp-133 — aux_raw_loss_weight=0.3 — -0.004 nDCG vs alpha=0.5, 0.5 is the peak
