@@ -120,6 +120,14 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
+        "--column-rename",
+        default="",
+        help=(
+            "Comma-separated old=new pairs to rename input columns before processing. "
+            "Example: manufacturerName=manufacturer_name,categoryPaths=category_paths"
+        ),
+    )
+    parser.add_argument(
         "--limit-rows",
         type=int,
         default=None,
@@ -131,6 +139,29 @@ def build_arg_parser():
         help="Overwrite the output file if it already exists.",
     )
     return parser
+
+
+def parse_column_rename(raw_value):
+    if not raw_value:
+        return {}
+    rename_map = {}
+    for pair in raw_value.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(f"Invalid column rename pair (expected old=new): {pair}")
+        old, new = pair.split("=", 1)
+        rename_map[old.strip()] = new.strip()
+    return rename_map
+
+
+def apply_column_rename(batch, rename_map):
+    if not rename_map:
+        return batch
+    names = list(batch.schema.names)
+    new_names = [rename_map.get(name, name) for name in names]
+    return batch.rename_columns(new_names)
 
 
 def resolve_device(device_name):
@@ -599,10 +630,18 @@ def run_inference(args):
     tokenizer = build_tokenizer(cfg.model.model_name)
     renderer = RowTextRenderer(cfg.data)
 
+    column_rename = parse_column_rename(args.column_rename)
+
     parquet_file = ParquetSource(args.input)
+    renamed_schema = parquet_file.schema_arrow
+    if column_rename:
+        new_names = [column_rename.get(n, n) for n in renamed_schema.names]
+        renamed_schema = pa.schema(
+            [renamed_schema.field(i).with_name(new_names[i]) for i in range(len(new_names))]
+        )
     copy_columns = parse_copy_columns(
         args.copy_columns,
-        parquet_file.schema.names,
+        renamed_schema.names,
         default_copy_columns_from_renderer(renderer),
     )
     writer = IncrementalParquetWriter(args.output, args.compression, args.overwrite)
@@ -623,6 +662,7 @@ def run_inference(args):
 
     try:
         for batch in parquet_file.iter_batches(batch_size=int(args.read_batch_size)):
+            batch = apply_column_rename(batch, column_rename)
             rows = batch.to_pylist()
             if args.limit_rows is not None:
                 remaining_rows = int(args.limit_rows) - processed_rows
@@ -641,7 +681,7 @@ def run_inference(args):
                 output_column=output_column,
                 copy_columns=copy_columns,
                 include_text=bool(args.include_text),
-                input_schema=parquet_file.schema_arrow,
+                input_schema=renamed_schema,
                 query_max_length=query_max_length,
                 offer_max_length=offer_max_length,
                 tokenizer=tokenizer,
