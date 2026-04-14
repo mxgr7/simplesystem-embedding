@@ -57,6 +57,16 @@ All inherit the baseline config unless noted.
 5. **Dropout bump** in the encoder (try 0.15–0.2 vs the pretrained 0.1
    default). Untested regularizer. `weight_decay=0.1` was a no-op so
    wd-based regularization is off the table, but dropout is a different axis.
+6. **Domain-adaptive pretraining on the full product corpus.** MLM (or
+   SimCSE-style unsupervised contrastive) over
+   `../../data/offers_distinct.parquet/` — the deduped offer text dump, ~47
+   shards — before the supervised fine-tune. The e5-base checkpoint has never
+   seen our offer distribution; a domain-adapted base could lift the ceiling
+   that supervised tuning is currently plateauing against. Start with a
+   sample (e.g. 1–2 shards) to sanity-check the pipeline and measure whether
+   the adapted base beats stock e5-base on one supervised run before scaling
+   to the full corpus. Highest infra cost of the list; also the only lever
+   that changes the base geometry itself.
 
 Triplet revisit: only on a qualitatively different setup (new base model, new
 dataset, new batching format). Not another tuning knob on this setup. See
