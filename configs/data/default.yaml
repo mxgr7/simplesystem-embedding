@@ -23,6 +23,15 @@ semi_hard_negatives_path: ../../data/semi_hard_negatives-defiant-mink-296.parque
 cache_prepared_dataset: true
 prepare_cache_dir: .cache/prepared_dataset
 
+# Rename source columns before rendering. Useful when source data uses
+# different naming conventions (e.g. offers_grouped.parquet uses camelCase):
+#   column_rename:
+#     manufacturerName: manufacturer_name
+#     categoryPaths: category_paths
+#     manufacturerArticleNumber: manufacturer_article_number
+#     manufacturerArticleType: manufacturer_article_type
+column_rename: null
+
 query_template: |-
   query: {{ query_term }}
 

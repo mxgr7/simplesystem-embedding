@@ -20,6 +20,7 @@ class RowTextRenderer:
         )
         self.query_template = build_template(data_cfg.query_template)
         self.offer_template = build_template(data_cfg.offer_template)
+        self.column_rename = dict(data_cfg.get("column_rename", None) or {})
 
     def build_training_record(self, row):
         context = self.build_context(row)
@@ -56,7 +57,7 @@ class RowTextRenderer:
         context = {}
 
         for key, value in row.items():
-            context[key] = self._safe_value(value)
+            context[self.column_rename.get(key, key)] = self._safe_value(value)
 
         context["query_term"] = normalize_text(context.get("query_term"))
         context["name"] = normalize_text(context.get("name"))
