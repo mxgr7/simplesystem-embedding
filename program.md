@@ -98,10 +98,11 @@ Once you have a decent checkpoint, you can build an index from it and mine a fre
 
 ## Reading results
 
-Training logs to MLflow at the URI in `configs/logger/mlflow.yaml`. After a run finishes, pull the final metric and peak VRAM via the `mlflow` skill — search the `simplesystem-embedding` experiment for the most recent run and read:
+Training logs to MLflow at the URI in `configs/logger/mlflow.yaml`. After a run finishes, pull the final metric, peak VRAM, and the **MLflow run name** via the `mlflow` skill — search the `simplesystem-embedding` experiment for the most recent run and read:
 
-- `val_ndcg_at_5` (or whatever the configured `validation_metric` is)
+- `val_ndcg_at_5` (or whatever the configured `validation_metric` is) — query MLflow for the **best (max) value of the metric history**, not the latest-step value. Use `/api/2.0/mlflow/metrics/get-history?run_id=<id>&metric_key=val/full_catalog/ndcg_at_5&max_results=1000` (the `max_results` parameter is required or you get an empty response) and take the max. The default `runs/search` response only gives the latest-step value, which is lower than the best for runs that peaked then regressed within the budget
 - `peak_vram_mb` if logged; otherwise read it from the run log
+- The MLflow `mlflow.runName` tag (e.g. `angry-calf-984`) — you will write this into the `run_name` column in `results.tsv`
 
 The run command should redirect stdout and stderr to a log file so it doesn't flood your context:
 
@@ -112,8 +113,10 @@ uv run embedding-train trainer.max_time=00:00:20:00 trainer.max_epochs=1000 > ru
 Key lines can then be grepped:
 
 ```bash
-grep -E "val_ndcg_at_5|peak" run.log | tail -20
+grep -E "val_ndcg_at_5|peak|View run" run.log | tail -20
 ```
+
+The `View run` line is Lightning's MLflowLogger printing the run name and URL (e.g. `🏃 View run angry-calf-984 at: http://127.0.0.1:5001/...`), so this grep gives you the run name without a second MLflow query — it's the fastest way to recover the run_name for the TSV row.
 
 If the grep output is empty or the run obviously crashed, run `tail -n 80 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after a few attempts, give up on that idea.
 
@@ -128,10 +131,10 @@ commit	val_ndcg_at_5	memory_gb	status	run_name	description
 ```
 
 1. git commit hash (short, 7 chars)
-2. `val_ndcg_at_5` achieved (e.g. `0.612340`) — use `0.000000` for crashes
+2. `val_ndcg_at_5` achieved (e.g. `0.612340`) — use `0.000000` for crashes. Always record the **best value from the MLflow metric history**, not the latest-step value
 3. peak VRAM in GB, `.1f` (e.g. `12.3`) — use `0.0` for crashes
 4. status: `keep`, `discard`, or `crash`
-5. MLflow run name (e.g. `learned-hawk-386`) — leave empty for crashes or infra-only rows that never created an MLflow run
+5. MLflow run name (e.g. `learned-hawk-386`), taken from the `mlflow.runName` tag of the run you just finished. This is a required column on every training row — never leave it blank just because it's inconvenient; it's the only stable link back to the MLflow UI since commit hashes aren't stored on runs. Grab it with `grep "View run" run.log` (Lightning prints it on run start). Leave the column empty only for rows that genuinely never produced an MLflow run — crashes that died before MLflow init, or infra-only commits that weren't trained
 6. short description of what this experiment tried
 
 Example:
