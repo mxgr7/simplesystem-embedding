@@ -749,10 +749,23 @@ class EmbeddingModule(L.LightningModule):
         return torch.cat(encoded_batches, dim=0)
 
     def configure_optimizers(self):
+        base_lr = float(self.cfg.optimizer.lr)
+        weight_decay = float(self.cfg.optimizer.weight_decay)
+        if self.projection is not None:
+            projection_param_ids = {id(p) for p in self.projection.parameters()}
+            encoder_params = [
+                p for p in self.parameters() if id(p) not in projection_param_ids
+            ]
+            param_groups = [
+                {"params": encoder_params, "lr": base_lr},
+                {"params": list(self.projection.parameters()), "lr": base_lr * 10.0},
+            ]
+        else:
+            param_groups = [{"params": list(self.parameters()), "lr": base_lr}]
         optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=float(self.cfg.optimizer.lr),
-            weight_decay=float(self.cfg.optimizer.weight_decay),
+            param_groups,
+            lr=base_lr,
+            weight_decay=weight_decay,
         )
 
         scheduler_name = resolve_scheduler_name(
