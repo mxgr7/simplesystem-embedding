@@ -51,6 +51,44 @@ Noise floor ±0.003 nDCG@5.
 under `anchor_query`, pre-apr13 loop. Not directly comparable to either the
 apr13 or apr14 20-min budget regime.
 
+## Runs worth re-doing with a larger time budget
+
+These are apr14 runs I already executed that were either clearly under-fit
+at the 20-min budget or blocked on infra that the budget couldn't absorb.
+Re-running them at 30-60 min wall time is the cheapest way to unlock lifts
+that the loop couldn't see. None of these are new ideas — they are
+already-tried experiments whose outcome was distorted by the time budget.
+
+1. **e5-large @ bs=256 at 30-40 min** (was `skittish-shark-638`, commit
+   `f88f189`, 20-min result 0.7178 = -0.015 vs champion). Only reached step
+   1379 vs the champion's ~2150. The 2x encoder capacity never got a chance
+   to train. At ~2500 steps the capacity gain should land; combined with
+   the apr14 aux-loss lever this is the most likely single biggest lift.
+   Highest priority re-run.
+
+2. **Warm-start cascade from the apr14 champion at 2-3 × 20-min** (two
+   failed apr14 attempts: `defiant-rat-166` stalled in torch.compile
+   restoration, follow-up failed on `encoder._orig_mod.` state_dict prefix
+   mismatch under `compile=false`). Blocked purely on infra:
+   - Fix 1: strip `_orig_mod.` from checkpoint state-dict keys in
+     `checkpoint_connector`'s load path (or pre-patch the .ckpt file).
+   - Fix 2: ensure `torch.compile` graph restoration runs within the
+     max_time budget on resume, or exempt resume setup from the wall
+     clock.
+   Once unblocked, chain 2-3 warm-starts at 20 min each to get 40-60 min
+   effective training from the champion. Directly tests step-starvation.
+
+3. **Cosine LR schedule with explicit `total_steps≈2200` at any budget
+   multiple of 20 min.** Not re-run exactly (we never tried cosine on
+   apr14) but shares the "longer-budget lets the schedule actually
+   decay" property with the warm-start cascade. Cheap to bolt onto any
+   longer-budget run.
+
+At a larger budget these re-runs matter more than any new experiment idea
+below, because they directly test hypotheses the apr14 loop left
+undecided. Once (1) or (2) gives a resolved answer, the ranking of new
+experiments below may need to shift.
+
 ## Next experiments (ranked by expected leverage, apr14-updated)
 
 All inherit the apr14 champion config unless noted.
