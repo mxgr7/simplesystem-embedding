@@ -251,6 +251,8 @@ _g_max_length = 256
 
 def _worker_render_and_tokenize(item):
     """Worker function: render texts and tokenize (no padding). Runs in forked child."""
+    import numpy as np
+
     rows, row_number_start = item
     prepared_rows = []
     texts = []
@@ -283,9 +285,13 @@ def _worker_render_and_tokenize(item):
 
     token_ids = []
     if texts:
-        token_ids = _g_tokenizer(
+        raw_ids = _g_tokenizer(
             texts, padding=False, truncation=True, max_length=_g_max_length,
         )["input_ids"]
+        # Pack as numpy for fast pickling (avoid Python list-of-list overhead)
+        lengths = np.array([len(ids) for ids in raw_ids], dtype=np.int32)
+        flat_ids = np.concatenate([np.array(ids, dtype=np.int32) for ids in raw_ids])
+        token_ids = (flat_ids, lengths)
 
     return prepared_rows, token_ids, skipped, row_number_start
 
@@ -749,13 +755,21 @@ def _run_with_workers(
             yield (rows, rn)
 
     # Workers render text + tokenize; main thread runs GPU
-    for prepared_rows, token_ids, batch_skipped, _ in pool.imap(
+    for prepared_rows, packed_token_ids, batch_skipped, _ in pool.imap(
         _worker_render_and_tokenize, batch_items(), chunksize=1
     ):
         skipped_rows += batch_skipped
 
         if not prepared_rows:
             continue
+
+        # Unpack numpy token_ids back to list-of-lists
+        flat_ids, lengths = packed_token_ids
+        token_ids = []
+        offset = 0
+        for length in lengths:
+            token_ids.append(flat_ids[offset:offset + length].tolist())
+            offset += length
 
         encode_start = time.perf_counter()
         table = _encode_token_ids_and_build_table(
