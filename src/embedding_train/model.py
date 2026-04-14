@@ -329,9 +329,9 @@ class EmbeddingModule(L.LightningModule):
         return query_embeddings, offer_embeddings, scores
 
     def training_step(self, batch, batch_idx):
-        query_embeddings, offer_embeddings, scores = self(
-            batch["query_inputs"], batch["offer_inputs"]
-        )
+        query_embeddings, query_raw = self.encode_with_raw(batch["query_inputs"])
+        offer_embeddings, offer_raw = self.encode_with_raw(batch["offer_inputs"])
+        scores = (query_embeddings * offer_embeddings).sum(dim=1)
         batch_size = batch["labels"].size(0)
         loss_metric_name = self.batch_aligned_metric_name(
             "train", f"{self.loss_type}_loss"
@@ -339,11 +339,35 @@ class EmbeddingModule(L.LightningModule):
         train_metric_name = self.batch_aligned_metric_name("train", "loss")
         self.assert_finite(batch["labels"], "labels", batch_idx)
         self.assert_finite(scores, "scores", batch_idx)
-        loss = self.compute_loss(
+        projected_loss = self.compute_loss(
             batch,
             query_embeddings,
             offer_embeddings,
             scores,
+        )
+        raw_loss = self.compute_loss(
+            batch,
+            query_raw,
+            offer_raw,
+            (query_raw * offer_raw).sum(dim=1),
+        )
+        aux_alpha = float(getattr(self.cfg.model, "aux_raw_loss_weight", 0.5))
+        loss = projected_loss + aux_alpha * raw_loss
+        self.log(
+            self.batch_aligned_metric_name("train", "projected_loss"),
+            projected_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            batch_size=batch_size,
+        )
+        self.log(
+            self.batch_aligned_metric_name("train", "raw_loss"),
+            raw_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            batch_size=batch_size,
         )
         self.assert_finite(loss, "train_loss", batch_idx)
         self.log(
@@ -1026,17 +1050,26 @@ class EmbeddingModule(L.LightningModule):
         raise RuntimeError(f"Unsupported loss type: {self.loss_type}")
 
     def encode(self, inputs):
+        return self.encode_with_raw(inputs)[0]
+
+    def encode_with_raw(self, inputs):
+        """Return (projected_normalized, raw_normalized). The raw output is
+        the L2-normalized pre-projection pooled embedding, used for the
+        auxiliary 768-d contrastive loss during training. Shares the single
+        encoder forward pass."""
         outputs = self.encoder(**inputs)
         self.assert_finite(outputs.last_hidden_state, "last_hidden_state")
         pooled = self.pool_last_hidden_state(
             outputs.last_hidden_state, inputs["attention_mask"]
         )
         self.assert_finite(pooled, "pooled_embeddings")
+        raw_normalized = F.normalize(pooled, p=2, dim=1)
+        self.assert_finite(raw_normalized, "raw_normalized_embeddings")
         projected = self.project_embeddings(pooled)
         self.assert_finite(projected, "projected_embeddings")
         normalized = F.normalize(projected, p=2, dim=1)
         self.assert_finite(normalized, "normalized_embeddings")
-        return normalized
+        return normalized, raw_normalized
 
     def project_embeddings(self, embeddings):
         if self.projection is None:

@@ -9,3 +9,4 @@ gradient_checkpointing: false
 teacher_checkpoint: null
 distill_temperature: 0.05
 compile: true
+aux_raw_loss_weight: 0.5
