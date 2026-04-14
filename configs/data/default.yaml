@@ -19,7 +19,7 @@ hard_negatives_path: null
 # hard_negatives_path: ../../data/hard_negatives-adorable-mole-653.parquet
 # semi_hard_negatives_path: null
 # semi_hard_negatives_path: ../../data/semi_hard_negatives-adorable-mole-653.parquet
-semi_hard_negatives_path: ../../data/semi_hard_negatives-placid-snake-749.parquet
+semi_hard_negatives_path: ../../data/semi_hard_negatives-defiant-mink-296.parquet
 cache_prepared_dataset: true
 prepare_cache_dir: .cache/prepared_dataset
 
