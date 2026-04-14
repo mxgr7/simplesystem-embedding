@@ -48,6 +48,7 @@ uv run embedding-train trainer.max_time=00:00:20:00 trainer.max_epochs=1000
 - Modify `configs/trainer/default.yaml` fields that control evaluation: `validation_mode`, `validation_metric`, `validation_similarity`, `validation_relevant_labels`, `validation_catalog_sample`. You may override other trainer fields freely.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Change the evaluation parquet path or label mapping.
+- Change `model.output_dims` — it must stay at 128.
 - Run `embedding-eval`, `embedding-catalog-benchmark`, or `embedding-index-search` as part of the keep/discard decision. These are useful for investigation but are NOT the ground-truth signal — MLflow `val/full_catalog/ndcg_at_5` from the training run is.
 
 **The goal is simple: get the highest `val_ndcg_at_5`** (note: higher is better, opposite direction from the original bpb setup). Since the time budget is fixed, you don't need to worry about training time — every run is bounded by `trainer.max_time`. The only constraint is that the code runs without crashing and finishes within the budget.
