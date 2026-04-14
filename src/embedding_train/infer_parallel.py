@@ -1,9 +1,9 @@
 """Orchestrator for multi-GPU embedding export.
 
 Workflow:
-1. Split the input parquet (file or directory of shards) into N contiguous
-   row-range slices, each written as its own parquet file under
-   ``<output>/shards/input_<i>.parquet``.
+1. Prepare per-worker input splits.  Either re-split the input into N
+   contiguous row-range slices (default), or assign existing source
+   shards directly to workers round-robin (``--use-source-shards``).
 2. Launch N ``embedding_train.infer`` subprocesses in parallel, one per
    GPU, each reading its slice and writing embeddings to
    ``<output>/embeddings/shard_<i>.parquet``.
@@ -71,6 +71,16 @@ def build_arg_parser():
         "--skip-shard-split",
         action="store_true",
         help="Reuse existing shard parquets under <output>/shards/input_*.parquet.",
+    )
+    parser.add_argument(
+        "--use-source-shards",
+        action="store_true",
+        help=(
+            "Assign existing source parquet shards directly to workers "
+            "round-robin instead of re-splitting. Avoids reading and "
+            "rewriting the entire dataset when the input is already "
+            "partitioned into multiple files."
+        ),
     )
     parser.add_argument(
         "--include-text",
@@ -144,6 +154,43 @@ def split_input_parquet(source, shard_paths):
     return write_counts
 
 
+def assign_source_shards(input_path, num_workers, work_dir):
+    """Assign existing source parquet shards round-robin to workers.
+
+    Creates per-worker directories with symlinks to the assigned source
+    files.  Returns (input_dirs, row_counts) where input_dirs[i] is the
+    directory to pass as --input for worker i.
+    """
+    source = Path(input_path)
+    if source.is_dir():
+        shard_files = sorted(source.glob("*.parquet"))
+    else:
+        shard_files = [source]
+    if not shard_files:
+        raise ValueError(f"No parquet files found at {input_path}")
+
+    buckets = [[] for _ in range(num_workers)]
+    for i, f in enumerate(shard_files):
+        buckets[i % num_workers].append(f)
+
+    input_dirs = []
+    counts = []
+    inputs_root = work_dir / "inputs"
+    for idx, paths in enumerate(buckets):
+        worker_dir = inputs_root / f"worker_{idx}"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        for existing in worker_dir.iterdir():
+            existing.unlink()
+        n = 0
+        for p in paths:
+            (worker_dir / p.name).symlink_to(p.resolve())
+            n += pq.ParquetFile(str(p)).metadata.num_rows
+        input_dirs.append(worker_dir)
+        counts.append(n)
+
+    return input_dirs, counts
+
+
 def run_parallel(args):
     output_root = Path(args.output).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -154,12 +201,21 @@ def run_parallel(args):
 
     gpu_ids = resolve_gpu_ids(args)
     num_shards = int(args.num_shards)
-    shard_input_paths = [shards_root / f"input_{i}.parquet" for i in range(num_shards)]
     shard_output_paths = [
         embeddings_root / f"shard_{i:04d}.parquet" for i in range(num_shards)
     ]
 
-    if not args.skip_shard_split:
+    if args.use_source_shards:
+        print(f"Assigning source shards to {num_shards} workers", flush=True)
+        shard_input_paths, counts = assign_source_shards(
+            args.input, num_shards, output_root
+        )
+        for i, n in enumerate(counts):
+            print(f"  worker {i}: {n:,} rows", flush=True)
+    elif not args.skip_shard_split:
+        shard_input_paths = [
+            shards_root / f"input_{i}.parquet" for i in range(num_shards)
+        ]
         print(f"Splitting input into {num_shards} shards", flush=True)
         t = time.perf_counter()
         counts = split_input_parquet(args.input, shard_input_paths)
@@ -167,6 +223,9 @@ def run_parallel(args):
             print(f"  shard {i}: {n:,} rows → {shard_input_paths[i]}", flush=True)
         print(f"Split done in {time.perf_counter() - t:.1f}s", flush=True)
     else:
+        shard_input_paths = [
+            shards_root / f"input_{i}.parquet" for i in range(num_shards)
+        ]
         counts = [
             pq.ParquetFile(p).metadata.num_rows for p in shard_input_paths
         ]
