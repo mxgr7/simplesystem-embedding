@@ -1,4 +1,4 @@
-import pandas as pd
+import math
 
 from embedding_train.text import (
     build_template,
@@ -102,14 +102,12 @@ class RowTextRenderer:
 
         return context
 
-    def _safe_value(self, value):
+    @staticmethod
+    def _safe_value(value):
         if value is None:
             return ""
 
-        try:
-            if pd.isna(value):
-                return ""
-        except Exception:
-            pass
+        if isinstance(value, float) and math.isnan(value):
+            return ""
 
         return value
