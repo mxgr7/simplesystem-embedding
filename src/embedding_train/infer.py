@@ -1,4 +1,7 @@
 import argparse
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 
 import pyarrow as pa
@@ -162,24 +165,120 @@ def build_tokenizer(model_name):
     return tokenizer
 
 
-def encode_texts(model, tokenizer, texts, max_length, encode_batch_size, device):
+def encode_texts(
+    model,
+    tokenizer,
+    texts,
+    max_length,
+    encode_batch_size,
+    device,
+    phase_times=None,
+):
     encoded_batches = []
+    amp_context = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        if device.type == "cuda"
+        else nullcontext()
+    )
+    profile = phase_times is not None
+    sync_cuda = profile and device.type == "cuda"
 
-    with torch.inference_mode():
-        for start in range(0, len(texts), encode_batch_size):
-            chunk = texts[start : start + encode_batch_size]
-            inputs = tokenizer(
-                chunk,
-                padding=True,
-                truncation=True,
-                max_length=max_length,
-                return_tensors="pt",
+    sort_start = time.perf_counter() if profile else 0.0
+    sort_order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
+    sorted_texts = [texts[i] for i in sort_order]
+    if profile:
+        phase_times["encode_sort"] = (
+            phase_times.get("encode_sort", 0.0) + time.perf_counter() - sort_start
+        )
+
+    chunk_starts = list(range(0, len(sorted_texts), encode_batch_size))
+
+    def tokenize_chunk(start):
+        t_tok = time.perf_counter() if profile else 0.0
+        chunk = sorted_texts[start : start + encode_batch_size]
+        inputs = tokenizer(
+            chunk,
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+        if profile:
+            phase_times["encode_tokenize"] = (
+                phase_times.get("encode_tokenize", 0.0)
+                + time.perf_counter()
+                - t_tok
             )
-            inputs = {name: tensor.to(device) for name, tensor in dict(inputs).items()}
-            embeddings = model.encode(inputs)
-            encoded_batches.append(embeddings.detach().cpu().to(dtype=torch.float32))
+        return inputs
 
-    return torch.cat(encoded_batches, dim=0)
+    with ThreadPoolExecutor(max_workers=1) as tokenizer_executor:
+        if not chunk_starts:
+            return torch.empty(0)
+
+        prefetched = tokenizer_executor.submit(tokenize_chunk, chunk_starts[0])
+
+        with torch.inference_mode(), amp_context:
+            for i, _ in enumerate(chunk_starts):
+                cpu_inputs = prefetched.result()
+                if i + 1 < len(chunk_starts):
+                    prefetched = tokenizer_executor.submit(
+                        tokenize_chunk, chunk_starts[i + 1]
+                    )
+
+                if profile:
+                    t_h2d = time.perf_counter()
+                device_inputs = {
+                    name: tensor.to(device, non_blocking=True)
+                    for name, tensor in dict(cpu_inputs).items()
+                }
+                if sync_cuda:
+                    torch.cuda.synchronize()
+                if profile:
+                    phase_times["encode_h2d"] = (
+                        phase_times.get("encode_h2d", 0.0)
+                        + time.perf_counter()
+                        - t_h2d
+                    )
+                    t_fwd = time.perf_counter()
+
+                embeddings = model.encode(device_inputs)
+
+                if sync_cuda:
+                    torch.cuda.synchronize()
+                if profile:
+                    phase_times["encode_forward"] = (
+                        phase_times.get("encode_forward", 0.0)
+                        + time.perf_counter()
+                        - t_fwd
+                    )
+                    t_cpu = time.perf_counter()
+
+                encoded_batches.append(embeddings.detach().cpu().to(dtype=torch.float32))
+
+                if profile:
+                    phase_times["encode_to_cpu"] = (
+                        phase_times.get("encode_to_cpu", 0.0)
+                        + time.perf_counter()
+                        - t_cpu
+                    )
+
+    if not encoded_batches:
+        return torch.empty(0)
+
+    sorted_embeddings = torch.cat(encoded_batches, dim=0)
+    unsort_start = time.perf_counter() if profile else 0.0
+    inverse_order = torch.empty(len(sort_order), dtype=torch.long)
+    inverse_order[torch.tensor(sort_order, dtype=torch.long)] = torch.arange(
+        len(sort_order), dtype=torch.long
+    )
+    result = sorted_embeddings.index_select(0, inverse_order)
+    if profile:
+        phase_times["encode_sort"] = (
+            phase_times.get("encode_sort", 0.0)
+            + time.perf_counter()
+            - unsort_start
+        )
+    return result
 
 
 def resolve_embedding_arrow_type(embedding_precision):

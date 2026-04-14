@@ -138,10 +138,7 @@ class IndexBuildCliTests(unittest.TestCase):
             self.assertEqual(len(metadata_rows), 3)
             self.assertEqual([row["faiss_id"] for row in metadata_rows], [0, 1, 2])
             self.assertEqual([row["row_number"] for row in metadata_rows], [0, 1, 3])
-            self.assertEqual(
-                [row["offer_text"] for row in metadata_rows],
-                ["bolt", "nut", "screw"],
-            )
+            self.assertNotIn("offer_text", metadata_rows[0])
             self.assertEqual(
                 [row["offer_id_b64"] for row in metadata_rows],
                 ["o1", "o4", "o3"],

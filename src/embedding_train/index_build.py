@@ -1,6 +1,8 @@
 import argparse
 import os
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -153,6 +155,45 @@ def build_arg_parser():
         help="Texts to tokenize and encode per forward pass.",
     )
     parser.add_argument(
+        "--max-offer-length",
+        type=int,
+        default=0,
+        help=(
+            "Override cfg.data.max_offer_length for tokenization (0 keeps config value). "
+            "Lowering this below the 99th percentile of actual token lengths trades off a "
+            "small fraction of truncated rows for proportional forward-pass savings."
+        ),
+    )
+    parser.add_argument(
+        "--metadata-chunk-rows",
+        type=int,
+        default=1_000_000,
+        help=(
+            "Flush buffered metadata rows to disk once the buffer reaches this many rows. "
+            "Large values reduce per-chunk zstd overhead; small values reduce peak memory. "
+            "The default (~1M rows ≈ 16 MB of int64 columns) is the sweet spot for corpora "
+            "that don't fit in RAM."
+        ),
+    )
+    parser.add_argument(
+        "--trained-index",
+        default="",
+        help=(
+            "Path to a pre-trained FAISS index file (e.g. produced by index_build_train). "
+            "When set, skips local training and loads the shared quantizer/PQ codebook. "
+            "Required for multi-shard builds where all shards must share the same codebook."
+        ),
+    )
+    parser.add_argument(
+        "--faiss-id-offset",
+        type=int,
+        default=0,
+        help=(
+            "Offset added to every faiss_id and row_number written by this build. "
+            "Used for multi-shard builds so each shard's ids are disjoint from the others."
+        ),
+    )
+    parser.add_argument(
         "--index-type",
         default="flat",
         choices=["flat", "ivf_flat", "ivf_pq", "hnsw"],
@@ -234,7 +275,6 @@ def build_metadata_table(rows, copy_columns, input_schema):
     arrays = {
         "faiss_id": pa.array([row["faiss_id"] for row in rows], type=pa.int64()),
         "row_number": pa.array([row["row_number"] for row in rows], type=pa.int64()),
-        "offer_text": pa.array([row["offer_text"] for row in rows], type=pa.string()),
     }
 
     for column in copy_columns:
@@ -268,7 +308,6 @@ def prepare_offer_rows(rows, renderer, copy_columns, row_number, next_faiss_id):
             skipped_rows += 1
             continue
 
-        prepared_row["offer_text"] = offer_text
         prepared_rows.append(prepared_row)
         offer_texts.append(offer_text)
         next_faiss_id += 1
@@ -295,14 +334,8 @@ def concatenate_embedding_chunks(chunks):
     return np.concatenate(chunks, axis=0)
 
 
-def flush_pending_batches(
-    index,
-    pending_batches,
-    metadata_writer,
-    copy_columns,
-    input_schema,
-):
-    flushed_rows = 0
+def add_batches_to_index(index, pending_batches):
+    added_rows = 0
 
     for prepared_rows, embedding_matrix in pending_batches:
         faiss_ids = np.asarray(
@@ -310,17 +343,10 @@ def flush_pending_batches(
             dtype="int64",
         )
         index.add_with_ids(embedding_matrix, faiss_ids)
-
-        metadata_table = build_metadata_table(
-            prepared_rows,
-            copy_columns,
-            input_schema,
-        )
-        metadata_writer.write_table(metadata_table)
-        flushed_rows += len(prepared_rows)
+        added_rows += len(prepared_rows)
 
     pending_batches.clear()
-    return flushed_rows
+    return added_rows
 
 
 def run_flat_index_build(
@@ -335,6 +361,7 @@ def run_flat_index_build(
     artifact_paths = prepare_index_directory(args.output, args.overwrite)
     tokenizer = build_tokenizer(cfg.model.model_name)
     renderer = RowTextRenderer(cfg.data)
+    max_offer_length = int(args.max_offer_length) or int(cfg.data.max_offer_length)
     if debug_logging:
         print("flat_build:start", flush=True)
 
@@ -381,7 +408,7 @@ def run_flat_index_build(
             model,
             tokenizer,
             offer_texts,
-            int(cfg.data.max_offer_length),
+            max_offer_length,
             int(args.encode_batch_size),
             device,
         )
@@ -434,7 +461,6 @@ def run_flat_index_build(
             "metric": "inner_product",
             "processed_rows": processed_rows,
             "query_model_name": str(cfg.model.model_name),
-            "rendered_text_column": "offer_text",
             "skipped_rows": skipped_rows,
         },
     )
@@ -473,6 +499,8 @@ def run_index_build(args):
         total_rows = min(total_rows, int(args.limit_rows))
     copy_columns = parse_copy_columns(args.copy_columns, parquet_file.schema.names)
 
+    max_offer_length = int(args.max_offer_length) or int(cfg.data.max_offer_length)
+
     if index_type == "flat":
         return run_flat_index_build(
             args,
@@ -489,14 +517,40 @@ def run_index_build(args):
         args.compression,
         overwrite=True,
     )
+    metadata_buffer = []
+    metadata_chunk_rows = int(args.metadata_chunk_rows)
+
+    preloaded_index = None
+    preloaded_embedding_dim = None
+    if args.trained_index:
+        preloaded_index = faiss.read_index(str(args.trained_index))
+        if not preloaded_index.is_trained:
+            raise ValueError(
+                f"Pre-trained index at {args.trained_index} is not trained"
+            )
+        preloaded_embedding_dim = int(preloaded_index.d)
+        requires_training = False
+
+    def flush_metadata_buffer(force=False):
+        if not metadata_buffer:
+            return
+        if not force and len(metadata_buffer) < metadata_chunk_rows:
+            return
+        t = time.perf_counter()
+        table = build_metadata_table(
+            metadata_buffer,
+            copy_columns,
+            parquet_file.schema_arrow,
+        )
+        metadata_writer.write_table(table)
+        phase_times["metadata_write"] += time.perf_counter() - t
+        metadata_buffer.clear()
 
     processed_rows = 0
     indexed_rows = 0
     skipped_rows = 0
-    row_number = 0
-    next_faiss_id = 0
-    embedding_dim = None
-    index = None
+    embedding_dim = preloaded_embedding_dim
+    index = preloaded_index
     pending_batches = []
     training_chunks = []
     train_sample_size = int(index_config["train_sample_size"])
@@ -508,6 +562,31 @@ def run_index_build(args):
             f"selected index ({minimum_train_vectors})"
         )
 
+    row_number = int(args.faiss_id_offset)
+    next_faiss_id = int(args.faiss_id_offset)
+
+    phase_times = {
+        "read_parquet": 0.0,
+        "prepare_rows": 0.0,
+        "encode": 0.0,
+        "await_flush": 0.0,
+        "submit_flush": 0.0,
+        "train": 0.0,
+        "metadata_write": 0.0,
+    }
+
+    flush_executor = ThreadPoolExecutor(max_workers=1)
+    pending_flush_future = None
+
+    def await_pending_flush():
+        nonlocal pending_flush_future
+        if pending_flush_future is None:
+            return 0
+        try:
+            return int(pending_flush_future.result())
+        finally:
+            pending_flush_future = None
+
     with build_progress(total_rows) as progress:
         task_id = progress.add_task(
             "Indexing",
@@ -517,9 +596,18 @@ def run_index_build(args):
         )
 
         try:
-            for batch in parquet_file.iter_batches(
+            batch_iter = parquet_file.iter_batches(
                 batch_size=int(args.read_batch_size)
-            ):
+            )
+            while True:
+                t = time.perf_counter()
+                try:
+                    batch = next(batch_iter)
+                except StopIteration:
+                    phase_times["read_parquet"] += time.perf_counter() - t
+                    break
+                phase_times["read_parquet"] += time.perf_counter() - t
+
                 rows = batch.to_pylist()
                 if args.limit_rows is not None:
                     remaining_rows = int(args.limit_rows) - processed_rows
@@ -531,6 +619,7 @@ def run_index_build(args):
                 if not rows:
                     break
 
+                t = time.perf_counter()
                 (
                     prepared_rows,
                     offer_texts,
@@ -544,22 +633,35 @@ def run_index_build(args):
                     row_number,
                     next_faiss_id,
                 )
+                phase_times["prepare_rows"] += time.perf_counter() - t
                 skipped_rows += batch_skipped_rows
 
                 if prepared_rows:
+                    metadata_buffer.extend(prepared_rows)
+                    flush_metadata_buffer()
+
+                    t = time.perf_counter()
                     embeddings = encode_texts(
                         model,
                         tokenizer,
                         offer_texts,
-                        int(cfg.data.max_offer_length),
+                        max_offer_length,
                         int(args.encode_batch_size),
                         device,
+                        phase_times=phase_times,
                     )
                     embedding_matrix = embeddings.numpy().astype("float32", copy=False)
+                    phase_times["encode"] += time.perf_counter() - t
 
                     if index is None:
                         embedding_dim = int(embeddings.size(1))
                         index = create_faiss_index(embedding_dim, index_config)
+                    elif embedding_dim != int(embeddings.size(1)):
+                        raise ValueError(
+                            f"Embedding dim mismatch: model produced "
+                            f"{embeddings.size(1)} but pre-trained index expects "
+                            f"{embedding_dim}"
+                        )
 
                     if requires_training and not index.is_trained:
                         pending_batches.append((prepared_rows, embedding_matrix.copy()))
@@ -580,22 +682,25 @@ def run_index_build(args):
                                     f"need at least {minimum_train_vectors}, got {train_matrix.shape[0]}"
                                 )
 
+                            t = time.perf_counter()
                             index.train(train_matrix)
-                            indexed_rows += flush_pending_batches(
+                            phase_times["train"] += time.perf_counter() - t
+                            indexed_rows += add_batches_to_index(
                                 index,
                                 pending_batches,
-                                metadata_writer,
-                                copy_columns,
-                                parquet_file.schema_arrow,
                             )
                     else:
-                        indexed_rows += flush_pending_batches(
+                        t = time.perf_counter()
+                        indexed_rows += await_pending_flush()
+                        phase_times["await_flush"] += time.perf_counter() - t
+
+                        t = time.perf_counter()
+                        pending_flush_future = flush_executor.submit(
+                            add_batches_to_index,
                             index,
                             [(prepared_rows, embedding_matrix)],
-                            metadata_writer,
-                            copy_columns,
-                            parquet_file.schema_arrow,
                         )
+                        phase_times["submit_flush"] += time.perf_counter() - t
 
                 update_progress(
                     progress,
@@ -605,8 +710,15 @@ def run_index_build(args):
                     indexed_rows,
                     skipped_rows,
                 )
+
+            t = time.perf_counter()
+            indexed_rows += await_pending_flush()
+            phase_times["await_flush"] += time.perf_counter() - t
         finally:
-            metadata_writer.close()
+            try:
+                indexed_rows += await_pending_flush()
+            finally:
+                flush_executor.shutdown(wait=True)
 
     if index is None or embedding_dim is None or next_faiss_id == 0:
         raise ValueError("No non-empty offers were available to index")
@@ -622,22 +734,13 @@ def run_index_build(args):
                 f"need at least {minimum_train_vectors}, got {available_vectors}"
             )
 
+        t = time.perf_counter()
         index.train(train_matrix)
-        metadata_writer = IncrementalParquetWriter(
-            artifact_paths["metadata_file"],
-            args.compression,
-            overwrite=True,
-        )
-        try:
-            indexed_rows = flush_pending_batches(
-                index,
-                pending_batches,
-                metadata_writer,
-                copy_columns,
-                parquet_file.schema_arrow,
-            )
-        finally:
-            metadata_writer.close()
+        phase_times["train"] += time.perf_counter() - t
+        indexed_rows = add_batches_to_index(index, pending_batches)
+
+    flush_metadata_buffer(force=True)
+    metadata_writer.close()
 
     faiss.write_index(index, str(artifact_paths["index_file"]))
     write_manifest(
@@ -655,7 +758,6 @@ def run_index_build(args):
             "metric": "inner_product",
             "processed_rows": processed_rows,
             "query_model_name": str(cfg.model.model_name),
-            "rendered_text_column": "offer_text",
             "skipped_rows": skipped_rows,
         },
     )
@@ -671,6 +773,10 @@ def run_index_build(args):
             "embedding_dim": embedding_dim,
             "output": str(artifact_paths["index_dir"]),
         },
+    )
+    print(
+        "Phase times (s):",
+        {name: round(value, 3) for name, value in phase_times.items()},
     )
 
 
