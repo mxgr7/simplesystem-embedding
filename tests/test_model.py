@@ -44,6 +44,7 @@ def build_cfg(**overrides):
                 "similarity_scale": 20.0,
                 "triplet_margin": 0.2,
                 "gradient_checkpointing": False,
+                "compile": False,
             },
             "trainer": {"precision": "32-true"},
             "data": {"log_batch_stats": True},

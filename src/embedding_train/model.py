@@ -187,6 +187,48 @@ def subsample_catalog(catalog_rows, sample_size, judgments_by_query):
     return judged_rows + unjudged_rows[:remaining]
 
 
+_ENCODER_PREFIX = "encoder."
+_ENCODER_COMPILED_PREFIX = "encoder._orig_mod."
+
+
+def _align_encoder_compile_prefix(state_dict, target_module):
+    """Reconcile `torch.compile`'s `_orig_mod.` wrapper so a checkpoint
+    saved under one compile setting loads into a module built under the
+    other. Keeps the load path tolerant of `cfg.model.compile` drift."""
+    target_has_compiled = any(
+        key.startswith(_ENCODER_COMPILED_PREFIX)
+        for key in target_module.state_dict()
+    )
+    source_has_compiled = any(
+        key.startswith(_ENCODER_COMPILED_PREFIX) for key in state_dict
+    )
+
+    if target_has_compiled == source_has_compiled:
+        return state_dict
+
+    remapped = {}
+    if target_has_compiled and not source_has_compiled:
+        for key, value in state_dict.items():
+            if key.startswith(_ENCODER_PREFIX) and not key.startswith(
+                _ENCODER_COMPILED_PREFIX
+            ):
+                remapped[
+                    _ENCODER_COMPILED_PREFIX + key[len(_ENCODER_PREFIX):]
+                ] = value
+            else:
+                remapped[key] = value
+        return remapped
+
+    for key, value in state_dict.items():
+        if key.startswith(_ENCODER_COMPILED_PREFIX):
+            remapped[
+                _ENCODER_PREFIX + key[len(_ENCODER_COMPILED_PREFIX):]
+            ] = value
+        else:
+            remapped[key] = value
+    return remapped
+
+
 def load_embedding_module_from_checkpoint(checkpoint_path, map_location="cpu"):
     checkpoint = torch.load(
         checkpoint_path,
@@ -200,6 +242,7 @@ def load_embedding_module_from_checkpoint(checkpoint_path, map_location="cpu"):
 
     cfg = build_config_from_hyperparameters(checkpoint.get("hyper_parameters"))
     model = EmbeddingModule(cfg)
+    state_dict = _align_encoder_compile_prefix(state_dict, model)
     model.load_state_dict(state_dict)
     model.eval()
     return model, cfg
