@@ -7,7 +7,7 @@ train_batching_mode: random_query_pool
 n_pos_samples_per_query: 2
 n_neg_samples_per_query: 4
 log_batch_stats: true
-num_workers: 8
+num_workers: 16
 pin_memory: true
 max_query_length: 32
 max_offer_length: 256

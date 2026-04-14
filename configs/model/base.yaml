@@ -1,5 +1,5 @@
 model_name: intfloat/multilingual-e5-base
-output_dim: null
+output_dim: 128
 pooling: mean
 loss_type: contrastive
 similarity_scale: 20.0
