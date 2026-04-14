@@ -55,7 +55,7 @@ class TrainCallbackTests(unittest.TestCase):
         )
         self.assertEqual(checkpoint_callback.monitor, "val/full_catalog/ndcg_at_5")
         self.assertEqual(checkpoint_callback.mode, "max")
-        self.assertEqual(checkpoint_callback.save_top_k, 3)
+        self.assertEqual(checkpoint_callback.save_top_k, 1)
         self.assertTrue(checkpoint_callback.save_last)
         self.assertFalse(checkpoint_callback.auto_insert_metric_name)
         self.assertEqual(
