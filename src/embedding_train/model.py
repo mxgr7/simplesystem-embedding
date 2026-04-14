@@ -137,7 +137,7 @@ def resolve_scheduler_name(scheduler_name):
     if normalized in {"none", "off", "null"}:
         return "none"
 
-    if normalized in {"linear", "cosine"}:
+    if normalized in {"linear", "cosine", "constant_with_warmup"}:
         return normalized
 
     raise ValueError(f"Unsupported optimizer scheduler: {scheduler_name}")
