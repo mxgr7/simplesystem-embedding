@@ -329,3 +329,31 @@ Behaviors worth knowing before you design around these numbers:
 - **Cold and warm are identical.** Five random fresh query vectors without warmup landed at 2.5–3.2 s, matching the warm distribution. FLAT doesn't benefit from query-side caching — every search pays the full scan cost. This also means the first query after `load_collection()` is not anomalously slow (assuming segments are resident), which makes it easy to reason about production p50.
 
 **Acceptable for batch scoring, offline evaluation, and qualitative probes. Not acceptable for interactive serving.** If you need sub-100 ms queries under concurrent load, rebuild on top of FLAT with IVF_PQ (`nprobe=64`) for ~50–150 ms per query at 90–95% recall, or IVF_FLAT for ~100–300 ms per query at 95–99% recall. Both pay a one-time index build cost you skipped with FLAT, but can be done in place without re-importing.
+
+### Bucket=00 IVF_FLAT streaming run (April 2026)
+
+A follow-up run on the same 128 GB OrbStack host imported a single bucket (`bucket=00.parquet`, **9,954,348 rows**) into a fresh `offers` collection using the streaming `Collection.insert` path and built an IVF_FLAT index. Purpose was to validate the streaming+IVF_FLAT path end-to-end at a smaller scale before committing to a full 159M import with a non-FLAT index. Script: `~/milvus-offers/import_bucket00.py`.
+
+**Wall-clock timings (9.95M rows):**
+
+| Phase                         | Time      |
+|-------------------------------|-----------|
+| Streaming insert (50k batches) | **5.6 min** (sustained 29.4k rows/s) |
+| Flush                         | 1.9 s     |
+| IVF_FLAT build (nlist=4096)   | **15.2 min** |
+| Load into memory              | 7.2 s     |
+| **Total**                     | **~21 min** |
+
+**Insert throughput was ~2× slower than the earlier FLAT streaming baseline (29k vs 45–60k rows/s).** Same machine, same pymilvus, same `Collection.insert` columnar path, same fp16 ndarray input — only the index differs (FLAT was created *after* insert in both runs, so index type shouldn't matter during insert itself). The delta is either per-run variance or cache/competition from other processes on the host; worth re-measuring if streaming speed matters.
+
+**Gotcha — the source parquet has a lying physical type.** The `offer_embedding` column declares `list<float>` (Arrow `float` = float32), but every value round-trips through `fp16` with **zero loss** across a 128k-element sample. The embeddings are fp16 data widened to fp32 on write, so `astype(np.float16)` on insert is *actually* lossless — not "lossy but acceptable". Verify with `np.array_equal(arr, arr.astype(np.float16).astype(np.float32))` before trusting the bucket.
+
+**Gotcha — `Collection.insert` wants `List[np.ndarray]` for `FLOAT16_VECTOR`, not raw bytes.** Passing `[row.tobytes() for row in emb_f16]` fails with `ParamError: Wrong type for vector field: embedding, expect=List<np.ndarray(dtype='float16')>, got=List<class 'bytes'>`. Correct form: `[np.ascontiguousarray(row) for row in emb_f16]` where `emb_f16` is a `(batch, dim)` fp16 ndarray. The pymilvus error message spells the expected type out — trust it.
+
+**Gotcha — `utility.wait_for_index_building_complete` hangs on stale `pending_index_rows`.** At the end of the IVF_FLAT build, milvus reported `state=Finished, indexed_rows == total_rows` within a few minutes. But `pending_index_rows` stayed at **~5.5M for another ~10 minutes** while milvus re-indexed segments that background compaction had merged. The wait helper kept spinning — it's clearly polling `pending_index_rows` rather than `state`. If you want to cut the tail off, skip the helper and check `state == "Finished"` yourself, then call `col.load()`. The re-indexing of compacted segments happens asynchronously and doesn't block searches.
+
+  This matters for the 159M import: if per-bucket compaction tails scale roughly linearly, the IVF_FLAT build tail across 16 buckets could add **tens of minutes of dead wait time** past the point where the index is actually usable. Use bulk insert (which bypasses the growing-segment → compaction path) if you can, or don't block on the helper.
+
+**Shebang and buffering gotchas (not milvus-specific but bit this run):**
+- `#!/usr/bin/env -S uv run --with "pyarrow>=17" ...` fails to parse — `env -S` preserves the literal quotes and uv reads `"pyarrow>=17"` (with quotes) as a package name. Use `--with pyarrow` unquoted.
+- Python `print()` output via `nohup script.py > file 2>&1 &` is **block-buffered** (not line-buffered) because stdout is not a TTY, so the log stays empty for minutes. Fix with `PYTHONUNBUFFERED=1` in the environment or `python3 -u`.
