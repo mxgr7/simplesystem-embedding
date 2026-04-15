@@ -1,0 +1,18 @@
+commit	rows_per_sec	estimated_full_minutes	bench_rows	status	description
+c8a5b16	1167.4	2272.8	100000	keep	baseline (encode_batch_size=128, read_batch_size=1024) [cold run]
+e42ae95	2065.6	1285.2	100000	keep	add --profile flag (warm GPU, true baseline)
+e5164cb	2021.5	1313.8	100000	discard	torch.compile max-autotune (no gain, compile overhead)
+fbdc3c7	1437.7	1844.8	100000	discard	pipeline CPU/GPU overlap (GIL contention, forward 25s→40s)
+201e16f	1837.6	1444.2	100000	discard	pre-tokenize + encode_batch=512 (batch too large, padding within batch)
+21f13f3	2126.8	1247.8	100000	keep	pre-tokenize + numpy pad + encode_batch=128 (tokenize 62% faster, forward 22% faster)
+a03842d	2281.7	1163.4	100000	keep	optimize text rendering (precompile regex, fast-path HTML, drop pd.isna)
+7656987	3340.8	794.4	100000	keep	multiprocess workers (num_workers=4, text render + tokenize in workers)
+b7dc660	3497.1	758.9	100000	keep	numpy-packed token_ids for faster worker→main pickling
+c1ce271	3572.8	743.1	100000	keep	accumulate 4096 rows before encoding, replace profiling with torch.profiler
+a8cfd4d	2317.4	1145.5	100000	discard	ONNX Runtime with CUDA EP (numpy round-trip overhead, lost torch.compile fusions)
+1fdf3c8	3477.6	763.2	100000	discard	background write thread (GIL contention with pad thread, no gain)
+4f1f548	3585.1	740.5	100000	keep	keep embeddings on GPU until unsort, pinned memory for H2D
+4f1f548	4313.4	615.4	200000	keep	(same commit, 200k benchmark)
+4f1f548	5259.1	504.8	1000000	keep	(same commit, 1M benchmark — steady-state throughput)
+c1ce271	3572.8	743.1	100000	keep	accumulate 4096 rows before encoding, replace profiling with torch.profiler
+a8cfd4d	2317.4	1145.5	100000	discard	ONNX Runtime with CUDA EP (numpy round-trip overhead, lost torch.compile fusions)
