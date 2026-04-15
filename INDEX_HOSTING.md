@@ -5,37 +5,44 @@
 Production deployment of Milvus for ~159M offer embeddings (128-dim float16) using Docker Compose on a dedicated Hetzner server.
 
 **Data summary:**
-- ~149.4M records across 15 healthy parquet buckets (bucket=15 is corrupted, needs regeneration)
-- Schema: `row_number` (int64), `id` (varchar), `offer_embedding` (128-dim float16)
+- **159,275,274 records** across 16 parquet buckets (~10M rows each, ~2.7 GB each)
+- Schema: `row_number` (int64), `id` (varchar), `offer_embedding` (128-dim **float16**, stored as `list<halffloat>`)
 - Source data: ~40 GB parquet on disk
+- Embeddings are trained and stored in fp16 — **use `FLOAT16_VECTOR` in Milvus**, not `FLOAT_VECTOR`. Converting to fp32 doubles wire traffic, disk, and RAM for zero precision gain.
+
+This plan was validated end-to-end on a local Apple Silicon Mac (M-series, 128 GB RAM, 16 cores) running Docker via OrbStack. See the "Validation run notes" section at the bottom for concrete numbers and gotchas.
 
 ## Hardware Requirements
 
 ### Memory (critical constraint)
 
-Milvus loads the full collection into RAM for search. Raw vector size: 159M × 128 × 4 bytes (float32) = **~76 GB**.
+Milvus loads the full collection into RAM for search. With `FLOAT16_VECTOR` the raw vector footprint is 159M × 128 × 2 bytes = **~38 GB** — exactly half of the fp32 equivalent.
 
-| Index Type       | Vectors in RAM | Total RAM Needed | Recall@10 |
-|------------------|---------------|------------------|-----------|
-| IVF_FLAT (nlist=4096) | ~76 GB     | **100–120 GB**   | 95–99%    |
-| IVF_PQ (m=16)    | ~2.5 GB       | **16–20 GB**     | 90–95%    |
-| HNSW (M=16)      | ~116 GB       | **140–160 GB**   | 97–99%    |
+| Index Type            | Vectors in RAM (fp16) | Total RAM Needed | Recall@10 | Build cost |
+|-----------------------|-----------------------|------------------|-----------|------------|
+| **FLAT** (brute force)    | ~38 GB            | **50–60 GB**     | 100%      | **zero** — no training, no clustering |
+| IVF_FLAT (nlist=4096) | ~38 GB                | **50–60 GB**     | 95–99%    | kmeans training on each segment |
+| IVF_PQ (m=16)         | ~2.5 GB               | **12–18 GB**     | 90–95%    | kmeans + product quantization training |
+| HNSW (M=16)           | ~58 GB                | **75–90 GB**     | 97–99%    | graph build per segment |
 
 Add ~10–15 GB for Milvus process overhead, etcd, MinIO, OS.
 
+**FLAT is much more attractive at fp16 than the old fp32 math suggested** — the full index fits in 60 GB of RAM, has zero build cost, and gives exact search. Brute-force latency on 159M fp16 vectors with 16 cores is 1–3 seconds per query (SIMD'd by Milvus). For offline analysis, batch scoring, or a warm-up deployment where you haven't committed to a training recipe, FLAT is the right default. Switch to IVF_PQ or HNSW only if you need sub-100ms queries under concurrent load.
+
 ### Disk
 
-| Component                | Size         |
-|--------------------------|-------------|
-| Milvus segments (IVF_FLAT) | 85–100 GB |
-| Milvus segments (IVF_PQ)  | ~10 GB     |
-| etcd + WAL + temp        | ~10 GB      |
-| Docker images            | ~5 GB       |
-| Source parquet (for import) | ~40 GB    |
-| **Total (IVF_FLAT)**     | **~150 GB** |
-| **Total (IVF_PQ)**       | **~65 GB**  |
+| Component                            | Size         |
+|--------------------------------------|-------------|
+| Milvus segments, FLAT/IVF_FLAT (fp16) | ~40 GB     |
+| Milvus segments, IVF_PQ (fp16)       | ~5 GB       |
+| etcd + WAL + temp                    | ~10 GB      |
+| Docker images                        | ~5 GB       |
+| Source parquet (for import)          | ~40 GB      |
+| **Staged parquet for bulk insert**   | **~40 GB**  |
+| **Total (FLAT / IVF_FLAT)**          | **~135 GB** |
+| **Total (IVF_PQ)**                   | **~100 GB** |
 
-NVMe strongly preferred for import speed and segment loading.
+NVMe strongly preferred for import speed and segment loading. **The bulk insert path temporarily doubles the parquet footprint** because files have to be rewritten with a Milvus-compatible schema and staged into MinIO before they're ingested — budget for ~80 GB of parquet on disk during the import window, then the staging copy can be deleted.
 
 ### CPU
 
@@ -46,7 +53,7 @@ Milvus parallelizes search across cores. 8–16 cores is adequate; 32+ for high 
 ### Recommended: AX162-R (dedicated, best value for sustained use)
 
 - AMD Ryzen 9 7950X3D, 16 cores / 32 threads
-- **128 GB DDR5 ECC RAM** — fits IVF_FLAT with ~20 GB headroom
+- **128 GB DDR5 ECC RAM** — fits any index type at fp16 with >60 GB headroom
 - 2× 1.92 TB NVMe SSD
 - ~€82/mo
 - Best price/performance for a long-running deployment
@@ -61,17 +68,19 @@ Milvus parallelizes search across cores. 8–16 cores is adequate; 32+ for high 
 
 ### Budget: CCX53 or EX44 (cloud/dedicated, 128 / 64 GB)
 
-- CCX53: 32 vCPU, **128 GB RAM**, 240 GB NVMe — ~€180/mo (IVF_FLAT, tight)
-- EX44: Intel i5-13500, **64 GB RAM**, 2× 512 GB NVMe — ~€44/mo (IVF_PQ only)
+- CCX53: 32 vCPU, **128 GB RAM**, 240 GB NVMe — ~€180/mo (comfortable for any index type at fp16)
+- EX44: Intel i5-13500, **64 GB RAM**, 2× 512 GB NVMe — ~€44/mo (FLAT/IVF_FLAT tight, IVF_PQ roomy; HNSW out)
 
 ### Summary
 
-| Server   | Type      | RAM    | Cores | Disk      | Price   | Index Types       |
-|----------|-----------|--------|-------|-----------|---------|-------------------|
-| AX162-R  | Dedicated | 128 GB | 16/32 | 2× 1.9 TB | €82/mo  | IVF_FLAT, IVF_PQ  |
-| CCX63    | Cloud     | 192 GB | 48    | 360 GB    | €270/mo | IVF_FLAT, HNSW    |
-| CCX53    | Cloud     | 128 GB | 32    | 240 GB    | €180/mo | IVF_FLAT, IVF_PQ  |
-| EX44     | Dedicated | 64 GB  | 14/20 | 2× 512 GB | €44/mo  | IVF_PQ only       |
+With fp16 vectors the RAM requirement collapses — **even a 64 GB box can host FLAT or IVF_FLAT** for 159M vectors, leaving the EX44 as a real option for any index type.
+
+| Server   | Type      | RAM    | Cores | Disk      | Price   | Index Types at fp16               |
+|----------|-----------|--------|-------|-----------|---------|-----------------------------------|
+| AX162-R  | Dedicated | 128 GB | 16/32 | 2× 1.9 TB | €82/mo  | FLAT, IVF_FLAT, IVF_PQ, HNSW      |
+| CCX63    | Cloud     | 192 GB | 48    | 360 GB    | €270/mo | all of the above + headroom       |
+| CCX53    | Cloud     | 128 GB | 32    | 240 GB    | €180/mo | FLAT, IVF_FLAT, IVF_PQ, HNSW      |
+| EX44     | Dedicated | 64 GB  | 14/20 | 2× 512 GB | €44/mo  | FLAT, IVF_FLAT, IVF_PQ (tight)    |
 
 ## Deployment Plan (Docker Compose)
 
@@ -138,93 +147,124 @@ rsync -avP /home/max/workspaces/simplesystem/data/offers_embedded.parquet/ \
 
 ### Step 4: Create collection and import data
 
+**Use bulk insert, not streaming inserts.** Streaming via `client.insert()` saturates Milvus server-side CPU at ~45–60k rows/s regardless of how many client threads you throw at it — the bottleneck is per-segment index build and WAL write running concurrently with ingestion. For 159M rows that's ~60 minutes wall clock.
+
+Bulk insert via MinIO is ~3x faster (~15 min) because Milvus ingests parquet files directly from object storage into sealed segments, skipping the growing-segment + WAL path entirely.
+
+**The catch**: Milvus v2.6's parquet reader expects `FLOAT16_VECTOR` columns as `list<uint8>` (raw fp16 bytes, 2 × dim bytes per row), *not* the `list<halffloat>` your source parquet almost certainly has. You must rewrite the vector column before upload. It's a mechanical view: `fp16_ndarray.view(np.uint8)` is zero-copy.
+
+Reference implementation in this repo:
+
+- `scripts/milvus_bulk_import.py` — rewrites every `bucket=NN.parquet` to the uint8 schema, uploads to MinIO in parallel, submits one `do_bulk_insert` job per file, polls until completion, creates a FLAT index, loads the collection.
+- `scripts/milvus_verify.py` — stats + random query + self-hit sanity check.
+
+The critical code paths:
+
 ```python
-from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
-import pyarrow.parquet as pq
-import numpy as np
-import os
+# 1. Parquet schema rewrite (list<halffloat>[128] -> list<uint8>[256])
+emb_obj = batch.column("offer_embedding").to_numpy(zero_copy_only=False)
+emb_2d = np.stack(emb_obj)            # (n, 128) float16
+emb_u8 = emb_2d.view(np.uint8)        # (n, 256) uint8, zero-copy
 
-URI = "http://localhost:19530"
-COLLECTION = "offers"
-BATCH_SIZE = 100_000
-DATA_DIR = "/data/offers_embedded.parquet"
+n, width = emb_u8.shape
+flat = pa.array(emb_u8.reshape(-1), type=pa.uint8())
+offsets = pa.array(np.arange(0, n * width + 1, width, dtype=np.int32))
+new_emb = pa.ListArray.from_arrays(offsets, flat)
 
-client = MilvusClient(URI)
+new_batch = pa.RecordBatch.from_arrays(
+    [batch.column("row_number"), batch.column("id"), new_emb],
+    names=["row_number", "id", "offer_embedding"],
+)
 
-# Schema
-fields = [
+# 2. Milvus collection schema
+from pymilvus import (
+    Collection, CollectionSchema, FieldSchema, DataType,
+    connections, utility,
+)
+
+schema = CollectionSchema([
     FieldSchema(name="row_number", dtype=DataType.INT64, is_primary=True),
     FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=256),
-    FieldSchema(name="offer_embedding", dtype=DataType.FLOAT_VECTOR, dim=128),
-]
-schema = CollectionSchema(fields)
+    FieldSchema(name="offer_embedding", dtype=DataType.FLOAT16_VECTOR, dim=128),
+])
+col = Collection("offers", schema=schema)
 
-# Index — IVF_FLAT for best recall
-index_params = client.prepare_index_params()
-index_params.add_index(
+# 3. Upload staged parquet files to Milvus's MinIO bucket (default: "a-bucket")
+import boto3
+from botocore.client import Config
+s3 = boto3.client(
+    "s3",
+    endpoint_url="http://localhost:9010",  # see MinIO port note below
+    aws_access_key_id="minioadmin",
+    aws_secret_access_key="minioadmin",
+    config=Config(signature_version="s3v4"),
+    region_name="us-east-1",
+)
+s3.upload_file(staged_path, "a-bucket", f"bulk_offers/{name}")
+
+# 4. Submit bulk insert jobs (one per file, all run concurrently in Milvus)
+job_id = utility.do_bulk_insert(
+    collection_name="offers",
+    files=[f"bulk_offers/{name}"],
+)
+state = utility.get_bulk_insert_state(job_id)  # poll until Completed or Failed
+
+# 5. FLAT index (zero build cost)
+col.create_index(
     field_name="offer_embedding",
-    index_type="IVF_FLAT",
-    metric_type="COSINE",
-    params={"nlist": 4096},
+    index_params={"index_type": "FLAT", "metric_type": "COSINE"},
 )
-
-client.create_collection(
-    collection_name=COLLECTION,
-    schema=schema,
-    index_params=index_params,
-)
-
-# Import all buckets
-for bucket_file in sorted(os.listdir(DATA_DIR)):
-    if not bucket_file.endswith(".parquet"):
-        continue
-    path = os.path.join(DATA_DIR, bucket_file)
-    try:
-        pf = pq.ParquetFile(path)
-    except Exception as e:
-        print(f"Skipping {bucket_file}: {e}")
-        continue
-
-    for batch in pf.iter_batches(batch_size=BATCH_SIZE):
-        row_numbers = batch.column("row_number").to_pylist()
-        ids = batch.column("id").to_pylist()
-        emb = np.vstack(batch.column("offer_embedding").to_numpy()).astype(np.float32)
-
-        data = [
-            {
-                "row_number": row_numbers[i],
-                "id": ids[i],
-                "offer_embedding": emb[i].tolist(),
-            }
-            for i in range(len(row_numbers))
-        ]
-        client.insert(collection_name=COLLECTION, data=data)
-    print(f"Finished {bucket_file}")
-
-# Load collection for search
-client.load_collection(COLLECTION)
-print("Collection loaded and ready for search")
+col.load()
 ```
 
-Expected import time: ~30–60 minutes for 149M records.
+**Why you need to expose MinIO to the host**: the stock `milvus-standalone-docker-compose.yml` doesn't map MinIO ports externally. To upload from a host-side Python client you need to add `ports: ["9010:9000", "9011:9001"]` to the `minio` service (non-default host ports avoid collisions with other MinIO instances on dev machines). The `minio:9000` internal hostname used by Milvus is untouched.
+
+**Expected wall time** for 159M records on a 16-core box:
+- Parquet rewrite + upload: **3–5 min** (CPU-bound on the conversion; use 8–12 parallel workers)
+- Bulk insert jobs: **10–15 min** (Milvus processes 4 segments concurrently, each ~2.5 GB)
+- Flush + FLAT index create + load: **<1 min**
+- **Total: ~15–20 min**
+
+Streaming insert fallback: if for some reason bulk insert is unavailable (e.g. MinIO not reachable from the importer), use `scripts/milvus_import.py` which uses the columnar `Collection.insert([col1, col2, col3])` API with `FLOAT16_VECTOR` and a 2D fp16 ndarray passed through zero-conversion. Expect ~45–60 min wall time and Milvus pinned at 100% CPU throughout.
 
 ### Step 5: Verify
 
 ```python
-stats = client.get_collection_stats("offers")
-print(stats)  # Should show ~149M entities
-
-# Test search
+from pymilvus import MilvusClient
 import numpy as np
-query = np.random.randn(1, 128).astype(np.float32).tolist()
+
+client = MilvusClient("http://localhost:19530")
+stats = client.get_collection_stats("offers")
+print(stats)  # Should show ~159,275,274 entities
+
+# Query vectors for a FLOAT16_VECTOR field must be fp16 (ndarray with dtype=np.float16)
+q = np.random.randn(128).astype(np.float32)
+q /= np.linalg.norm(q)
+q_f16 = q.astype(np.float16)
+
 results = client.search(
     collection_name="offers",
-    data=query,
+    data=[q_f16],
     limit=10,
-    search_params={"nprobe": 64},
+    search_params={"metric_type": "COSINE", "params": {}},  # FLAT: no nprobe
+    output_fields=["row_number", "id"],
 )
-print(results)
+for hit in results[0]:
+    print(hit["entity"]["row_number"], hit["distance"])
 ```
+
+**Gotcha — fp16 return format**: `client.query(..., output_fields=["offer_embedding"])` returns the fp16 vector as a **single-element list containing raw bytes**, i.e. `[b"\x9f/..."]`, not a numpy array and not a list of floats. To decode for a self-hit sanity check:
+
+```python
+def decode_f16(v):
+    if isinstance(v, list) and len(v) == 1:
+        v = v[0]
+    if isinstance(v, (bytes, bytearray)):
+        return np.frombuffer(v, dtype=np.float16)
+    return np.asarray(v, dtype=np.float16)
+```
+
+See `scripts/milvus_verify.py` for the end-to-end sanity check (stats, random query, self-hit test that pulls a row's own vector and confirms it's the top-1 match with score 1.0).
 
 ### Step 6: Expose for production
 
@@ -236,9 +276,56 @@ Milvus listens on port 19530 (gRPC) and 9091 (metrics). For production:
 
 ## Index Type Decision Guide
 
-| Priority         | Choose       | Why                                     |
-|------------------|--------------|-----------------------------------------|
-| Best recall      | IVF_FLAT     | 95–99% recall, straightforward          |
-| Lowest latency   | HNSW         | ~1–5ms search, needs 160+ GB RAM        |
-| Tight budget     | IVF_PQ       | Fits on 64 GB RAM, 90–95% recall        |
-| GPU acceleration | GPU_IVF_FLAT | Sub-ms search, needs GPU instance        |
+| Priority                        | Choose       | Why                                                          |
+|---------------------------------|--------------|--------------------------------------------------------------|
+| Exact recall, simplest setup    | **FLAT**     | 100% recall, zero build time, ~55 GB RAM at fp16, 1–3s/query |
+| 95–99% recall, fast search      | IVF_FLAT     | ~55 GB RAM at fp16, sub-100ms with `nprobe=64`              |
+| Lowest latency                  | HNSW         | ~1–5ms search, ~75–90 GB RAM at fp16                        |
+| Tight budget / small memory     | IVF_PQ       | ~15 GB RAM, 90–95% recall                                   |
+| GPU acceleration                | GPU_IVF_FLAT | Sub-ms search, needs GPU instance                           |
+
+**Start with FLAT.** It's zero-effort to build, gives exact results, and the fp16 footprint fits on any machine in the options table above. Only upgrade to IVF_PQ or HNSW once you've measured search latency against actual workload and found brute force too slow.
+
+## Validation run notes
+
+The plan above was validated end-to-end on a 128 GB Apple Silicon Mac (16 cores, OrbStack Docker) in April 2026. Key observations:
+
+**Actual timings (159,275,274 rows):**
+- Streaming insert with columnar `Collection.insert` + `FLOAT16_VECTOR`: 45–60k rows/s, ETA ~60 min. Milvus pinned at 1600% CPU throughout; client-side at <10% CPU. Adding client-side parallelism does not help — the bottleneck is Milvus-internal.
+- Streaming insert with row-oriented `MilvusClient.insert` + `FLOAT_VECTOR` + fp32 cast: 42–45k rows/s, ETA ~60 min. The fp32 cast was pure waste.
+- **Bulk insert via MinIO**: 3.5 min to stage all 16 buckets (rewrite fp16 column to uint8 + upload, 4 parallel workers), 13.5 min for Milvus to process all bulk jobs, <1 min to flush + create FLAT index + load. **Total: ~17 min.** Would shave ~2 min by using 8–12 stage workers instead of 4.
+
+**OrbStack / Apple Silicon specifics:**
+- Milvus v2.6.14 has native `linux/arm64` images for the `milvusdb/milvus`, `etcd`, and `minio` containers. Pin `platform: linux/arm64` on each service in docker-compose.yml to avoid Rosetta emulation.
+- OrbStack's VM size caps at the host's physical CPU count (16 on a 16-core machine) and `memory_mib` from `orb config show`. Docker's `Total Memory` reports the *currently ballooned* size, not the cap — don't confuse the two. Our 128 GB host showed 98 GiB at idle and grew to 121 GiB under Milvus load, both within the 124 GiB (126976 MiB) cap.
+- `docker compose down -v` removes the bind-mounted `volumes/` directories. Recreate them with `mkdir -p volumes/{milvus,etcd,minio}` before bringing the stack back up.
+
+**MinIO port collisions:**
+Dev machines often already have something bound to 9000/9001 (another MinIO instance, a local S3 gateway). Our stock compose had to be adjusted to either drop the host port mappings entirely (if you don't need host-side access to this MinIO) or remap to `9010:9000` / `9011:9001` (required for the bulk-insert staging upload). On a dedicated Hetzner server this is a non-issue — ports are free.
+
+**pymilvus quirks hit during validation:**
+1. `FLOAT16_VECTOR` parquet schema for bulk insert must be `list<uint8>` (or `list<item: uint8>`), not `list<halffloat>`. The wrong schema produces `error: schema not equal, err=field 'offer_embedding' type mis-match, expect arrow type 'list<item: uint8, nullable>'`.
+2. `client.query(..., output_fields=["offer_embedding"])` on a `FLOAT16_VECTOR` field returns `[bytes]` (single-element list), not a numpy array. Decode with `np.frombuffer(v[0], dtype=np.float16)`. See `scripts/milvus_verify.py`.
+3. `MilvusClient.insert(data=...)` only accepts row-oriented `list[dict]`. For columnar inserts use the older `Collection.insert([col1, col2, col3])` API — meaningfully faster because it skips per-row dict construction, though the win is modest when Milvus is already CPU-bound.
+4. Bucket file sanity check: our source had eight `.parquet.<hash>` partial-download sidecars at one point. The importer should match `^bucket=\d{2}\.parquet$` explicitly, not just `.endswith(".parquet")`, to avoid picking up temp files.
+
+**Measured search latency (FLAT, 159M × 128 fp16, single client, no concurrent load, 20 trials per cell after 3-query warmup):**
+
+| Setup                        | min     | **p50**     | p95     |
+|------------------------------|---------|-------------|---------|
+| 1 query, limit=5             | 1859 ms | **2415 ms** | 4103 ms |
+| 1 query, limit=10            | 2193 ms | **2486 ms** | 4811 ms |
+| 1 query, limit=100           | 2139 ms | **2541 ms** | 4241 ms |
+| 5 queries batched, limit=5   | 2771 ms | **3338 ms** | 6727 ms |
+| 5 queries batched, limit=100 | 3072 ms | **3670 ms** | 5575 ms |
+
+At p50 ≈ 2.4 s on 159M × 256 B = ~40 GB scanned per query, Milvus achieves ~17 GB/s effective memory throughput through the OrbStack VM — reasonable for a Docker container on Apple Silicon's unified memory. A bare-metal Hetzner AX162-R with DDR5 should roughly double that and land in the 1–1.5 s range per query for the same workload.
+
+Behaviors worth knowing before you design around these numbers:
+
+- **`limit` (top-k) barely affects latency.** top-5 vs top-100 differ by <100 ms because FLAT scans every vector regardless; only the final top-k selection varies, and that's a rounding error next to 159M comparisons.
+- **Batching amortizes extremely well.** 5 queries in ~3.3 s ≈ 660 ms per query — a 3.6× throughput improvement over serial single queries. Milvus reuses each memory scan to score against all query vectors in the batch at once, so after the first query in a batch the rest are effectively free of memory bandwidth cost. For offline scoring or bulk probe workloads, batch 20–100 queries at a time.
+- **Tail latency is ~2× median.** p95 at ~4.1 s vs p50 at ~2.4 s on a shared dev machine. The tail is dominated by background noise (Milvus segment management, OrbStack, macOS scheduling). Expect meaningfully tighter p95 on a dedicated Hetzner box, but **do not** count on FLAT for any SLA tighter than "eventually".
+- **Cold and warm are identical.** Five random fresh query vectors without warmup landed at 2.5–3.2 s, matching the warm distribution. FLAT doesn't benefit from query-side caching — every search pays the full scan cost. This also means the first query after `load_collection()` is not anomalously slow (assuming segments are resident), which makes it easy to reason about production p50.
+
+**Acceptable for batch scoring, offline evaluation, and qualitative probes. Not acceptable for interactive serving.** If you need sub-100 ms queries under concurrent load, rebuild on top of FLAT with IVF_PQ (`nprobe=64`) for ~50–150 ms per query at 90–95% recall, or IVF_FLAT for ~100–300 ms per query at 95–99% recall. Both pay a one-time index build cost you skipped with FLAT, but can be done in place without re-importing.
