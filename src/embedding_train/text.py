@@ -8,6 +8,7 @@ _BR_RE = re.compile(r"(?i)<br\\s*/?>")
 _TAG_RE = re.compile(r"<[^>]+>")
 _SPACE_RE = re.compile(r"[ \t\r\f\v]+")
 _MULTI_NL_RE = re.compile(r"\n{3,}")
+_SPACE_NL_RE = re.compile(r" *\n *")
 
 
 def build_template(template_string):
@@ -32,7 +33,7 @@ def normalize_text(value):
     value = value.replace("\r\n", "\n")
     value = value.strip()
     value = _SPACE_RE.sub(" ", value)
-    value = re.sub(r" *\n *", "\n", value)
+    value = _SPACE_NL_RE.sub("\n", value)
     value = _MULTI_NL_RE.sub("\n\n", value)
     return value.strip()
 
@@ -41,6 +42,10 @@ def clean_html_text(value):
     value = normalize_text(value)
     if not value:
         return ""
+
+    # Fast path: skip HTML cleaning if no HTML-like content
+    if "<" not in value and "&" not in value:
+        return value
 
     value = _BR_RE.sub("\n", value)
     value = _TAG_RE.sub(" ", value)

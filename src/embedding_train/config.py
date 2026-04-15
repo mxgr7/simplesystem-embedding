@@ -26,4 +26,10 @@ def build_config_from_hyperparameters(hyperparameters):
     if GlobalHydra.instance().is_initialized():
         return hparams_cfg
 
-    return OmegaConf.merge(load_base_config(), hparams_cfg)
+    try:
+        return OmegaConf.merge(load_base_config(), hparams_cfg)
+    except Exception:
+        # Checkpoint hyper_parameters may contain keys that no longer exist in
+        # the current base config (or vice-versa). Fall back to the resolved
+        # checkpoint config which is self-contained.
+        return hparams_cfg
