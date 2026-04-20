@@ -56,7 +56,18 @@ CAT_LEVELS = (1, 2, 3, 4, 5)
 CAT_FIELDS = [f"category_l{lvl}" for lvl in CAT_LEVELS]
 SCALAR_ARRAY_FIELDS = ["vendor_ids", "catalog_version_ids", *CAT_FIELDS]
 
-READ_COLUMNS = ["id", "offer_embedding", "categoryPaths", "vendor_listings"]
+NESTED_READ_COLUMNS = ["id", "offer_embedding", "categoryPaths", "vendor_listings"]
+FLAT_READ_COLUMNS = [
+    "id",
+    "offer_embedding",
+    "vendor_ids",
+    "catalog_version_ids",
+    "category_l1",
+    "category_l2",
+    "category_l3",
+    "category_l4",
+    "category_l5",
+]
 
 
 def build_collection(drop_existing: bool) -> Collection:
@@ -74,17 +85,17 @@ def build_collection(drop_existing: bool) -> Collection:
         FieldSchema(name="vendor_ids", dtype=DataType.ARRAY,
                     element_type=DataType.VARCHAR, max_capacity=32, max_length=64),
         FieldSchema(name="catalog_version_ids", dtype=DataType.ARRAY,
-                    element_type=DataType.VARCHAR, max_capacity=1024, max_length=64),
+                    element_type=DataType.VARCHAR, max_capacity=2048, max_length=64),
         FieldSchema(name="category_l1", dtype=DataType.ARRAY,
-                    element_type=DataType.VARCHAR, max_capacity=16, max_length=256),
+                    element_type=DataType.VARCHAR, max_capacity=64, max_length=256),
         FieldSchema(name="category_l2", dtype=DataType.ARRAY,
-                    element_type=DataType.VARCHAR, max_capacity=16, max_length=512),
+                    element_type=DataType.VARCHAR, max_capacity=64, max_length=640),
         FieldSchema(name="category_l3", dtype=DataType.ARRAY,
-                    element_type=DataType.VARCHAR, max_capacity=16, max_length=768),
+                    element_type=DataType.VARCHAR, max_capacity=64, max_length=768),
         FieldSchema(name="category_l4", dtype=DataType.ARRAY,
-                    element_type=DataType.VARCHAR, max_capacity=16, max_length=1024),
+                    element_type=DataType.VARCHAR, max_capacity=64, max_length=1024),
         FieldSchema(name="category_l5", dtype=DataType.ARRAY,
-                    element_type=DataType.VARCHAR, max_capacity=16, max_length=1280),
+                    element_type=DataType.VARCHAR, max_capacity=64, max_length=1280),
     ]
     schema = CollectionSchema(fields, description="Offer embeddings (fp16, 128d) + filter fields")
     col = Collection(COLLECTION, schema=schema)
@@ -145,15 +156,26 @@ def import_bucket(col: Collection, path: Path, batch_size: int) -> tuple[int, fl
     inserted = 0
     t0 = time.time()
 
-    for batch in pf.iter_batches(batch_size=batch_size, columns=READ_COLUMNS):
+    schema_names = set(pf.schema_arrow.names)
+    pre_flat = "vendor_ids" in schema_names
+    columns = FLAT_READ_COLUMNS if pre_flat else NESTED_READ_COLUMNS
+    if pre_flat:
+        print(f"  {path.name}: using pre-flattened columns (skipping flatten)")
+
+    for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
         ids = batch.column("id").to_pylist()
         emb_obj = batch.column("offer_embedding").to_numpy(zero_copy_only=False)
         emb = np.stack(emb_obj)  # (batch, 128) fp16
 
-        vls = batch.column("vendor_listings").to_pylist()
-        cps = batch.column("categoryPaths").to_pylist()
-        vendor_ids, catalog_version_ids = flatten_vendors(vls)
-        cat_levels = flatten_categories(cps)
+        if pre_flat:
+            vendor_ids = batch.column("vendor_ids").to_pylist()
+            catalog_version_ids = batch.column("catalog_version_ids").to_pylist()
+            cat_levels = [batch.column(f).to_pylist() for f in CAT_FIELDS]
+        else:
+            vls = batch.column("vendor_listings").to_pylist()
+            cps = batch.column("categoryPaths").to_pylist()
+            vendor_ids, catalog_version_ids = flatten_vendors(vls)
+            cat_levels = flatten_categories(cps)
 
         col.insert([ids, emb, vendor_ids, catalog_version_ids, *cat_levels])
         inserted += len(ids)
@@ -210,7 +232,7 @@ def main() -> None:
     )
     p.add_argument("--host", default="localhost")
     p.add_argument("--port", default="19530")
-    p.add_argument("--batch-size", type=int, default=100_000)
+    p.add_argument("--batch-size", type=int, default=50_000)
     p.add_argument(
         "--index-type",
         default="IVF_FLAT",
