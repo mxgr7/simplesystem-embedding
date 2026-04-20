@@ -35,8 +35,8 @@ def main() -> None:
     stats = client.get_collection_stats(COLLECTION)
     print(f"Collection stats: {stats}")
 
-    search_params = {"metric_type": "COSINE", "params": {}}
-    output_fields = ["row_number", "id"]
+    search_params = {"metric_type": "COSINE", "params": {"nprobe": 64}}
+    output_fields = ["id"]
 
     print("\n--- Random query ---")
     rng = np.random.default_rng(42)
@@ -52,25 +52,21 @@ def main() -> None:
     )
     for i, hit in enumerate(results[0]):
         ent = hit.get("entity", {})
-        print(
-            f"  #{i+1}: row_number={ent.get('row_number')} "
-            f"id={ent.get('id')} score={hit['distance']:.4f}"
-        )
+        print(f"  #{i+1}: id={ent.get('id')} score={hit['distance']:.4f}")
 
     print("\n--- Self-hit sanity check ---")
     sample = client.query(
         collection_name=COLLECTION,
-        filter="row_number >= 0",
-        output_fields=["row_number", "id", "offer_embedding"],
+        filter='id != ""',
+        output_fields=["id", "offer_embedding"],
         limit=1,
     )
     if not sample:
         raise SystemExit("query returned no rows")
     row = sample[0]
-    target_rn = row["row_number"]
     target_id = row["id"]
     target_vec = decode_f16(row["offer_embedding"])
-    print(f"  Target: row_number={target_rn} id={target_id} vec[0:3]={target_vec[:3]}")
+    print(f"  Target: id={target_id} vec[0:3]={target_vec[:3]}")
 
     results = client.search(
         collection_name=COLLECTION,
@@ -81,18 +77,13 @@ def main() -> None:
     )
     for i, hit in enumerate(results[0]):
         ent = hit.get("entity", {})
-        print(
-            f"  #{i+1}: row_number={ent.get('row_number')} "
-            f"id={ent.get('id')} score={hit['distance']:.4f}"
-        )
+        print(f"  #{i+1}: id={ent.get('id')} score={hit['distance']:.4f}")
     top = results[0][0]
-    top_rn = top.get("entity", {}).get("row_number")
-    if top_rn == target_rn and top["distance"] >= 0.99:
+    top_id = top.get("entity", {}).get("id")
+    if top_id == target_id and top["distance"] >= 0.99:
         print(f"  OK: top-1 self hit with score {top['distance']:.4f}")
     else:
-        print(
-            f"  WARN: top-1 is row_number={top_rn} score={top['distance']:.4f}"
-        )
+        print(f"  WARN: top-1 is id={top_id} score={top['distance']:.4f}")
 
 
 if __name__ == "__main__":
