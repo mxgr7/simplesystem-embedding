@@ -124,6 +124,19 @@ Cold first query ~45 ms → stable ~16 ms after ~20 queries at nprobe=64. **Prim
 - `scripts/milvus_verify.py` — stats + random query + self-hit sanity check (uses `id` as PK).
 - `scripts/milvus_bench.py` — latency/recall bench with `--prime` warmup.
 
+## Monthly cost
+
+Assumed usage schedule: Mon–Fri 07:00–20:00 CET ≈ **282 hrs/month** (13 hrs × 5 days × 52/12). Hetzner is flat-rate regardless of utilization; AWS is billed hourly, so a weekday-only schedule cuts ~60% off a 24/7 bill.
+
+| Platform | Compute | Storage | Monthly total |
+|---|---|---|---|
+| Hetzner Cloud CCX63 equivalent (48 vCPU dedicated / 192 GB) | ~€259 | 512 GB volume ~€22 | **~€280 (~$300)** |
+| AWS eu-central-1 `m6i.12xlarge` + 500 GB gp3, on-demand | 282 hrs × $2.70 ≈ $762 | ~$48 | **~$810** |
+
+A 1yr Compute Savings Plan (no upfront, ~28% off compute) brings AWS to **~$600/month**.
+
+**Hetzner is ~2.7× cheaper** than AWS on-demand for this hardware shape, even after the weekday-only AWS schedule. The tradeoff is operational: bare/dedicated-CPU cloud has no stop/start, slower provisioning, and no managed snapshot/failover story — AWS buys you those at the price premium.
+
 ## Recommendations for next re-import
 
 1. Plan **~110–140 min end-to-end** at 159M; add ~45 min for compaction to settle before clean bench numbers.
