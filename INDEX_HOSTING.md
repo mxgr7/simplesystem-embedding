@@ -357,3 +357,107 @@ A follow-up run on the same 128 GB OrbStack host imported a single bucket (`buck
 **Shebang and buffering gotchas (not milvus-specific but bit this run):**
 - `#!/usr/bin/env -S uv run --with "pyarrow>=17" ...` fails to parse — `env -S` preserves the literal quotes and uv reads `"pyarrow>=17"` (with quotes) as a package name. Use `--with pyarrow` unquoted.
 - Python `print()` output via `nohup script.py > file 2>&1 &` is **block-buffered** (not line-buffered) because stdout is not a TTY, so the log stays empty for minutes. Fix with `PYTHONUNBUFFERED=1` in the environment or `python3 -u`.
+
+### Full 16-bucket IVF_FLAT streaming run (April 2026)
+
+Follow-up to the bucket=00 run above: **all 16 buckets** streamed into the same `offers` collection on the same 128 GB OrbStack host, with the IVF_FLAT index from the bucket=00 run kept in place so that newly-sealed segments would be background-indexed as inserts arrived. Done because the bulk-insert path had been ruled out for this run, so the goal was to validate "streaming + IVF_FLAT, end-to-end, at full scale" and characterize the cost honestly.
+
+Scripts (in `~/milvus-offers/`): `import_all_buckets.py` (resumable per-bucket streamer with state file), `watch_index.py` (post-import poller for index/compaction drain), `verify.py` (load + self-hit + latency).
+
+**Wall-clock timings (159,275,274 rows total, 9.95M per bucket):**
+
+| Phase | Time | Note |
+|---|---|---|
+| Streaming insert, b01–b15 (15 buckets) | **~1h 50min** | 50k batches, sustained ~22k rows/s |
+| Index build, in-progress during inserts + final drain | **~2h 38min** after script end | overlapped partly with inserts; this is the *additional* tail |
+| Load collection into memory | **87.6 s** | once everything was drained |
+| **Total wall time, start to queryable** | **~4.5 hours** | |
+
+**Streaming throughput drifted down as the collection grew** under the existing IVF_FLAT index:
+
+| Bucket | Time | Sustained throughput |
+|---|---|---|
+| b00 (initial run, no pre-existing index) | 5.6 min | **29.4k rows/s** |
+| b01 | 6.4 min | 26.2k rows/s |
+| b02 | 6.8 min | 24.6k rows/s |
+| b03 | 8.8 min | 18.9k rows/s |
+| b04–b06 | 8.2–8.5 min | 19.6–20.7k rows/s |
+| b07–b15 | 6.8–8.3 min | 19.7–24.6k rows/s |
+
+The drop from 29k → ~20k is **CPU contention from the background IVF_FLAT builder** running concurrently with inserts. Milvus pinned at 1600–1800% CPU (essentially saturating all 16 cores via hyperthreads) for almost the entire import. Adding more client-side parallelism would not have helped.
+
+**Memory was the scary part — and the single biggest lesson.** During the import, Milvus RSS grew steadily despite only ~3 GB/bucket of actual vector+id data:
+
+| Snapshot | RSS | Mostly |
+|---|---|---|
+| After b00 import, settled, loaded | 6.3 GB | loaded sealed segments + fixed overhead |
+| Mid-b04 (~38M entities) | 34 GB | + growing segments + compaction scratch + WAL |
+| Mid-b06 (~55M entities) | 44 GB | same trajectory |
+| **Mid-b12 (~113M entities)** | **80.5 GB** | trending toward the 115 GB cgroup limit |
+| **After `col.release()`** (mid-import) | **4.9 GB** | all loaded sealed segments evicted |
+| Post-release b13–b15 import | peaked ~10 GB | minimal overhead now |
+| Post-import idle, unloaded | 2.7 GB | pure datacoord/etcd/coordinator |
+| After final `col.load()` | ~57 GB | all segments back in RAM (vectors+ids+metadata) |
+
+**The single most important takeaway from this run**: ***never keep the collection loaded during a long streaming import***. The loaded sealed segments are mmap'd into Milvus's RSS, which grows linearly with stored data. We hit 80 GB at bucket 12 and were headed for OOM at the 115 GB cgroup limit. Releasing the collection mid-import dropped RSS from **84 GB → 4.9 GB instantly**, freeing ~80 GB of headroom, and the remaining 3 buckets imported uneventfully. The streaming path doesn't need the collection loaded — `col.insert()` writes through the growing-segment path, which is independent of whether sealed segments are queryable. Concrete fix: after the *first* bucket loads the collection (because bucket=00 was a separate run that called `col.load()` at the end), call `col.release()` before starting the multi-bucket streamer. Or have `import_all_buckets.py` call `col.release()` at startup unconditionally.
+
+**Disk usage (MinIO segment store):**
+
+| Snapshot | MinIO size | Notes |
+|---|---|---|
+| After b00 | 19 GB | small because compaction hadn't run aggressively yet |
+| Mid-b04 | 59 GB | |
+| Mid-b06 | 84 GB | |
+| Post-import, after compaction settled | **253 GB** | includes ~418 dropped pre-compaction segment artifacts awaiting MinIO GC |
+
+253 GB at 159M rows is ~1.6 KB/row, dominated by the dropped intermediate compaction artifacts. After full GC the steady-state should drop to roughly 60–80 GB (raw fp16 vectors + indexes + bookkeeping). Plan for **~300 GB of MinIO disk during a streaming import of this size**, dropping to ~80 GB long-term.
+
+**Compaction drain is the long pole.** When the importer finished writing the last bucket, the index reported only **57.2% indexed (91M / 159M)**. The remaining 68M came from compaction churn: Milvus continuously merged small sealed segments into bigger ones, and each merge produced a brand-new segment that needed its IVF_FLAT index rebuilt from scratch. The drain pattern looked like this:
+
+| t (after script exit) | indexed | pending | state |
+|---|---|---|---|
+| 0 min | 91.1M | 83.3M | InProgress |
+| 30 min | ~110M | ~70M | InProgress |
+| 60 min | ~127M | ~80M (oscillating) | InProgress |
+| 90 min | 159.3M (= total) | 38.9M | **Finished** ← but still draining |
+| 120 min | 159.3M | ~28M | Finished |
+| 150 min | 159.3M | ~6M | Finished |
+| **158 min** | **159.3M** | **0** | **Finished — drain complete** |
+
+Confirms the bucket=00 prediction: `wait_for_index_building_complete` would have spun on stale `pending_index_rows` for the entire 158 min. We polled `state == Finished AND pending == 0` ourselves via `watch_index.py`. **The state went to `Finished` ~88 min before pending actually drained**, because compaction kept producing new pending work. If your application can tolerate searches against partially-indexed segments, you can `col.load()` and start serving as soon as `state=Finished` the first time — the remaining "pending" is just compaction polishing that doesn't break correctness.
+
+**Final segment shape after compaction settled:**
+
+- 85 sorted L1 Flushed segments (the live data) — average **~1.87M rows/segment**
+- 297 sorted L1 Dropped + 121 unsorted L1 Dropped = 418 dropped intermediate compaction artifacts awaiting MinIO GC
+- 0 unsorted L1 Flushed (all original streaming-insert segments fully consumed by compaction)
+- 0 growing segments
+
+The 1.87M rows/segment is **below** Milvus's nominal 1 GB / ~4M-row segment target, which means compaction stopped short of full consolidation. That's OK — segment count will continue to drift down slowly during normal operation. For nlist=4096 sizing, 1.87M rows × 1/4096 ≈ 460 vectors per cell, which is healthy (kmeans needs ≥40).
+
+**Search latency, IVF_FLAT, single client, no warmup, 3 trials per nprobe** (compare to FLAT table at line 312 above):
+
+| nprobe | min | **median** | max | vs FLAT p50 |
+|---|---|---|---|---|
+| 16  |  71 ms | **76 ms**  |  76 ms | **32× faster** |
+| 64  | 123 ms | **190 ms** | 653 ms | **13× faster** |
+| 128 | 284 ms | **307 ms** | 473 ms | **8× faster** |
+| 256 | 306 ms | **393 ms** | 436 ms | 6× faster |
+
+FLAT baseline from earlier runs: p50 ~2400 ms. **IVF_FLAT at nprobe=64 is 13× faster than FLAT** on the same machine, which is exactly the speedup the index was supposed to buy. nprobe=16 is 32× faster but worth verifying recall on real query workloads before shipping. p99 was not measured (only 3 trials per nprobe) but the visible tail at nprobe=64 (123→653 ms, 5× spread) suggests OrbStack/macOS scheduling noise dominates as it did in the FLAT runs — expect tighter tails on bare metal.
+
+**Self-hit sanity check passed** at all nprobe values: pulled one row's vector, searched with it, top-1 was the same id with `distance=1.0000`, top-5 was *identical* across nprobe=16/64/128 — meaning the kmeans clustering placed the row's true neighborhood inside the 16 most-probed cells, and increasing nprobe didn't change which neighbors won. Strong signal that nlist=4096 is *not* undersized for our segment shape and that nprobe=16 is a viable starting point if latency matters more than tail recall.
+
+**Resume / kill-cleanly mechanics that worked.** `import_all_buckets.py` writes a state file (`~/milvus-offers/import_state.json`) recording which buckets are complete. State save happens *after* each bucket's `col.flush()`. Kill-between-buckets is safe; kill-mid-bucket leaves the in-flight rows already inserted but with the bucket marked incomplete, so a resume would re-stream the bucket and produce duplicates (because `Collection.insert` does not upsert by PK). The pattern that worked for the mid-import release/restart:
+
+1. Watchdog: `while ! grep -q "\[state\] saved: 13/16" /tmp/milvus-import-all.log; do sleep 0.2; done; kill -TERM <pid>`
+2. The race window between the state-saved log line and the next bucket's first `col.insert()` is microseconds in Python plus ~100 ms to open the next parquet file. With 0.2s polling, the SIGTERM lands inside that window in practice (verified: zero rows of bucket 13 were inserted before the kill).
+3. After kill: `col.release()` to free the loaded segments → restart the same script → it picks up at b13 from the state file.
+
+**If running this again, what we'd change:**
+
+1. **`col.release()` before starting the streamer.** The single biggest fix. Avoids the OOM-near-miss. One line.
+2. **Batch size 100k–200k instead of 50k.** Fewer round-trips, slightly better insert throughput. We saw no signs of memory pressure from larger batches.
+3. **A SIGTERM handler in the streamer** that sets a "stop after current bucket" flag. Removes the race in the watchdog approach and makes `kill -TERM` always safe.
+4. **Don't bother polling `wait_for_index_building_complete`.** It's broken for this workload. Poll `state == "Finished"` directly and accept that compaction will continue in the background.
+5. **For bigger collections (≫160M)**: at this rate of compaction churn, the streaming-insert path becomes increasingly painful. Bulk insert via MinIO (per the earlier section) remains the right answer for production-scale imports. This run is a useful fallback validation for when bulk insert is unavailable, not the recommended path.
