@@ -11,5 +11,6 @@ outputs/
 checkpoints/
 mlruns/
 mlruns-smoke/
+logs/
 
 mlflow.db
