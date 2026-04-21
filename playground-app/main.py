@@ -18,6 +18,7 @@ import logging
 import os
 import secrets
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -239,6 +240,8 @@ async def search(
 
     info = request.app.state.milvus_info
 
+    category_facet = _aggregate_category_l1(hits)
+
     ctx = {
         "query": q,
         "cards": cards,
@@ -246,6 +249,7 @@ async def search(
         "total_hits": total_hits,
         "took_ms": took_ms,
         "embed_ms": int(embed_ms),
+        "category_facet": category_facet,
         "debug": {
             # Query
             "query": q,
@@ -352,6 +356,15 @@ async def offer_details(
         "_offer_modal.html",
         {"offer_id": offer_id, "record": record, "took_ms": took_ms},
     )
+
+
+def _aggregate_category_l1(hits: list[Hit], limit: int = 15) -> list[dict]:
+    counter: Counter[str] = Counter()
+    for hit in hits:
+        for path in hit.category_paths:
+            if path:
+                counter[path[0]] += 1
+    return [{"name": name, "count": count} for name, count in counter.most_common(limit)]
 
 
 def _build_card(hit: Hit) -> dict:

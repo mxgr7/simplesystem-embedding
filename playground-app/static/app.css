@@ -312,11 +312,15 @@ body.is-searching .progress-bar { opacity: 1; }
   display: flex;
   flex-direction: column;
   gap: 4px;
-  opacity: var(--disabled-opacity);
-  pointer-events: none;
 }
 
 .facet { background: transparent; }
+
+.facet:has(.is-placeholder),
+.facet:not(:has(.facet-list)) {
+  opacity: var(--disabled-opacity);
+  pointer-events: none;
+}
 
 .facet-header {
   display: flex;
@@ -340,12 +344,24 @@ body.is-searching .progress-bar { opacity: 1; }
 .facet-list li {
   display: flex;
   justify-content: space-between;
+  gap: 8px;
   padding: 4px 0;
   color: var(--text-mid);
   font-size: 13px;
 }
 
-.facet-count { color: var(--text-light); }
+.facet-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.facet-count {
+  color: var(--text-light);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
 
 .facet-list.is-placeholder li { color: var(--text-light); }
 
