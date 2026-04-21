@@ -17,6 +17,7 @@ services:
     network_mode: host
     volumes:
       - ${OFFERS_PARQUET_DIR}:${OFFERS_PARQUET_DIR}:ro
+      - ${QUERIES_PARQUET_DIR}:${QUERIES_PARQUET_DIR}:ro
       - ../logs:/app/logs
     depends_on:
       - tei

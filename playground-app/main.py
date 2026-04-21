@@ -31,6 +31,7 @@ from fastapi.templating import Jinja2Templates
 from embed_client import EmbedClient
 from milvus_search import OUTPUT_FIELDS, Hit, MilvusSearch
 from offer_lookup import OfferLookup
+from random_query import RandomQueryPicker
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_FILE = BASE_DIR.parent / "logs" / "playground-app.log"
@@ -88,6 +89,7 @@ async def lifespan(app: FastAPI):
     app.state.auth_password = os.environ.get("PLAYGROUND_PASSWORD", "")
     app.state.milvus_info = app.state.milvus.describe()
     app.state.offers = OfferLookup(_required_env("OFFERS_PARQUET_DIR"))
+    app.state.random_query = RandomQueryPicker(_required_env("QUERIES_PARQUET_DIR"))
     try:
         yield
     finally:
@@ -334,6 +336,11 @@ def _render_error(
         "index.html",
         {"query": query, "initial_html": fragment, "css_version": _css_version()},
     )
+
+
+@app.get("/random-query")
+async def random_query(request: Request) -> dict:
+    return {"query": request.app.state.random_query.pick()}
 
 
 @app.get("/offer/{offer_id}", response_class=HTMLResponse)

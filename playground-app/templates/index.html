@@ -32,6 +32,7 @@
             </button>
           </form>
         </div>
+        <button type="button" class="random-query-btn" id="random-query-btn" title="Pick a random query from the unlabeled dataset">Random query</button>
         <div class="topbar-indicator" id="search-indicator" aria-live="polite">
           <span class="spinner" aria-hidden="true"></span>
           <span>Searching…</span>
@@ -142,6 +143,29 @@
         var modal = document.getElementById("offer-modal");
         if (modal && modal.innerHTML.trim() !== "") modal.innerHTML = "";
       });
+
+      var randomBtn = document.getElementById("random-query-btn");
+      if (randomBtn) {
+        randomBtn.addEventListener("click", function () {
+          randomBtn.disabled = true;
+          fetch("/random-query", { headers: { "Accept": "application/json" } })
+            .then(function (r) {
+              if (!r.ok) throw new Error("HTTP " + r.status);
+              return r.json();
+            })
+            .then(function (data) {
+              var input = form.querySelector('input[name="q"]');
+              input.value = data.query;
+              if (window.htmx) window.htmx.trigger(form, "submit");
+            })
+            .catch(function () {
+              showHtmxError("Random query failed", "Could not fetch a random query from the server.");
+            })
+            .finally(function () {
+              randomBtn.disabled = false;
+            });
+        });
+      }
     })();
   </script>
 </body>

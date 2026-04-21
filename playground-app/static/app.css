@@ -180,6 +180,28 @@ button { font: inherit; color: inherit; }
   justify-content: center;
 }
 
+.random-query-btn {
+  flex-shrink: 0;
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text-mid);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.random-query-btn:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.random-query-btn:disabled {
+  opacity: var(--disabled-opacity);
+  cursor: default;
+}
+
 .topbar-indicator {
   position: absolute;
   right: 0;
