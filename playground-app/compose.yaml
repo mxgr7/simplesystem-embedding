@@ -1,0 +1,23 @@
+services:
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    command: ["--model-id", "/model", "--port", "80", "--pooling", "mean"]
+    ports:
+      - "8080:80"
+    volumes:
+      - ${TEI_MODEL_DIR:-/mnt/HC_Volume_105463954/simplesystem/models/useful-cub-58-st}:/model:ro
+    restart: unless-stopped
+
+  playground-app:
+    build:
+      context: ..
+      dockerfile: playground-app/Dockerfile
+    env_file:
+      - .env
+    network_mode: host
+    volumes:
+      - ${OFFERS_PARQUET_DIR}:${OFFERS_PARQUET_DIR}:ro
+      - ../logs:/app/logs
+    depends_on:
+      - tei
+    restart: unless-stopped

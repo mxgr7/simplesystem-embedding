@@ -41,13 +41,7 @@ sentence-transformers directory.
 
 ## Run
 
-1. Install deps at the repo root:
-
-   ```bash
-   uv sync
-   ```
-
-2. Configure the playground:
+1. Configure the playground:
 
    ```bash
    cd playground-app
@@ -55,23 +49,28 @@ sentence-transformers directory.
    # edit .env with your paths / URIs
    ```
 
-3. Start the reference embed server (optional — skip if you already have a
+2. Start the reference embed server (optional — skip if you already have a
    TEI instance on `EMBED_URL`):
 
    ```bash
    cd playground-app
+   uv sync   # one-time, at repo root
    CHECKPOINT=../checkpoints/useful-cub-58/best-step=4880-val_full_catalog_ndcg_at_5=0.7379.ckpt \
      uv run uvicorn reference_embed_server.main:app --host 0.0.0.0 --port 8080
    ```
 
-4. Start the playground:
+3. Start the playground via Docker Compose:
 
    ```bash
    cd playground-app
-   uv run uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+   docker compose up --build
    ```
 
-   Open http://localhost:8000.
+   Open http://localhost:8000. The container uses `network_mode: host`, so
+   `EMBED_URL=http://localhost:8080` and `MILVUS_URI=http://localhost:19530`
+   from `.env` reach services running on the host as-is. `OFFERS_PARQUET_DIR`
+   is bind-mounted read-only at the same path inside the container, and
+   request logs land in `../logs/playground-app.log` on the host.
 
 ## What is vs. isn't wired up
 

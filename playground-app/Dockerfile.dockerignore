@@ -1,0 +1,14 @@
+# Exclude everything by default; allow-list what the image actually needs.
+**
+
+# Root files copied by the Dockerfile.
+!pyproject.toml
+!uv.lock
+!README.md
+
+# Playground app source.
+!playground-app
+playground-app/.env
+playground-app/reference_page.html
+playground-app/**/__pycache__
+playground-app/**/*.pyc
