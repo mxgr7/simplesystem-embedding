@@ -7,7 +7,6 @@ Environment variables:
                        for E5-family models). Default: empty.
   MILVUS_URI           Milvus gRPC URI (e.g. http://localhost:19530).
   MILVUS_COLLECTION    Milvus collection name (default: ``offers``).
-  OFFERS_PARQUET_GLOB  DuckDB-readable glob to the offers parquet files.
   PAGE_SIZE            Results per page / per "load more" click (default: 10).
   SEARCH_TOP_K         Max retrievable hits per query (default: 200).
 """
@@ -25,9 +24,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from catalog import Catalog, Offer
 from embed_client import EmbedClient
-from milvus_search import MilvusSearch
+from milvus_search import Hit, MilvusSearch
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -49,7 +47,6 @@ async def lifespan(app: FastAPI):
         uri=_required_env("MILVUS_URI"),
         collection=os.environ.get("MILVUS_COLLECTION", "offers"),
     )
-    app.state.catalog = Catalog(_required_env("OFFERS_PARQUET_GLOB"))
     app.state.page_size = int(os.environ.get("PAGE_SIZE", "10"))
     app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "200"))
     app.state.query_prefix = os.environ.get("QUERY_PREFIX", "")
@@ -103,14 +100,7 @@ async def search(
 
     visible = hits[: offset + page_size]
     page_slice = visible[offset:]
-
-    offers: dict[str, Offer] = request.app.state.catalog.lookup(
-        [h.id for h in page_slice]
-    )
-    cards = [
-        _build_card(h.id, h.score, offers.get(h.id))
-        for h in page_slice
-    ]
+    cards = [_build_card(h) for h in page_slice]
 
     next_offset = offset + page_size if len(hits) > offset + page_size else None
     total_hits = len(hits)
@@ -139,21 +129,12 @@ async def search(
     )
 
 
-def _build_card(hex_id: str, score: float, offer: Offer | None) -> dict:
-    if offer is None:
-        return {
-            "id": hex_id,
-            "score": score,
-            "name": "(not found in catalog)",
-            "manufacturer": "",
-            "ean": "",
-            "article_number": "",
-        }
+def _build_card(hit: Hit) -> dict:
     return {
-        "id": hex_id,
-        "score": score,
-        "name": offer.name or "(unnamed offer)",
-        "manufacturer": offer.manufacturer,
-        "ean": offer.ean,
-        "article_number": offer.article_number,
+        "id": hit.id,
+        "score": hit.score,
+        "name": hit.name or "(unnamed offer)",
+        "manufacturer": hit.manufacturer,
+        "ean": hit.ean,
+        "article_number": hit.article_number,
     }

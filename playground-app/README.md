@@ -9,9 +9,12 @@ controls rendered but disabled so the wireframe is faithful.
  browser ─▶  playground-app  ───▶  EMBED_URL (TEI-shaped)   │
           │  (FastAPI+htmx)  │    └──────────────────┘
           │                   \──▶  MILVUS_URI              │
-          │                   \──▶  OFFERS_PARQUET_GLOB     │
           └──────────────────────┘
 ```
+
+Card metadata (`name`, `manufacturerName`, `ean`, `article_number`) is read
+directly from the Milvus collection as `output_fields` on the search call —
+no separate catalog lookup.
 
 ## Expected embedding service
 
