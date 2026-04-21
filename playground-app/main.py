@@ -7,8 +7,8 @@ Environment variables:
                        for E5-family models). Default: empty.
   MILVUS_URI           Milvus gRPC URI (e.g. http://localhost:19530).
   MILVUS_COLLECTION    Milvus collection name (default: ``offers``).
-  PAGE_SIZE            Results per page / per "load more" click (default: 100).
-  SEARCH_TOP_K         Max retrievable hits per query (default: 200).
+  PAGE_SIZE            Results per page / per "load more" click (default: 50).
+  SEARCH_TOP_K         Max retrievable hits per query (default: 100).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from embed_client import EmbedClient
-from milvus_search import Hit, MilvusSearch
+from milvus_search import OUTPUT_FIELDS, Hit, MilvusSearch
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -48,8 +48,8 @@ async def lifespan(app: FastAPI):
         uri=_required_env("MILVUS_URI"),
         collection=os.environ.get("MILVUS_COLLECTION", "offers"),
     )
-    app.state.page_size = int(os.environ.get("PAGE_SIZE", "100"))
-    app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "200"))
+    app.state.page_size = int(os.environ.get("PAGE_SIZE", "50"))
+    app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "100"))
     app.state.query_prefix = os.environ.get("QUERY_PREFIX", "")
     app.state.milvus_info = app.state.milvus.describe()
     try:
@@ -167,6 +167,7 @@ async def search(
             "scalar_indexes": info.scalar_indexes,
             # Search-time params actually sent to Milvus
             "search_params": {"metric_type": "COSINE", "params": {}},
+            "output_fields": OUTPUT_FIELDS,
         },
     }
 

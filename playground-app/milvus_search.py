@@ -15,7 +15,7 @@ from pymilvus.exceptions import MilvusException
 
 log = logging.getLogger(__name__)
 
-_OUTPUT_FIELDS = ["id", "name", "manufacturerName", "ean", "article_number"]
+OUTPUT_FIELDS = ["id", "name", "manufacturerName", "ean", "article_number"]
 _VECTOR_FIELD = "offer_embedding"
 
 
@@ -110,7 +110,7 @@ class MilvusSearch:
                 data=[embedding],
                 limit=limit,
                 search_params={"metric_type": "COSINE", "params": {}},
-                output_fields=_OUTPUT_FIELDS,
+                output_fields=OUTPUT_FIELDS,
             )
         except MilvusException as e:
             log.warning("Milvus search failed: %s", e)
