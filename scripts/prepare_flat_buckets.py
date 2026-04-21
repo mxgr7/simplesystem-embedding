@@ -1,13 +1,22 @@
 """Pre-flatten offer bucket parquets into the shape milvus_import.py consumes.
 
-For each source `bucket=NN.parquet` (with nested `categoryPaths` and
-`vendor_listings`), write a new parquet containing:
+For each source `bucket=NN.parquet`, write a new parquet containing:
 
-  id                   : string
-  offer_embedding      : list<halffloat>   (passed through from source)
-  vendor_ids           : list<string>      (distinct)
-  catalog_version_ids  : list<string>      (distinct)
-  category_l1..l5      : list<string>      (distinct, joined prefixes)
+  id                         : string
+  offer_embedding            : list<halffloat>   (passed through via pyarrow)
+  vendor_ids                 : list<string>      (distinct, derived)
+  catalog_version_ids        : list<string>      (distinct, derived)
+  category_l1..l5            : list<string>      (distinct, joined prefixes)
+  name                       : string            (pass-through)
+  manufacturerName           : string            (pass-through)
+  description                : string            (pass-through)
+  ean                        : string            (pass-through)
+  article_number             : string            (pass-through)
+  manufacturerArticleNumber  : string            (pass-through)
+  manufacturerArticleType    : string            (pass-through)
+  n                          : bigint            (pass-through)
+  categoryPaths              : list<struct<elements: list<string>>>  (pass-through)
+  vendor_listings            : list<struct<vendor_id, catalog_version_id>> (pass-through)
 
 Category joining matches `CategoryPath.asStringPath()`:
   - literal U+00A6 (¦) inside elements -> replaced with U+007C (|)
@@ -25,8 +34,10 @@ BY), the script aborts rather than silently scrambling embeddings.
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import duckdb
@@ -69,24 +80,36 @@ SELECT
   {_level_expr(2)},
   {_level_expr(3)},
   {_level_expr(4)},
-  {_level_expr(5)}
+  {_level_expr(5)},
+  name,
+  manufacturerName,
+  description,
+  ean,
+  article_number,
+  manufacturerArticleNumber,
+  manufacturerArticleType,
+  n,
+  categoryPaths,
+  vendor_listings
 FROM read_parquet(?)
 """
 
 
-def process_bucket(src: Path, dst: Path, threads: int) -> None:
-    print(f"--- {src.name} -> {dst.name} ---", flush=True)
+def process_bucket(src: Path, dst: Path, threads: int) -> str:
+    tag = src.name
+    wall0 = time.time()
+    print(f"[{tag}] start (threads={threads})", flush=True)
 
     con = duckdb.connect()
     con.execute(f"PRAGMA threads={threads}")
 
     t0 = time.time()
     flat = con.execute(FLATTEN_SQL, [str(src)]).fetch_arrow_table()
-    print(f"  duckdb flatten: {time.time()-t0:6.1f}s  rows={flat.num_rows:,}", flush=True)
+    print(f"[{tag}] duckdb flatten: {time.time()-t0:6.1f}s  rows={flat.num_rows:,}", flush=True)
 
     t0 = time.time()
     emb = pq.read_table(src, columns=["id", "offer_embedding"])
-    print(f"  pyarrow read:   {time.time()-t0:6.1f}s", flush=True)
+    print(f"[{tag}] pyarrow read:   {time.time()-t0:6.1f}s", flush=True)
 
     if flat.num_rows != emb.num_rows:
         raise RuntimeError(
@@ -97,36 +120,40 @@ def process_bucket(src: Path, dst: Path, threads: int) -> None:
             f"id columns diverged in {src.name}; DuckDB scan reordered rows"
         )
 
+    passthrough = [
+        "vendor_ids",
+        "catalog_version_ids",
+        "category_l1",
+        "category_l2",
+        "category_l3",
+        "category_l4",
+        "category_l5",
+        "name",
+        "manufacturerName",
+        "description",
+        "ean",
+        "article_number",
+        "manufacturerArticleNumber",
+        "manufacturerArticleType",
+        "n",
+        "categoryPaths",
+        "vendor_listings",
+    ]
     combined = pa.Table.from_arrays(
-        [
-            emb.column("id"),
-            emb.column("offer_embedding"),
-            flat.column("vendor_ids"),
-            flat.column("catalog_version_ids"),
-            flat.column("category_l1"),
-            flat.column("category_l2"),
-            flat.column("category_l3"),
-            flat.column("category_l4"),
-            flat.column("category_l5"),
-        ],
-        names=[
-            "id",
-            "offer_embedding",
-            "vendor_ids",
-            "catalog_version_ids",
-            "category_l1",
-            "category_l2",
-            "category_l3",
-            "category_l4",
-            "category_l5",
-        ],
+        [emb.column("id"), emb.column("offer_embedding")]
+        + [flat.column(c) for c in passthrough],
+        names=["id", "offer_embedding", *passthrough],
     )
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     pq.write_table(combined, dst, compression="zstd", compression_level=1)
     size_gb = dst.stat().st_size / 1e9
-    print(f"  write:          {time.time()-t0:6.1f}s  size={size_gb:.2f} GB", flush=True)
+    print(
+        f"[{tag}] write: {time.time()-t0:6.1f}s  size={size_gb:.2f} GB  wall={time.time()-wall0:6.1f}s",
+        flush=True,
+    )
+    return tag
 
 
 def main() -> None:
@@ -138,7 +165,10 @@ def main() -> None:
         default="",
         help="Single bucket filename (e.g., 'bucket=00.parquet'). Default: all.",
     )
-    p.add_argument("--threads", type=int, default=8)
+    p.add_argument("--threads", type=int, default=12,
+                   help="DuckDB threads per worker process.")
+    p.add_argument("--jobs", type=int, default=4,
+                   help="Number of buckets to process concurrently.")
     p.add_argument(
         "--skip-existing", action="store_true",
         help="Skip a bucket if the destination file already exists.",
@@ -153,14 +183,34 @@ def main() -> None:
     if not sources:
         raise SystemExit(f"No bucket=NN.parquet under {args.src_dir}")
 
-    print(f"Flattening {len(sources)} bucket(s) with {args.threads} DuckDB threads")
-    wall = time.time()
+    todo = []
     for src in sources:
         dst = args.dst_dir / src.name
         if args.skip_existing and dst.exists():
-            print(f"--- {src.name}: already exists, skipping ---")
+            print(f"[{src.name}] exists, skipping")
             continue
-        process_bucket(src, dst, args.threads)
+        todo.append((src, dst))
+
+    jobs = max(1, min(args.jobs, len(todo)))
+    print(
+        f"Flattening {len(todo)} bucket(s) with jobs={jobs} × threads={args.threads} "
+        f"(total={jobs * args.threads} nominal cores)",
+        flush=True,
+    )
+    wall = time.time()
+    ctx = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as pool:
+        futs = {
+            pool.submit(process_bucket, src, dst, args.threads): src.name
+            for src, dst in todo
+        }
+        for fut in as_completed(futs):
+            name = futs[fut]
+            try:
+                fut.result()
+            except Exception as exc:
+                print(f"[{name}] FAILED: {exc!r}", flush=True)
+                raise
     print(f"\nTotal wall: {time.time()-wall:.1f}s")
 
 
