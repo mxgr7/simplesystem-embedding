@@ -13,15 +13,17 @@ Environment variables:
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -72,6 +74,8 @@ async def lifespan(app: FastAPI):
     app.state.page_size = int(os.environ.get("PAGE_SIZE", "50"))
     app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "100"))
     app.state.query_prefix = os.environ.get("QUERY_PREFIX", "")
+    app.state.auth_user = os.environ.get("PLAYGROUND_USER", "admin")
+    app.state.auth_password = os.environ.get("PLAYGROUND_PASSWORD", "")
     app.state.milvus_info = app.state.milvus.describe()
     try:
         yield
@@ -99,6 +103,30 @@ async def log_requests(request: Request, call_next):
         elapsed_ms,
     )
     return response
+
+
+@app.middleware("http")
+async def require_basic_auth(request: Request, call_next):
+    password = request.app.state.auth_password
+    if not password:
+        return await call_next(request)
+    user = request.app.state.auth_user
+    header = request.headers.get("authorization", "")
+    ok = False
+    if header[:6].lower() == "basic ":
+        try:
+            decoded = base64.b64decode(header[6:]).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            decoded = ""
+        u, sep, p = decoded.partition(":")
+        if sep:
+            ok = secrets.compare_digest(u, user) and secrets.compare_digest(p, password)
+    if not ok:
+        return Response(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="playground"'},
+        )
+    return await call_next(request)
 
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
