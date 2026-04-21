@@ -7,13 +7,10 @@ there is no separate catalog lookup.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 
+import numpy as np
 from pymilvus import MilvusClient
-from pymilvus.exceptions import MilvusException
-
-log = logging.getLogger(__name__)
 
 OUTPUT_FIELDS = ["id", "name", "manufacturerName", "ean", "article_number"]
 _VECTOR_FIELD = "offer_embedding"
@@ -104,17 +101,16 @@ class MilvusSearch:
         )
 
     def search(self, embedding: list[float], limit: int) -> list[Hit]:
-        try:
-            results = self._client.search(
-                collection_name=self.collection,
-                data=[embedding],
-                limit=limit,
-                search_params={"metric_type": "COSINE", "params": {}},
-                output_fields=OUTPUT_FIELDS,
-            )
-        except MilvusException as e:
-            log.warning("Milvus search failed: %s", e)
-            return []
+        # Collection stores fp16 vectors; matching the query precision flushes
+        # subnormals to 0 instead of tripping Milvus's underflow validator.
+        query = np.asarray(embedding, dtype=np.float16)
+        results = self._client.search(
+            collection_name=self.collection,
+            data=[query],
+            limit=limit,
+            search_params={"metric_type": "COSINE", "params": {}},
+            output_fields=OUTPUT_FIELDS,
+        )
 
         hits = results[0] if results else []
         out: list[Hit] = []
