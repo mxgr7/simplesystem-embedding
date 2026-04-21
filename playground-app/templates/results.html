@@ -1,0 +1,92 @@
+{% if query %}
+<section class="results-page">
+  <div class="results-header">
+    <div>
+      <h1 class="results-title">Results for &ldquo;{{ query }}&rdquo;</h1>
+      <div class="results-sub">
+        Top {{ total_hits }} results
+        {% if took_ms %}<span class="results-timing"> · {{ took_ms }} ms (embed {{ embed_ms }} ms)</span>{% endif %}
+      </div>
+    </div>
+    <div class="results-actions">
+      <button type="button" class="pill-btn" disabled title="Fast order — unavailable">
+        <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M5 3v14M3 5h4M13 3l4 4-4 4M17 7h-6M15 13v4M13 15h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Fast order
+      </button>
+      <button type="button" class="pill-btn" disabled title="OCI catalogues — unavailable">
+        <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7 8h6M7 11h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        OCI catalogues
+      </button>
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside class="sidebar" aria-hidden="true">
+      <section class="facet">
+        <header class="facet-header">
+          <span>Product categories</span>
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 10l5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </header>
+        <ul class="facet-list is-placeholder">
+          <li><span>—</span><span class="facet-count">—</span></li>
+          <li><span>—</span><span class="facet-count">—</span></li>
+          <li><span>—</span><span class="facet-count">—</span></li>
+          <li><span>—</span><span class="facet-count">—</span></li>
+          <li><span>—</span><span class="facet-count">—</span></li>
+        </ul>
+      </section>
+      <section class="facet">
+        <header class="facet-header">
+          <span>S2CLASS</span>
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </header>
+      </section>
+    </aside>
+
+    <div class="main-col">
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <button class="tool-btn icon-only" disabled title="Unavailable" aria-label="Video">
+            <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><rect x="3" y="5" width="10" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m13 9 4-2v6l-4-2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+          </button>
+          {% for label in ["Vendor", "Manufacturer", "Delivery time", "Price"] %}
+          <button class="tool-btn" disabled title="Filter unavailable">
+            {{ label }}
+            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          {% endfor %}
+          <button class="tool-btn tool-btn-plus" disabled title="More filters — unavailable">
+            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            More filters
+          </button>
+        </div>
+        <div class="toolbar-right">
+          <button class="tool-btn" disabled title="Sort — unavailable">
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 5h8M5 8h6M7 11h2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            Relevance
+            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="tool-btn" disabled title="View mode — unavailable (list only)">
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            List
+            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
+
+      {% if cards %}
+      <ul class="cards">
+        {% include "_card_items.html" %}
+      </ul>
+      {% else %}
+      <div class="empty">No results.</div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+{% else %}
+<section class="results-page empty-state">
+  <h1 class="results-title">Search playground</h1>
+  <p class="results-sub">Type a query above to search the Milvus offers index.</p>
+</section>
+{% endif %}

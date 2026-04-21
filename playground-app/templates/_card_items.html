@@ -1,0 +1,66 @@
+{% for c in cards %}
+<li class="card">
+  <div class="card-image">
+    <img src="/static/placeholder.svg" alt="" loading="lazy">
+  </div>
+  <div class="card-body">
+    <div class="card-meta">
+      <span class="brand">{{ c.manufacturer or "—" }}</span>
+      <span class="sep">·</span>
+      <span class="sold-by">Sold by simple system</span>
+    </div>
+    <h2 class="card-title">{{ c.name }}</h2>
+    <dl class="card-stats">
+      <div><dt>Article no.</dt><dd>{{ c.article_number or "—" }}</dd></div>
+      <div><dt>EAN</dt><dd>{{ c.ean or "—" }}</dd></div>
+      <div><dt>Customer article no.</dt><dd>—</dd></div>
+      <div><dt>S2CLASS</dt><dd>—</dd></div>
+    </dl>
+  </div>
+  <div class="card-delivery">
+    <div class="delivery-row placeholder" title="Delivery time — unavailable">
+      <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M2 7h11v7H2zM13 10h4l1 2v2h-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="6" cy="15" r="1.2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="15" cy="15" r="1.2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+      <span>Delivery time: —</span>
+    </div>
+    <div class="stock-row placeholder" title="Stock — unavailable">
+      <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+      <span>Stock unknown</span>
+    </div>
+  </div>
+  <div class="card-price">
+    <div class="price placeholder" title="Price — unavailable">
+      <span class="price-amount">€&nbsp;—</span>
+      <span class="price-unit">per piece</span>
+    </div>
+    <div class="qty">
+      <button type="button" class="qty-btn" disabled aria-label="Decrease">−</button>
+      <input type="text" value="1" disabled>
+      <button type="button" class="qty-btn" disabled aria-label="Increase">+</button>
+    </div>
+    <div class="card-actions">
+      <button type="button" class="icon-btn" disabled title="Datasheet — unavailable" aria-label="Datasheet">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2h6l2 2v10H4z" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6 7h4M6 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+      </button>
+      <button type="button" class="icon-btn" disabled title="Favorite — unavailable" aria-label="Favorite">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m8 13-5-4.5A2.5 2.5 0 1 1 8 5a2.5 2.5 0 1 1 5 3.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+      </button>
+      <button type="button" class="cart-btn" disabled title="Add to cart — unavailable">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 3h2l2 8h7l1.5-6H5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="6" cy="14" r="1" fill="currentColor"/><circle cx="12" cy="14" r="1" fill="currentColor"/></svg>
+        Add to cart
+      </button>
+    </div>
+  </div>
+</li>
+{% endfor %}
+{% if next_offset is not none %}
+<li class="load-more-li" id="load-more">
+  <button type="button"
+          class="load-more-btn"
+          hx-get="/search?q={{ query|urlencode }}&offset={{ next_offset }}"
+          hx-target="#load-more"
+          hx-swap="outerHTML"
+          hx-indicator="#search-indicator">
+    Load more
+  </button>
+</li>
+{% endif %}
