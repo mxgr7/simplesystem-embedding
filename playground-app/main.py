@@ -13,6 +13,7 @@ Environment variables:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -28,6 +29,26 @@ from embed_client import EmbedClient
 from milvus_search import OUTPUT_FIELDS, Hit, MilvusSearch
 
 BASE_DIR = Path(__file__).resolve().parent
+LOG_FILE = BASE_DIR.parent / "logs" / "playground-app.log"
+
+
+def _build_request_logger() -> logging.Logger:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("playground.requests")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if not any(
+        isinstance(h, logging.FileHandler)
+        and Path(getattr(h, "baseFilename", "")) == LOG_FILE
+        for h in logger.handlers
+    ):
+        handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        logger.addHandler(handler)
+    return logger
+
+
+request_logger = _build_request_logger()
 
 
 def _required_env(name: str) -> str:
@@ -59,6 +80,27 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    query = f"?{request.url.query}" if request.url.query else ""
+    client = request.client.host if request.client else "-"
+    request_logger.info(
+        "%s %s %s%s %d %.1fms",
+        client,
+        request.method,
+        request.url.path,
+        query,
+        response.status_code,
+        elapsed_ms,
+    )
+    return response
+
+
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 

@@ -13,3 +13,5 @@ mlruns/
 mlruns-smoke/
 
 mlflow.db
+
+logs/playground-app.log
