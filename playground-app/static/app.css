@@ -3,7 +3,9 @@
   --blue: #276EF1;
   --blue-hover: #1d5cd6;
   --green: #05944F;
-  --topbar-bg: #dfe6ef;
+  --topbar-bg: #ffffff;
+  --input-bg: #eef2f8;
+  --input-bg-focus: #dfe6ef;
   --page-bg: #ffffff;
   --card-bg: #ffffff;
   --border: #e3e8f0;
@@ -38,6 +40,7 @@ button { font: inherit; color: inherit; }
   position: sticky;
   top: 0;
   z-index: 10;
+  border-bottom: 1px solid var(--border);
 }
 
 .topbar-inner {
@@ -45,20 +48,41 @@ button { font: inherit; color: inherit; }
   margin: 0 auto;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 12px;
+  position: relative;
+}
+
+.search-cluster {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  max-width: 720px;
+  height: 40px;
+  background: var(--input-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.search-cluster:focus-within {
+  background: var(--input-bg-focus);
+}
+
+.search-cluster:focus-within .catalog-pill {
+  border-right-color: var(--border-strong);
 }
 
 .catalog-pill {
-  background: #ffffff;
-  border: 1px solid var(--border-strong);
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border-strong);
   color: var(--navy);
-  border-radius: 6px;
   padding: 0 14px;
-  height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   min-width: 150px;
   font-weight: 500;
   opacity: var(--disabled-opacity);
@@ -68,24 +92,18 @@ button { font: inherit; color: inherit; }
 .catalog-pill svg { color: var(--chevron); }
 
 .search-box {
-  flex: 0 1 540px;
-  background: #ffffff;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
   padding: 0 14px;
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 40px;
-}
-
-.search-box:focus-within {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(39, 110, 241, 0.18);
 }
 
 .search-box input {
   flex: 1;
+  min-width: 0;
   border: 0;
   outline: 0;
   background: transparent;
@@ -107,6 +125,8 @@ button { font: inherit; color: inherit; }
 }
 
 .topbar-indicator {
+  position: absolute;
+  right: 0;
   color: var(--text-mid);
   font-size: 13px;
   opacity: 0;
@@ -533,4 +553,105 @@ button { font: inherit; color: inherit; }
   .card-delivery { grid-area: delivery; }
   .card-price { grid-area: price; align-items: stretch; }
   .price { text-align: left; }
+}
+
+/* --- Debug panel (playground-only) ------------------------------------- */
+
+.debug-panel {
+  position: fixed;
+  top: 140px;
+  right: 20px;
+  width: 300px;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+  background: #0f172a;
+  color: #cbd5e1;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 10px 12px 12px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  z-index: 20;
+}
+
+.debug-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #1e293b;
+  position: sticky;
+  top: -10px;
+  background: #0f172a;
+  margin-top: -10px;
+  padding-top: 10px;
+}
+
+.debug-section { margin-top: 8px; }
+.debug-section:first-of-type { margin-top: 0; }
+
+.debug-section h3 {
+  margin: 0 0 4px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #64748b;
+}
+
+.debug-title {
+  color: #f1f5f9;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
+.debug-badge {
+  color: #7dd3fc;
+  background: rgba(125, 211, 252, 0.1);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.debug-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: 2px 10px;
+}
+
+.debug-grid dt {
+  color: #64748b;
+  margin: 0;
+}
+
+.debug-grid dd {
+  margin: 0;
+  color: #e2e8f0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+}
+
+.debug-grid dd b {
+  color: #f1f5f9;
+  font-weight: 600;
+}
+
+.debug-breakdown {
+  display: block;
+  color: #64748b;
+  font-size: 10px;
+  margin-top: 1px;
+}
+
+@media (max-width: 1100px) {
+  .debug-panel { display: none; }
 }

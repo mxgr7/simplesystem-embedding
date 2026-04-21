@@ -1,0 +1,75 @@
+{% if debug %}
+<aside class="debug-panel" aria-label="Playground debug info">
+  <header class="debug-header">
+    <span class="debug-title">Playground debug</span>
+    <span class="debug-badge">{{ "{:,}".format(debug.hits) }} hits</span>
+  </header>
+
+  <section class="debug-section">
+    <h3>Timing</h3>
+    <dl class="debug-grid">
+      <dt>total</dt>
+      <dd>
+        <b>{{ debug.took_ms }} ms</b>
+        <span class="debug-breakdown">
+          embed {{ debug.embed_ms }} · milvus {{ debug.milvus_ms }} · other {{ debug.other_ms }}
+        </span>
+      </dd>
+    </dl>
+  </section>
+
+  <section class="debug-section">
+    <h3>Query</h3>
+    <dl class="debug-grid">
+      <dt>raw</dt><dd>{{ debug.query }}</dd>
+      <dt>rendered</dt><dd>{{ debug.rendered_query }}</dd>
+      <dt>prefix</dt><dd>{{ debug.query_prefix or "∅" }}</dd>
+      <dt>embed url</dt><dd>{{ debug.embed_url }}</dd>
+      <dt>embed dim</dt><dd>{{ debug.embed_dim }}</dd>
+      <dt>top k</dt><dd>{{ debug.top_k }}</dd>
+      <dt>search params</dt><dd>{{ debug.search_params }}</dd>
+    </dl>
+  </section>
+
+  <section class="debug-section">
+    <h3>Results</h3>
+    <dl class="debug-grid">
+      <dt>scores</dt>
+      <dd>
+        {% if debug.top_score is not none %}
+          top {{ debug.top_score }} · last {{ debug.last_score }}
+        {% else %}—{% endif %}
+      </dd>
+    </dl>
+  </section>
+
+  <section class="debug-section">
+    <h3>Collection</h3>
+    <dl class="debug-grid">
+      <dt>uri</dt><dd>{{ debug.milvus_uri }}</dd>
+      <dt>name</dt><dd>{{ debug.collection }}</dd>
+      <dt>rows</dt><dd>{{ "{:,}".format(debug.row_count) }}</dd>
+      <dt>load</dt><dd>{{ debug.load_state }}</dd>
+      <dt>partitions</dt><dd>{{ debug.partitions }} · {{ debug.shards }} shard{{ "s" if debug.shards != 1 else "" }}</dd>
+    </dl>
+  </section>
+
+  <section class="debug-section">
+    <h3>Index</h3>
+    <dl class="debug-grid">
+      <dt>vector</dt><dd>{{ debug.vector_field }} · {{ debug.vector_dim }}d {{ debug.vector_dtype }}</dd>
+      <dt>type</dt><dd>{{ debug.index_type }} · {{ debug.metric_type }}</dd>
+      {% if debug.index_params %}
+      <dt>params</dt>
+      <dd>{% for k, v in debug.index_params.items() %}{{ k }}={{ v }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+      {% endif %}
+      <dt>built</dt>
+      <dd>{{ debug.index_state }} · {{ "{:,}".format(debug.indexed_rows) }} rows</dd>
+      {% if debug.scalar_indexes %}
+      <dt>scalar idx</dt>
+      <dd>{{ debug.scalar_indexes|join(', ') }}</dd>
+      {% endif %}
+    </dl>
+  </section>
+</aside>
+{% endif %}

@@ -7,7 +7,7 @@ Environment variables:
                        for E5-family models). Default: empty.
   MILVUS_URI           Milvus gRPC URI (e.g. http://localhost:19530).
   MILVUS_COLLECTION    Milvus collection name (default: ``offers``).
-  PAGE_SIZE            Results per page / per "load more" click (default: 10).
+  PAGE_SIZE            Results per page / per "load more" click (default: 100).
   SEARCH_TOP_K         Max retrievable hits per query (default: 200).
 """
 
@@ -42,14 +42,16 @@ async def lifespan(app: FastAPI):
     load_dotenv(BASE_DIR / ".env")
     load_dotenv(BASE_DIR.parent / ".env")
 
-    app.state.embed = EmbedClient(_required_env("EMBED_URL"))
+    app.state.embed_url = _required_env("EMBED_URL")
+    app.state.embed = EmbedClient(app.state.embed_url)
     app.state.milvus = MilvusSearch(
         uri=_required_env("MILVUS_URI"),
         collection=os.environ.get("MILVUS_COLLECTION", "offers"),
     )
-    app.state.page_size = int(os.environ.get("PAGE_SIZE", "10"))
+    app.state.page_size = int(os.environ.get("PAGE_SIZE", "100"))
     app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "200"))
     app.state.query_prefix = os.environ.get("QUERY_PREFIX", "")
+    app.state.milvus_info = app.state.milvus.describe()
     try:
         yield
     finally:
@@ -102,7 +104,10 @@ async def search(
     t0 = time.perf_counter()
     vectors = await request.app.state.embed.embed([rendered_query])
     embed_ms = (time.perf_counter() - t0) * 1000
+
+    t0 = time.perf_counter()
     hits = request.app.state.milvus.search(vectors[0], limit=top_k) if vectors else []
+    milvus_ms = (time.perf_counter() - t0) * 1000
 
     visible = hits[: offset + page_size]
     page_slice = visible[offset:]
@@ -112,6 +117,11 @@ async def search(
     total_hits = len(hits)
     took_ms = int((time.perf_counter() - t_total) * 1000)
 
+    top_score = hits[0].score if hits else None
+    last_score = hits[-1].score if hits else None
+
+    info = request.app.state.milvus_info
+
     ctx = {
         "query": q,
         "cards": cards,
@@ -119,6 +129,45 @@ async def search(
         "total_hits": total_hits,
         "took_ms": took_ms,
         "embed_ms": int(embed_ms),
+        "debug": {
+            # Query
+            "query": q,
+            "rendered_query": rendered_query,
+            "query_prefix": request.app.state.query_prefix,
+            "embed_url": request.app.state.embed_url,
+            "embed_dim": len(vectors[0]) if vectors else 0,
+            "offset": offset,
+            "page_size": page_size,
+            "top_k": top_k,
+            # Timing
+            "took_ms": took_ms,
+            "embed_ms": round(embed_ms, 1),
+            "milvus_ms": round(milvus_ms, 1),
+            "other_ms": round(max(0.0, took_ms - embed_ms - milvus_ms), 1),
+            # Results
+            "hits": total_hits,
+            "shown": len(cards),
+            "top_score": round(top_score, 4) if top_score is not None else None,
+            "last_score": round(last_score, 4) if last_score is not None else None,
+            # Milvus static info
+            "milvus_uri": info.uri,
+            "collection": info.collection,
+            "row_count": info.row_count,
+            "load_state": info.load_state,
+            "partitions": info.num_partitions,
+            "shards": info.num_shards,
+            "vector_field": info.vector_field,
+            "vector_dim": info.vector_dim,
+            "vector_dtype": info.vector_dtype,
+            "index_type": info.index_type,
+            "metric_type": info.metric_type,
+            "index_params": info.index_params,
+            "indexed_rows": info.indexed_rows,
+            "index_state": info.index_state,
+            "scalar_indexes": info.scalar_indexes,
+            # Search-time params actually sent to Milvus
+            "search_params": {"metric_type": "COSINE", "params": {}},
+        },
     }
 
     if is_load_more:
