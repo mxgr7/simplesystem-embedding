@@ -1,0 +1,19 @@
+Found 16 bucket(s) to import:
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=00.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=01.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=02.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=03.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=04.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=05.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=06.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=07.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=08.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=09.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=10.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=11.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=12.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=13.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=14.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=15.parquet
+Staging 16 bucket(s) through /tmp/milvus_bulk_stage (workers=16)
+  bucket=00.parquet: convert=131.0s upload=  8.2s size=5.40 GB

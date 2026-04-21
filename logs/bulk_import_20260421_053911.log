@@ -1,0 +1,40 @@
+Found 16 bucket(s) to import:
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=00.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=01.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=02.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=03.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=04.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=05.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=06.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=07.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=08.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=09.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=10.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=11.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=12.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=13.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=14.parquet
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=15.parquet
+Created collection 'offers' with 17 fields
+  - id                           VARCHAR             mmap=False
+  - offer_embedding              FLOAT16_VECTOR      mmap=False
+  - vendor_ids                   ARRAY               mmap=False
+  - catalog_version_ids          ARRAY               mmap=False
+  - category_l1                  ARRAY               mmap=True
+  - category_l2                  ARRAY               mmap=True
+  - category_l3                  ARRAY               mmap=True
+  - category_l4                  ARRAY               mmap=True
+  - category_l5                  ARRAY               mmap=True
+  - name                         VARCHAR             mmap=True
+  - manufacturerName             VARCHAR             mmap=True
+  - description                  VARCHAR             mmap=True
+  - ean                          VARCHAR             mmap=True
+  - article_number               VARCHAR             mmap=True
+  - manufacturerArticleNumber    VARCHAR             mmap=True
+  - manufacturerArticleType      VARCHAR             mmap=True
+  - n                            INT64               mmap=True
+
+Defining HNSW index on offer_embedding (M=16, efConstruction=360)...
+Defining INVERTED index on vendor_ids...
+Defining INVERTED index on catalog_version_ids...
+Staging + submitting 16 bucket(s) through /tmp/milvus_bulk_stage (workers=16) — pipelined

@@ -1,0 +1,10 @@
+Flattening 16 bucket(s) with 8 DuckDB threads
+--- bucket=00.parquet -> bucket=00.parquet ---
+/home/max/simplesystem-embedding/scripts/prepare_flat_buckets.py:103: DeprecationWarning: fetch_arrow_table() is deprecated, use to_arrow_table() instead.
+  flat = con.execute(FLATTEN_SQL, [str(src)]).fetch_arrow_table()
+  duckdb flatten:   95.0s  rows=9,954,348
+  pyarrow read:     20.3s
+  write:            78.0s  size=5.75 GB
+--- bucket=01.parquet -> bucket=01.parquet ---
+  duckdb flatten:   92.9s  rows=9,951,864
+  pyarrow read:     20.1s

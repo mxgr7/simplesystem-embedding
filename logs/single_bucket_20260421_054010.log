@@ -1,0 +1,134 @@
+Found 1 bucket(s) to import:
+  - /mnt/HC_Volume_105463954/simplesystem/data/offers_flat.parquet/bucket=00.parquet
+Created collection 'offers' with 17 fields
+  - id                           VARCHAR             mmap=False
+  - offer_embedding              FLOAT16_VECTOR      mmap=False
+  - vendor_ids                   ARRAY               mmap=False
+  - catalog_version_ids          ARRAY               mmap=False
+  - category_l1                  ARRAY               mmap=True
+  - category_l2                  ARRAY               mmap=True
+  - category_l3                  ARRAY               mmap=True
+  - category_l4                  ARRAY               mmap=True
+  - category_l5                  ARRAY               mmap=True
+  - name                         VARCHAR             mmap=True
+  - manufacturerName             VARCHAR             mmap=True
+  - description                  VARCHAR             mmap=True
+  - ean                          VARCHAR             mmap=True
+  - article_number               VARCHAR             mmap=True
+  - manufacturerArticleNumber    VARCHAR             mmap=True
+  - manufacturerArticleType      VARCHAR             mmap=True
+  - n                            INT64               mmap=True
+
+Defining HNSW index on offer_embedding (M=16, efConstruction=360)...
+Defining INVERTED index on vendor_ids...
+Defining INVERTED index on catalog_version_ids...
+Staging + submitting 1 bucket(s) through /tmp/milvus_bulk_stage (workers=16) — pipelined
+  bucket=00.parquet: convert=138.2s upload= 10.9s size=5.40 GB
+  [ 150s] bucket=00.parquet: staged+submitted -> job 465764349454321523
+All staging + submission done in 150.7s
+
+Waiting for bulk-insert jobs to complete (includes IndexBuilding)...
+  [   0s] pending: bucket=00.parquet=0%
+  [  10s] pending: bucket=00.parquet=10%
+  [  20s] pending: bucket=00.parquet=10%
+  [  30s] pending: bucket=00.parquet=10%
+  [  40s] pending: bucket=00.parquet=10%
+  [  50s] pending: bucket=00.parquet=10%
+  [  60s] pending: bucket=00.parquet=10%
+  [  70s] pending: bucket=00.parquet=10%
+  [  80s] pending: bucket=00.parquet=10%
+  [  90s] pending: bucket=00.parquet=10%
+  [ 100s] pending: bucket=00.parquet=10%
+  [ 110s] pending: bucket=00.parquet=10%
+  [ 120s] pending: bucket=00.parquet=10%
+  [ 130s] pending: bucket=00.parquet=10%
+  [ 140s] pending: bucket=00.parquet=10%
+  [ 150s] pending: bucket=00.parquet=10%
+  [ 160s] pending: bucket=00.parquet=40%
+  [ 170s] pending: bucket=00.parquet=40%
+  [ 180s] pending: bucket=00.parquet=40%
+  [ 190s] pending: bucket=00.parquet=40%
+  [ 200s] pending: bucket=00.parquet=40%
+  [ 210s] pending: bucket=00.parquet=40%
+  [ 220s] pending: bucket=00.parquet=40%
+  [ 230s] pending: bucket=00.parquet=40%
+  [ 240s] pending: bucket=00.parquet=40%
+  [ 250s] pending: bucket=00.parquet=40%
+  [ 260s] pending: bucket=00.parquet=40%
+  [ 270s] pending: bucket=00.parquet=40%
+  [ 280s] pending: bucket=00.parquet=40%
+  [ 290s] pending: bucket=00.parquet=40%
+  [ 300s] pending: bucket=00.parquet=40%
+  [ 310s] pending: bucket=00.parquet=40%
+  [ 320s] pending: bucket=00.parquet=40%
+  [ 330s] pending: bucket=00.parquet=40%
+  [ 340s] pending: bucket=00.parquet=40%
+  [ 350s] pending: bucket=00.parquet=40%
+  [ 360s] pending: bucket=00.parquet=40%
+  [ 370s] pending: bucket=00.parquet=70%
+  [ 380s] pending: bucket=00.parquet=70%
+  [ 390s] pending: bucket=00.parquet=70%
+  [ 400s] pending: bucket=00.parquet=70%
+  [ 410s] pending: bucket=00.parquet=75%
+  [ 420s] pending: bucket=00.parquet=77%
+  [ 430s] pending: bucket=00.parquet=77%
+  [ 440s] pending: bucket=00.parquet=77%
+  [ 450s] pending: bucket=00.parquet=77%
+  [ 460s] pending: bucket=00.parquet=77%
+  [ 470s] pending: bucket=00.parquet=80%
+  [ 480s] pending: bucket=00.parquet=80%
+  [ 490s] pending: bucket=00.parquet=80%
+  [ 500s] pending: bucket=00.parquet=80%
+  [ 510s] pending: bucket=00.parquet=81%
+  [ 520s] pending: bucket=00.parquet=82%
+  [ 530s] pending: bucket=00.parquet=82%
+  [ 540s] pending: bucket=00.parquet=82%
+  [ 550s] pending: bucket=00.parquet=82%
+  [ 560s] pending: bucket=00.parquet=82%
+  [ 570s] pending: bucket=00.parquet=82%
+  [ 580s] pending: bucket=00.parquet=82%
+  [ 590s] pending: bucket=00.parquet=82%
+  [ 600s] pending: bucket=00.parquet=82%
+  [ 610s] pending: bucket=00.parquet=83%
+  [ 620s] pending: bucket=00.parquet=84%
+  [ 630s] pending: bucket=00.parquet=84%
+  [ 640s] pending: bucket=00.parquet=85%
+  [ 650s] pending: bucket=00.parquet=85%
+  [ 660s] pending: bucket=00.parquet=85%
+  [ 670s] pending: bucket=00.parquet=85%
+  [ 680s] pending: bucket=00.parquet=85%
+  [ 690s] pending: bucket=00.parquet=85%
+  [ 700s] pending: bucket=00.parquet=85%
+  [ 710s] pending: bucket=00.parquet=85%
+  [ 720s] pending: bucket=00.parquet=85%
+  [ 730s] pending: bucket=00.parquet=86%
+  [ 740s] pending: bucket=00.parquet=87%
+  [ 750s] pending: bucket=00.parquet=88%
+  [ 760s] pending: bucket=00.parquet=88%
+  [ 770s] pending: bucket=00.parquet=88%
+  [ 780s] pending: bucket=00.parquet=88%
+  [ 790s] pending: bucket=00.parquet=89%
+  [ 800s] bucket=00.parquet: Completed (9,954,348 rows)
+
+Flushing... (stage+submit: 150.7s, ingest wait: 800.4s, rows: 9,954,348)
+  flush: 0.8s  num_entities=9,954,348
+
+Verifying index build state...
+  [offer_embedding] t=   0.0s  state=Finished  indexed=9,954,348/9,954,348  pending=0
+  [vendor_ids] t=   0.0s  state=Finished  indexed=9,954,348/9,954,348  pending=0
+  [catalog_version_ids] t=   0.0s  state=Finished  indexed=9,954,348/9,954,348  pending=0
+  offer_embedding: indexed 9,954,348/9,954,348 ✓
+
+Loading collection...
+
+=== summary ===
+  rows:              9,954,348
+  stage+submit:        150.7s  (pipelined)
+  ingest wait:         800.4s  (12,436 rows/s post-submit)
+  flush:                 0.8s
+  vector index:          0.0s  (HNSW M=16 efConstruction=360)
+  idx vendor_ids                0.0s
+  idx catalog_version_ids       0.0s
+  load:                 19.6s
+  total wall:          973.5s  (16.2 min)
+  num_entities:      9,954,348
