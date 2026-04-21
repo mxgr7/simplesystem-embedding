@@ -4,17 +4,17 @@
     <div>
       <h1 class="results-title">Results for &ldquo;{{ query }}&rdquo;</h1>
       <div class="results-sub">
-        Top {{ total_hits }} results
+        {{ total_hits }} articles
         {% if took_ms %}<span class="results-timing"> · {{ took_ms }} ms (embed {{ embed_ms }} ms)</span>{% endif %}
       </div>
     </div>
     <div class="results-actions">
       <button type="button" class="pill-btn" disabled title="Fast order — unavailable">
-        <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M5 3v14M3 5h4M13 3l4 4-4 4M17 7h-6M15 13v4M13 15h4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M5 3v14M3 5h4M13 3l4 4-4 4M17 7h-6M15 13v4M13 15h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Fast order
       </button>
       <button type="button" class="pill-btn" disabled title="OCI catalogues — unavailable">
-        <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7 8h6M7 11h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M16 3H10.4L2 11.4 7.6 17 16 8.6V3z" fill="currentColor" opacity=".9"/><circle cx="13.2" cy="6.3" r="1.2" fill="#fff"/></svg>
         OCI catalogues
       </button>
     </div>
@@ -25,7 +25,7 @@
       <section class="facet">
         <header class="facet-header">
           <span>Product categories</span>
-          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 10l5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 10l5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </header>
         <ul class="facet-list is-placeholder">
           <li><span>—</span><span class="facet-count">—</span></li>
@@ -38,7 +38,7 @@
       <section class="facet">
         <header class="facet-header">
           <span>S2CLASS</span>
-          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </header>
       </section>
     </aside>
@@ -47,29 +47,32 @@
       <div class="toolbar">
         <div class="toolbar-left">
           <button class="tool-btn icon-only" disabled title="Unavailable" aria-label="Video">
-            <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><rect x="3" y="5" width="10" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m13 9 4-2v6l-4-2z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="4 3"/><circle cx="10" cy="10" r="2" fill="currentColor"/></svg>
+          </button>
+          <button class="tool-btn icon-only" disabled title="Unavailable" aria-label="Marketplace">
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M3 16v-5h2v4h10v-4h2v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" fill="currentColor"/><path d="M4.8 3h10.4c1 0 1.85.74 2.1 1.8L18 7.7V8c0 1-.7 1.8-1.6 1.8S14.8 9 14.8 8c0 1-.7 1.8-1.6 1.8S11.6 9 11.6 8c0 1-.7 1.8-1.6 1.8S8.4 9 8.4 8c0 1-.7 1.8-1.6 1.8S5.2 9 5.2 8c0 1-.7 1.8-1.6 1.8S2 9 2 8v-.3l.7-2.9A2.14 2.14 0 0 1 4.8 3z" fill="currentColor"/></svg>
           </button>
           {% for label in ["Vendor", "Manufacturer", "Delivery time", "Price"] %}
           <button class="tool-btn" disabled title="Filter unavailable">
             {{ label }}
-            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           {% endfor %}
           <button class="tool-btn tool-btn-plus" disabled title="More filters — unavailable">
-            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             More filters
           </button>
         </div>
         <div class="toolbar-right">
           <button class="tool-btn" disabled title="Sort — unavailable">
-            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 5h8M5 8h6M7 11h2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <svg class="accent" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M3 4h14M3 8h11M3 12h8M3 16h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             Relevance
-            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           <button class="tool-btn" disabled title="View mode — unavailable (list only)">
-            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 4h10M3 8h10M3 12h10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <svg class="accent" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M3 4h14M3 8h14M3 12h14M3 16h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             List
-            <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
         </div>
       </div>

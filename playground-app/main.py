@@ -61,10 +61,16 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 
+def _css_version() -> str:
+    return str(int((BASE_DIR / "static" / "app.css").stat().st_mtime))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
-        request, "index.html", {"query": "", "initial_html": ""}
+        request,
+        "index.html",
+        {"query": "", "initial_html": "", "css_version": _css_version()},
     )
 
 
@@ -125,7 +131,7 @@ async def search(
     return templates.TemplateResponse(
         request,
         "index.html",
-        {"query": q, "initial_html": fragment},
+        {"query": q, "initial_html": fragment, "css_version": _css_version()},
     )
 
 

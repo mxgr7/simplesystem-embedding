@@ -6,24 +6,24 @@
   <div class="card-body">
     <div class="card-meta">
       <span class="brand">{{ c.manufacturer or "—" }}</span>
-      <span class="sep">·</span>
-      <span class="sold-by">Sold by simple system</span>
+      <span class="sep">•</span>
+      <span class="sold-by">Sold by <span class="seller">support simple system Markus Krückl</span></span>
     </div>
     <h2 class="card-title">{{ c.name }}</h2>
-    <dl class="card-stats">
-      <div><dt>Article no.</dt><dd>{{ c.article_number or "—" }}</dd></div>
-      <div><dt>EAN</dt><dd>{{ c.ean or "—" }}</dd></div>
-      <div><dt>Customer article no.</dt><dd>—</dd></div>
-      <div><dt>S2CLASS</dt><dd>—</dd></div>
-    </dl>
+    <div class="card-stats">
+      <div class="stat"><span class="stat-label">Article no.:</span><span class="stat-value">{{ c.article_number or "—" }}</span></div>
+      <div class="stat"><span class="stat-label">Customer article no.:</span><span class="stat-value">—</span></div>
+      <div class="stat"><span class="stat-label">EAN:</span><span class="stat-value">{{ c.ean or "—" }}</span></div>
+      <div class="stat"><span class="stat-label">S2CLASS:</span><span class="stat-value">—</span></div>
+    </div>
   </div>
   <div class="card-delivery">
     <div class="delivery-row placeholder" title="Delivery time — unavailable">
-      <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><path d="M2 7h11v7H2zM13 10h4l1 2v2h-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="6" cy="15" r="1.2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="15" cy="15" r="1.2" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><path d="M13 6H16L18 9V13H17M13 6V4H4C2.9 4 2 4.9 2 6V13H3M13 6V13H8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="5.5" cy="13.5" r="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="14.5" cy="13.5" r="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
       <span>Delivery time: —</span>
     </div>
     <div class="stock-row placeholder" title="Stock — unavailable">
-      <svg viewBox="0 0 20 20" width="14" height="14" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="10" cy="10" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
       <span>Stock unknown</span>
     </div>
   </div>
@@ -45,7 +45,7 @@
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m8 13-5-4.5A2.5 2.5 0 1 1 8 5a2.5 2.5 0 1 1 5 3.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
       </button>
       <button type="button" class="cart-btn" disabled title="Add to cart — unavailable">
-        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 3h2l2 8h7l1.5-6H5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="6" cy="14" r="1" fill="currentColor"/><circle cx="12" cy="14" r="1" fill="currentColor"/></svg>
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 3h2l2 8h7l1.5-6H5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="6" cy="14" r="1" fill="currentColor"/><circle cx="12" cy="14" r="1" fill="currentColor"/></svg>
         Add to cart
       </button>
     </div>
