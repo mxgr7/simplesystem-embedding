@@ -27,6 +27,7 @@
       <dt>embed url</dt><dd>{{ debug.embed_url }}</dd>
       <dt>embed dim</dt><dd>{{ debug.embed_dim }}</dd>
       <dt>top k</dt><dd>{{ debug.top_k }}</dd>
+      <dt>num_candidates</dt><dd>{{ debug.num_candidates if debug.num_candidates is not none else "auto (index default)" }}</dd>
       <dt>search params</dt><dd>{{ debug.search_params }}</dd>
       <dt>output fields</dt><dd>{{ debug.output_fields|join(', ') }}</dd>
     </dl>

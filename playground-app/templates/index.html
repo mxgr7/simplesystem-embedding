@@ -16,30 +16,66 @@
   </div>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="search-cluster">
-        <button class="catalog-pill" type="button" disabled title="Catalog selector — unavailable">
-          <span>Standard</span>
-          <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M5 8l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-        <form class="search-box"
-              hx-get="/search"
-              hx-target="#results"
-              hx-swap="innerHTML"
-              hx-push-url="true"
-              hx-indicator="#search-indicator">
-          <svg class="search-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="9.5" cy="9.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m14 14 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          <input type="text" name="q" placeholder="Search here" value="{{ query }}" autocomplete="off" autofocus>
-          <button type="button" class="clear-btn" aria-label="Clear" onclick="this.form.q.value='';this.form.q.focus();">
-            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3 3 10 10M13 3 3 13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      <div class="topbar-row">
+        <div class="search-cluster">
+          <button class="catalog-pill" type="button" disabled title="Catalog selector — unavailable">
+            <span>Standard</span>
+            <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M5 8l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-        </form>
+          <form class="search-box"
+                hx-get="/search"
+                hx-target="#results"
+                hx-swap="innerHTML"
+                hx-push-url="true"
+                hx-indicator="#search-indicator"
+                hx-include="[name='k'],[name='num_candidates']">
+            <svg class="search-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="9.5" cy="9.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m14 14 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <input type="text" name="q" placeholder="Search here" value="{{ query }}" autocomplete="off" autofocus>
+            <button type="button" class="clear-btn" aria-label="Clear" onclick="this.form.q.value='';this.form.q.focus();">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3 3 10 10M13 3 3 13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            </button>
+          </form>
+        </div>
+        <div class="topbar-indicator" id="search-indicator">Searching…</div>
       </div>
-      <div class="topbar-indicator" id="search-indicator">Searching…</div>
+      <div class="search-params" id="search-params">
+        <label class="param">
+          <span class="param-label">k</span>
+          <input type="number" name="k" min="1" max="10000" step="1" placeholder="100" inputmode="numeric">
+        </label>
+        <label class="param">
+          <span class="param-label">num_candidates</span>
+          <input type="number" name="num_candidates" min="0" max="100000" step="1" placeholder="auto" inputmode="numeric">
+        </label>
+        <span class="param-hint">stored in your browser · change re-runs the search</span>
+      </div>
     </div>
   </header>
 
   <main class="page">
     <div id="results">{{ initial_html|safe }}</div>
   </main>
+
+  <script>
+    (function () {
+      var KEYS = { k: "playground.k", num_candidates: "playground.num_candidates" };
+      var form = document.querySelector("form.search-box");
+      var inputs = {
+        k: document.querySelector('input[name="k"]'),
+        num_candidates: document.querySelector('input[name="num_candidates"]'),
+      };
+      Object.keys(inputs).forEach(function (name) {
+        var saved = localStorage.getItem(KEYS[name]);
+        if (saved !== null) inputs[name].value = saved;
+        inputs[name].addEventListener("change", function () {
+          var v = inputs[name].value.trim();
+          if (v === "") localStorage.removeItem(KEYS[name]);
+          else localStorage.setItem(KEYS[name], v);
+          var q = form.querySelector('input[name="q"]').value.trim();
+          if (q && window.htmx) window.htmx.trigger(form, "submit");
+        });
+      });
+    })();
+  </script>
 </body>
 </html>

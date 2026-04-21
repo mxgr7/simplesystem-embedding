@@ -76,10 +76,60 @@ button { font: inherit; color: inherit; }
   max-width: 1200px;
   margin: 0 auto;
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+}
+
+.topbar-row {
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
   position: relative;
+}
+
+.search-params {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-mid);
+}
+
+.search-params .param {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.search-params .param-label {
+  color: var(--text-light);
+  letter-spacing: 0.02em;
+}
+
+.search-params input {
+  width: 80px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  outline: 0;
+}
+
+.search-params input:focus {
+  border-color: var(--blue);
+}
+
+.search-params .param-hint {
+  color: var(--text-light);
+  font-size: 11px;
 }
 
 .search-cluster {

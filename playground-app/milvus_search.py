@@ -100,15 +100,24 @@ class MilvusSearch:
             scalar_indexes=scalar_idx,
         )
 
-    def search(self, embedding: list[float], limit: int) -> list[Hit]:
+    def search(
+        self,
+        embedding: list[float],
+        limit: int,
+        ef: int | None = None,
+    ) -> tuple[list[Hit], dict]:
         # Collection stores fp16 vectors; matching the query precision flushes
         # subnormals to 0 instead of tripping Milvus's underflow validator.
         query = np.asarray(embedding, dtype=np.float16)
+        params: dict = {}
+        if ef is not None and ef > 0:
+            params["ef"] = ef
+        search_params = {"metric_type": "COSINE", "params": params}
         results = self._client.search(
             collection_name=self.collection,
             data=[query],
             limit=limit,
-            search_params={"metric_type": "COSINE", "params": {}},
+            search_params=search_params,
             output_fields=OUTPUT_FIELDS,
         )
 
@@ -124,7 +133,7 @@ class MilvusSearch:
                 ean=_s(ent.get("ean")),
                 article_number=_s(ent.get("article_number")),
             ))
-        return out
+        return out, search_params
 
 
 def _s(value: object) -> str:

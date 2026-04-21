@@ -59,7 +59,8 @@
           hx-get="/search?q={{ query|urlencode }}&offset={{ next_offset }}"
           hx-target="#load-more"
           hx-swap="outerHTML"
-          hx-indicator="#search-indicator">
+          hx-indicator="#search-indicator"
+          hx-include="[name='k'],[name='num_candidates']">
     Load more
   </button>
 </li>

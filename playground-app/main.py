@@ -60,6 +60,14 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _parse_positive_int(raw: str, default):
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_dotenv(BASE_DIR / ".env")
@@ -151,10 +159,13 @@ async def search(
     request: Request,
     q: str = Query("", min_length=0),
     offset: int = Query(0, ge=0),
+    k: str = Query(""),
+    num_candidates: str = Query(""),
 ) -> HTMLResponse:
     q = q.strip()
     page_size: int = request.app.state.page_size
-    top_k: int = request.app.state.top_k
+    top_k: int = _parse_positive_int(k, default=request.app.state.top_k)
+    ef: int | None = _parse_positive_int(num_candidates, default=None)
 
     is_htmx = request.headers.get("hx-request") == "true"
     is_load_more = is_htmx and offset > 0
@@ -176,7 +187,12 @@ async def search(
     embed_ms = (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
-    hits = request.app.state.milvus.search(vectors[0], limit=top_k) if vectors else []
+    if vectors:
+        hits, search_params = request.app.state.milvus.search(
+            vectors[0], limit=top_k, ef=ef
+        )
+    else:
+        hits, search_params = [], {"metric_type": "COSINE", "params": {}}
     milvus_ms = (time.perf_counter() - t0) * 1000
 
     visible = hits[: offset + page_size]
@@ -209,6 +225,7 @@ async def search(
             "offset": offset,
             "page_size": page_size,
             "top_k": top_k,
+            "num_candidates": ef,
             # Timing
             "took_ms": took_ms,
             "embed_ms": round(embed_ms, 1),
@@ -236,7 +253,7 @@ async def search(
             "index_state": info.index_state,
             "scalar_indexes": info.scalar_indexes,
             # Search-time params actually sent to Milvus
-            "search_params": {"metric_type": "COSINE", "params": {}},
+            "search_params": search_params,
             "output_fields": OUTPUT_FIELDS,
         },
     }
