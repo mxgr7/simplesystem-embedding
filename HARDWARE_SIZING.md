@@ -27,16 +27,11 @@ Milvus anon heap is ~73 GB; the other ~74 GB is mmap'd index pages — reclaimab
 
 HDDs are not viable — Milvus mmaps index segments.
 
-## Schedule assumption
+## Cost analysis
 
-Mon–Fri, 07:00–20:00 CET, automated stop/delete during off-hours.
+Schedule: Mon–Fri 07:00–20:00 CET with automated stop/delete off-hours ≈ **282 active h/month** (61 % idle). Prices are net, April 2026 list rates, €1 ≈ $1.08.
 
-- 13 h/day × 5 days × 52 weeks / 12 months ≈ **282 active h/month**
-- 61 % of wall-clock time is idle
-
-Prices are net (excl. VAT), April 2026 list rates, €1 ≈ $1.08.
-
-## AWS (eu-central-1, stop during off-hours)
+### AWS (eu-central-1, stop during off-hours)
 
 Instance is stopped off-hours so compute pauses; EBS keeps billing 24/7.
 
@@ -45,7 +40,7 @@ Instance is stopped off-hours so compute pauses; EBS keeps billing 24/7.
 | Minimum     | r6i.4xlarge  | 16   | 128 GB | 1.10  | ~$310           | 512 GB → ~$49 | **~$359 (~€332)** |
 | Comfortable | r6i.8xlarge  | 32   | 256 GB | 2.20  | ~$620           | 1 TB → ~$97   | **~$717 (~€664)** |
 
-## Hetzner Cloud (CCX, delete + restore from snapshot)
+### Hetzner Cloud (CCX, delete + restore from snapshot)
 
 A *stopped* Hetzner Cloud server still bills. To realise shutdown savings, **delete** the server nightly and recreate from snapshot at 07:00 (scriptable via `hcloud` CLI). Snapshot storage: €0.012/GB/month.
 
@@ -56,7 +51,7 @@ A *stopped* Hetzner Cloud server still bills. To realise shutdown savings, **del
 
 Restore adds ~3–5 min at start; plan for a 06:55 cron.
 
-## Headline comparison
+### Headline comparison
 
 | Tier        | AWS   | Hetzner Cloud |
 |-------------|-------|---------------|
