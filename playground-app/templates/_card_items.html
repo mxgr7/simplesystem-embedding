@@ -7,6 +7,17 @@
     <div class="card-meta">
       <span class="brand">{{ c.manufacturer or "—" }}</span>
     </div>
+    {% if c.category_paths %}
+    <ul class="card-categories">
+      {% for path in c.category_paths %}
+      <li class="card-category">
+        {% for part in path %}
+        <span class="card-category-part">{{ part }}</span>{% if not loop.last %}<span class="card-category-sep" aria-hidden="true">›</span>{% endif %}
+        {% endfor %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
     <h2 class="card-title">{{ c.name }}</h2>
     <div class="card-stats">
       <div class="stat"><span class="stat-label">Article no.:</span><span class="stat-value">{{ c.article_number or "—" }}</span></div>

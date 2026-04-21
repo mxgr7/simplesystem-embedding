@@ -15,8 +15,10 @@ from pymilvus import MilvusClient
 OUTPUT_FIELDS = [
     "id", "name", "manufacturerName", "ean", "article_number",
     "catalog_version_ids",
+    "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
 ]
 _VECTOR_FIELD = "offer_embedding"
+_CATEGORY_SEP = "¦"
 
 
 @dataclass(slots=True)
@@ -28,6 +30,7 @@ class Hit:
     ean: str
     article_number: str
     catalog_version_ids: list[str]
+    category_paths: list[list[str]]
 
 
 @dataclass(slots=True)
@@ -137,6 +140,7 @@ class MilvusSearch:
                 ean=_s(ent.get("ean")),
                 article_number=_s(ent.get("article_number")),
                 catalog_version_ids=[_s(v) for v in (ent.get("catalog_version_ids") or [])],
+                category_paths=_category_paths(ent),
             ))
         return out, search_params
 
@@ -145,3 +149,20 @@ def _s(value: object) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _category_paths(entity: dict) -> list[list[str]]:
+    """Pick the deepest non-empty level and split each entry into breadcrumbs.
+
+    Categories are stored per level as arrays of full paths joined by ``¦``;
+    every shallower level is redundant with the deepest, so we only keep the
+    deepest. The returned list has one breadcrumb per taxonomy match.
+    """
+    for level in range(5, 0, -1):
+        raw = entity.get(f"category_l{level}") or []
+        if raw:
+            return [
+                [part for part in str(p).split(_CATEGORY_SEP) if part]
+                for p in raw
+            ]
+    return []

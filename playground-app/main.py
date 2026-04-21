@@ -363,4 +363,5 @@ def _build_card(hit: Hit) -> dict:
         "ean": hit.ean,
         "article_number": hit.article_number,
         "catalog_version_ids": hit.catalog_version_ids,
+        "category_paths": hit.category_paths,
     }
