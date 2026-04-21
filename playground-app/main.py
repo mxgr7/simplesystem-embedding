@@ -22,13 +22,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Path as PathParam, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from embed_client import EmbedClient
 from milvus_search import OUTPUT_FIELDS, Hit, MilvusSearch
+from offer_lookup import OfferLookup
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_FILE = BASE_DIR.parent / "logs" / "playground-app.log"
@@ -85,10 +86,12 @@ async def lifespan(app: FastAPI):
     app.state.auth_user = os.environ.get("PLAYGROUND_USER", "admin")
     app.state.auth_password = os.environ.get("PLAYGROUND_PASSWORD", "")
     app.state.milvus_info = app.state.milvus.describe()
+    app.state.offers = OfferLookup(_required_env("OFFERS_PARQUET_DIR"))
     try:
         yield
     finally:
         await app.state.embed.aclose()
+        app.state.offers.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -326,6 +329,28 @@ def _render_error(
         request,
         "index.html",
         {"query": query, "initial_html": fragment, "css_version": _css_version()},
+    )
+
+
+@app.get("/offer/{offer_id}", response_class=HTMLResponse)
+async def offer_details(
+    request: Request,
+    offer_id: str = PathParam(..., min_length=1, max_length=128),
+) -> HTMLResponse:
+    t0 = time.perf_counter()
+    record = request.app.state.offers.get(offer_id)
+    took_ms = int((time.perf_counter() - t0) * 1000)
+    if record is None:
+        return templates.TemplateResponse(
+            request,
+            "_offer_modal.html",
+            {"offer_id": offer_id, "record": None, "took_ms": took_ms},
+            status_code=404,
+        )
+    return templates.TemplateResponse(
+        request,
+        "_offer_modal.html",
+        {"offer_id": offer_id, "record": record, "took_ms": took_ms},
     )
 
 

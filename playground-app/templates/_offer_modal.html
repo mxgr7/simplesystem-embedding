@@ -1,0 +1,84 @@
+{% macro field_value(value) -%}
+  {%- if value is none or value == "" -%}
+    <span class="offer-modal-empty">—</span>
+  {%- elif value is string -%}
+    <pre class="offer-modal-text">{{ value }}</pre>
+  {%- elif value is number -%}
+    {{ value }}
+  {%- else -%}
+    <pre class="offer-modal-json">{{ value|tojson(indent=2) }}</pre>
+  {%- endif -%}
+{%- endmacro %}
+
+<div class="offer-modal-backdrop"
+     onclick="if (event.target === this) { document.getElementById('offer-modal').innerHTML = ''; }">
+  <div class="offer-modal-dialog" role="dialog" aria-modal="true" aria-label="Offer details">
+    <header class="offer-modal-header">
+      <div>
+        <div class="offer-modal-eyebrow">Offer details</div>
+        <h2 class="offer-modal-title">
+          {% if record %}{{ record.fields.name or "(unnamed offer)" }}{% else %}Not found{% endif %}
+        </h2>
+        <div class="offer-modal-sub">
+          <code>{{ offer_id }}</code>
+          <span class="offer-modal-timing"> · {{ took_ms }} ms</span>
+        </div>
+      </div>
+      <button type="button"
+              class="offer-modal-close"
+              aria-label="Close"
+              onclick="document.getElementById('offer-modal').innerHTML = '';">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m3 3 10 10M13 3 3 13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+      </button>
+    </header>
+
+    {% if record %}
+    <div class="offer-modal-body">
+      <dl class="offer-modal-fields">
+        {% for key, value in record.fields.items() %}
+        <div class="offer-modal-row">
+          <dt>{{ key }}</dt>
+          <dd>
+            {%- if key == "vendor_listings" -%}
+              {%- if value -%}
+                <table class="offer-modal-table">
+                  <thead><tr><th>vendor_id</th><th>catalog_version_id</th></tr></thead>
+                  <tbody>
+                    {% for row in value %}
+                    <tr>
+                      <td>
+                        {%- if row.vendor_id -%}
+                          <span class="catalog-version-chip">{{ row.vendor_id }}</span>
+                        {%- else -%}
+                          <span class="offer-modal-empty">—</span>
+                        {%- endif -%}
+                      </td>
+                      <td>
+                        {%- if row.catalog_version_id -%}
+                          <span class="catalog-version-chip">{{ row.catalog_version_id }}</span>
+                        {%- else -%}
+                          <span class="offer-modal-empty">—</span>
+                        {%- endif -%}
+                      </td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              {%- else -%}
+                <span class="offer-modal-empty">—</span>
+              {%- endif -%}
+            {%- else -%}
+              {{ field_value(value) }}
+            {%- endif -%}
+          </dd>
+        </div>
+        {% endfor %}
+      </dl>
+    </div>
+    {% else %}
+    <div class="offer-modal-body">
+      <p class="offer-modal-empty-state">No record found for id <code>{{ offer_id }}</code>.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>

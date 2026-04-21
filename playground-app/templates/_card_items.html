@@ -67,9 +67,18 @@
       <button type="button" class="icon-btn" disabled title="Favorite — unavailable" aria-label="Favorite">
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m8 13-5-4.5A2.5 2.5 0 1 1 8 5a2.5 2.5 0 1 1 5 3.5z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
       </button>
-      <button type="button" class="cart-btn" disabled title="Add to cart — unavailable">
-        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M2 3h2l2 8h7l1.5-6H5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="6" cy="14" r="1" fill="currentColor"/><circle cx="12" cy="14" r="1" fill="currentColor"/></svg>
-        Add to cart
+      <button type="button"
+              class="cart-btn details-btn"
+              title="Show full record"
+              hx-get="/offer/{{ c.id|urlencode }}"
+              hx-target="#offer-modal"
+              hx-swap="innerHTML"
+              hx-indicator="this"
+              hx-disabled-elt="this">
+        <span class="spinner details-spinner" aria-hidden="true"></span>
+        <svg class="details-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 7v4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="5" r="0.9" fill="currentColor"/></svg>
+        <span class="details-label">Details</span>
+        <span class="details-loading-label">Loading…</span>
       </button>
     </div>
   </div>
