@@ -183,16 +183,44 @@ async def search(
 
     rendered_query = f"{request.app.state.query_prefix}{q}"
     t0 = time.perf_counter()
-    vectors = await request.app.state.embed.embed([rendered_query])
+    try:
+        vectors = await request.app.state.embed.embed([rendered_query])
+    except Exception as exc:
+        logging.getLogger("playground").exception("embed request failed")
+        return _render_error(
+            request,
+            query=q,
+            error={
+                "title": "Embedding service unavailable",
+                "detail": f"{type(exc).__name__}: {exc}".strip()
+                          or "The embedding backend did not respond.",
+            },
+            is_htmx=is_htmx,
+            is_load_more=is_load_more,
+        )
     embed_ms = (time.perf_counter() - t0) * 1000
 
     t0 = time.perf_counter()
-    if vectors:
-        hits, search_params = request.app.state.milvus.search(
-            vectors[0], limit=top_k, ef=ef
+    try:
+        if vectors:
+            hits, search_params = request.app.state.milvus.search(
+                vectors[0], limit=top_k, ef=ef
+            )
+        else:
+            hits, search_params = [], {"metric_type": "COSINE", "params": {}}
+    except Exception as exc:
+        logging.getLogger("playground").exception("milvus search failed")
+        return _render_error(
+            request,
+            query=q,
+            error={
+                "title": "Milvus search failed",
+                "detail": f"{type(exc).__name__}: {exc}".strip()
+                          or "Milvus did not return a result.",
+            },
+            is_htmx=is_htmx,
+            is_load_more=is_load_more,
         )
-    else:
-        hits, search_params = [], {"metric_type": "COSINE", "params": {}}
     milvus_ms = (time.perf_counter() - t0) * 1000
 
     visible = hits[: offset + page_size]
@@ -272,6 +300,35 @@ async def search(
     )
 
 
+def _render_error(
+    request: Request,
+    *,
+    query: str,
+    error: dict,
+    is_htmx: bool,
+    is_load_more: bool,
+) -> HTMLResponse:
+    ctx = {
+        "query": query,
+        "cards": [],
+        "next_offset": None,
+        "total_hits": 0,
+        "took_ms": 0,
+        "embed_ms": 0,
+        "error": error,
+    }
+    if is_load_more:
+        return templates.TemplateResponse(request, "_error_li.html", ctx)
+    if is_htmx:
+        return templates.TemplateResponse(request, "results.html", ctx)
+    fragment = templates.get_template("results.html").render(request=request, **ctx)
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {"query": query, "initial_html": fragment, "css_version": _css_version()},
+    )
+
+
 def _build_card(hit: Hit) -> dict:
     return {
         "id": hit.id,
@@ -280,4 +337,5 @@ def _build_card(hit: Hit) -> dict:
         "manufacturer": hit.manufacturer,
         "ean": hit.ean,
         "article_number": hit.article_number,
+        "catalog_version_ids": hit.catalog_version_ids,
     }

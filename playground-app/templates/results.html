@@ -1,12 +1,12 @@
 {% if query %}
-{% include "_debug_panel.html" %}
+{% if not error %}{% include "_debug_panel.html" %}{% endif %}
 <section class="results-page">
   <div class="results-header">
     <div>
       <h1 class="results-title">Results for &ldquo;{{ query }}&rdquo;</h1>
       <div class="results-sub">
-        {{ total_hits }} articles
-        {% if took_ms %}<span class="results-timing"> · {{ took_ms }} ms (embed {{ embed_ms }} ms)</span>{% endif %}
+        {% if error %}request failed{% else %}{{ total_hits }} articles{% endif %}
+        {% if took_ms and not error %}<span class="results-timing"> · {{ took_ms }} ms (embed {{ embed_ms }} ms)</span>{% endif %}
       </div>
     </div>
     <div class="results-actions">
@@ -78,7 +78,9 @@
         </div>
       </div>
 
-      {% if cards %}
+      {% if error %}
+      {% include "_error.html" %}
+      {% elif cards %}
       <ul class="cards">
         {% include "_card_items.html" %}
       </ul>

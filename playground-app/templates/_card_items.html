@@ -14,6 +14,31 @@
       <div class="stat"><span class="stat-label">EAN:</span><span class="stat-value">{{ c.ean or "—" }}</span></div>
       <div class="stat"><span class="stat-label">S2CLASS:</span><span class="stat-value">—</span></div>
     </div>
+    {% set cv_cap = 8 %}
+    {% set cv_total = c.catalog_version_ids|length %}
+    <div class="card-catalog-versions">
+      <span class="catalog-versions-label">Catalog versions ({{ cv_total }}):</span>
+      {% if c.catalog_version_ids %}
+      <ul class="catalog-versions-list">
+        {% for cv in c.catalog_version_ids %}
+        <li class="catalog-version-chip{% if loop.index0 >= cv_cap %} is-extra{% endif %}">{{ cv }}</li>
+        {% endfor %}
+        {% if cv_total > cv_cap %}
+        <li class="catalog-versions-toggle-item">
+          <button type="button"
+                  class="catalog-versions-toggle"
+                  aria-expanded="false"
+                  data-more-label="+{{ cv_total - cv_cap }} more"
+                  data-less-label="Show less">
+            +{{ cv_total - cv_cap }} more
+          </button>
+        </li>
+        {% endif %}
+      </ul>
+      {% else %}
+      <span class="catalog-versions-empty">—</span>
+      {% endif %}
+    </div>
   </div>
   <div class="card-delivery">
     <div class="delivery-row placeholder" title="Delivery time — unavailable">
@@ -57,9 +82,12 @@
           hx-get="/search?q={{ query|urlencode }}&offset={{ next_offset }}"
           hx-target="#load-more"
           hx-swap="outerHTML"
-          hx-indicator="#search-indicator"
+          hx-indicator="this"
+          hx-disabled-elt="this"
           hx-include="[name='k'],[name='num_candidates']">
-    Load more
+    <span class="spinner load-more-spinner" aria-hidden="true"></span>
+    <span class="load-more-label">Load more</span>
+    <span class="load-more-loading-label">Loading…</span>
   </button>
 </li>
 {% endif %}

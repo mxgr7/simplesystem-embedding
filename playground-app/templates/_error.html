@@ -1,0 +1,10 @@
+<div class="search-error" role="alert">
+  <svg class="search-error-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
+    <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="1.6"/>
+    <path d="M10 6v5M10 13.5v.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+  </svg>
+  <div class="search-error-body">
+    <div class="search-error-title">{{ error.title }}</div>
+    {% if error.detail %}<div class="search-error-detail">{{ error.detail }}</div>{% endif %}
+  </div>
+</div>

@@ -12,7 +12,10 @@ from dataclasses import dataclass
 import numpy as np
 from pymilvus import MilvusClient
 
-OUTPUT_FIELDS = ["id", "name", "manufacturerName", "ean", "article_number"]
+OUTPUT_FIELDS = [
+    "id", "name", "manufacturerName", "ean", "article_number",
+    "catalog_version_ids",
+]
 _VECTOR_FIELD = "offer_embedding"
 
 
@@ -24,6 +27,7 @@ class Hit:
     manufacturer: str
     ean: str
     article_number: str
+    catalog_version_ids: list[str]
 
 
 @dataclass(slots=True)
@@ -132,6 +136,7 @@ class MilvusSearch:
                 manufacturer=_s(ent.get("manufacturerName")),
                 ean=_s(ent.get("ean")),
                 article_number=_s(ent.get("article_number")),
+                catalog_version_ids=[_s(v) for v in (ent.get("catalog_version_ids") or [])],
             ))
         return out, search_params
 
