@@ -6,8 +6,6 @@
   <div class="card-body">
     <div class="card-meta">
       <span class="brand">{{ c.manufacturer or "—" }}</span>
-      <span class="sep">•</span>
-      <span class="sold-by">Sold by <span class="seller">support simple system Markus Krückl</span></span>
     </div>
     <h2 class="card-title">{{ c.name }}</h2>
     <div class="card-stats">
@@ -28,9 +26,9 @@
     </div>
   </div>
   <div class="card-price">
-    <div class="price placeholder" title="Price — unavailable">
-      <span class="price-amount">€&nbsp;—</span>
-      <span class="price-unit">per piece</span>
+    <div class="price" title="Cosine similarity from Milvus">
+      <span class="price-amount">{{ "%.4f"|format(c.score) }}</span>
+      <span class="price-unit">match score</span>
     </div>
     <div class="qty">
       <button type="button" class="qty-btn" disabled aria-label="Decrease">−</button>

@@ -14,7 +14,6 @@
   --text: #0f172a;
   --text-mid: #4a5b7a;
   --text-light: #8a98b4;
-  --dot: #ccd4e3;
   --disabled-opacity: 0.55;
 }
 
@@ -147,28 +146,6 @@ button { font: inherit; color: inherit; }
 .search-cluster:focus-within {
   background: var(--input-bg-focus);
 }
-
-.search-cluster:focus-within .catalog-pill {
-  border-right-color: var(--border-strong);
-}
-
-.catalog-pill {
-  background: transparent;
-  border: 0;
-  border-right: 1px solid var(--border-strong);
-  color: var(--navy);
-  padding: 0 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 150px;
-  font-weight: 500;
-  opacity: var(--disabled-opacity);
-  cursor: not-allowed;
-}
-
-.catalog-pill svg { color: var(--chevron); }
 
 .search-box {
   flex: 1 1 auto;
@@ -412,9 +389,6 @@ button { font: inherit; color: inherit; }
 }
 
 .brand { font-weight: 500; color: var(--text-mid); }
-.sep { color: var(--dot); font-weight: 700; line-height: 1; }
-.sold-by { color: var(--text-mid); }
-.sold-by .seller { color: var(--green); }
 
 .card-title {
   margin: 0 0 12px;
@@ -496,8 +470,6 @@ button { font: inherit; color: inherit; }
   color: var(--text-light);
   margin-top: 2px;
 }
-
-.price.placeholder .price-amount { color: var(--text-light); font-weight: 600; }
 
 .qty {
   display: flex;
