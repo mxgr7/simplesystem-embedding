@@ -12,17 +12,22 @@ Environment variables:
   ID_FIELDS         Per-collection override of the Milvus field returned as
                     ``_id``. Format: ``col1=field1,col2=field2``. Collections
                     not listed fall back to ``id``.
+  API_KEY           Shared secret. Clients must present it via either
+                    ``Authorization: ApiKey <key>`` or ``X-API-Key: <key>``.
+                    If unset/empty, auth is disabled.
 """
 
 from __future__ import annotations
 
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Path as PathParam
+from fastapi import FastAPI, HTTPException, Path as PathParam, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient
 
@@ -73,6 +78,7 @@ async def lifespan(app: FastAPI):
     app.state.query_prefix = os.environ.get("QUERY_PREFIX", "")
     app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "100"))
     app.state.id_fields = _parse_id_fields(os.environ.get("ID_FIELDS", ""))
+    app.state.api_key = os.environ.get("API_KEY", "")
     try:
         yield
     finally:
@@ -80,6 +86,29 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    expected: str = request.app.state.api_key
+    if not expected:
+        return await call_next(request)
+
+    ok = False
+    auth = request.headers.get("authorization", "")
+    if auth[:7].lower() == "apikey ":
+        ok = secrets.compare_digest(auth[7:].strip(), expected)
+    if not ok:
+        xkey = request.headers.get("x-api-key", "")
+        if xkey:
+            ok = secrets.compare_digest(xkey, expected)
+    if not ok:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "invalid or missing api key"},
+            headers={"WWW-Authenticate": 'ApiKey realm="search-api"'},
+        )
+    return await call_next(request)
 
 
 @app.post("/{collection}/_search")
