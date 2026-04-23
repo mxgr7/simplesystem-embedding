@@ -26,6 +26,38 @@ DEFAULT_COPY_COLUMN_KEYS = ("query_id", "offer_id", "label")
 VALID_INFERENCE_MODES = {"query", "offer", "pair_score"}
 
 
+class _ProgressLogger:
+    def __init__(self, total_rows, log_every_seconds=30.0):
+        self.total_rows = int(total_rows) if total_rows else 0
+        self.log_every = float(log_every_seconds)
+        self.start = time.perf_counter()
+        self.last_log = self.start
+
+    def maybe_log(self, written_rows, processed_rows, force=False):
+        now = time.perf_counter()
+        if not force and now - self.last_log < self.log_every:
+            return
+        self.last_log = now
+        elapsed = now - self.start
+        rate = written_rows / elapsed if elapsed > 0 else 0.0
+        if self.total_rows and rate > 0:
+            remaining = max(self.total_rows - written_rows, 0)
+            eta_s = remaining / rate
+            pct = 100.0 * written_rows / self.total_rows
+            print(
+                f"progress: written={written_rows}/{self.total_rows} ({pct:.1f}%) "
+                f"queued={processed_rows} elapsed={elapsed:.0f}s "
+                f"rate={rate:.1f} rows/s eta={eta_s/60:.1f}min",
+                flush=True,
+            )
+        else:
+            print(
+                f"progress: written={written_rows} queued={processed_rows} "
+                f"elapsed={elapsed:.0f}s rate={rate:.1f} rows/s",
+                flush=True,
+            )
+
+
 def default_copy_columns_from_renderer(renderer):
     return [renderer.column_mapping[key] for key in DEFAULT_COPY_COLUMN_KEYS]
 
@@ -690,7 +722,7 @@ def _run_with_workers(
     pool, parquet_file, column_rename, limit_rows,
     read_batch_size, encode_batch_size, row_number,
     model, device, pad_token_id, output_column, renamed_schema,
-    embedding_precision, mode, writer,
+    embedding_precision, mode, writer, progress,
 ):
     """Stream parquet → multiprocess text rendering → GPU encode → write.
 
@@ -759,8 +791,10 @@ def _run_with_workers(
 
         if len(accumulated_prepared) >= ACCUMULATE_TARGET:
             flush_accumulated()
+            progress.maybe_log(written_rows, processed_rows)
 
     flush_accumulated()
+    progress.maybe_log(written_rows, processed_rows, force=True)
 
     return written_rows, processed_rows, skipped_rows
 
@@ -828,6 +862,12 @@ def run_inference(args):
     read_batch_size = int(args.read_batch_size)
     encode_batch_size = int(args.encode_batch_size)
 
+    total_input_rows = getattr(parquet_file.metadata, "num_rows", 0)
+    if args.limit_rows is not None:
+        total_input_rows = min(total_input_rows, int(args.limit_rows))
+    progress = _ProgressLogger(total_input_rows)
+    print(f"input_rows={total_input_rows} device={device}", flush=True)
+
     use_profile = getattr(args, "profile", False)
     profiler = None
     if use_profile:
@@ -850,7 +890,7 @@ def run_inference(args):
                     pool, parquet_file, column_rename, args.limit_rows,
                     read_batch_size, encode_batch_size, row_number,
                     model, device, pad_token_id, output_column, renamed_schema,
-                    embedding_precision, mode, writer,
+                    embedding_precision, mode, writer, progress,
                 )
             else:
                 for batch in parquet_file.iter_batches(batch_size=read_batch_size):
@@ -890,6 +930,8 @@ def run_inference(args):
 
                     writer.write_table(table)
                     written_rows += table.num_rows
+                    progress.maybe_log(written_rows, processed_rows)
+                progress.maybe_log(written_rows, processed_rows, force=True)
     finally:
         if pool is not None:
             pool.terminate()
