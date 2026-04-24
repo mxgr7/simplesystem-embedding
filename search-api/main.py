@@ -4,11 +4,16 @@ Sibling of ``playground-app/`` but without htmx/UI: accepts a query, embeds
 it, runs a cosine search against a Milvus collection selected by URL path,
 and returns Elasticsearch-shaped hits (``_index``, ``_id``, ``_score``).
 
+Query params ``k`` and ``num_candidates`` override the top-k and the HNSW
+``efSearch`` pool size on a per-request basis; ``num_candidates`` must be
+>= ``k`` and is ignored by non-HNSW indexes.
+
 Environment variables:
   EMBED_URL         Base URL of a TEI-compatible embedding service.
   QUERY_PREFIX      String prepended to every query before embedding.
   MILVUS_URI        Milvus gRPC URI (e.g. http://localhost:19530).
-  SEARCH_TOP_K      Max hits per query (default: 100).
+  SEARCH_TOP_K      Default max hits per query when ``k`` is not set
+                    (default: 100).
   ID_FIELDS         Per-collection override of the Milvus field returned as
                     ``_id``. Format: ``col1=field1,col2=field2``. Collections
                     not listed fall back to ``id``.
@@ -26,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Path as PathParam, Request
+from fastapi import FastAPI, HTTPException, Path as PathParam, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient
@@ -115,12 +120,21 @@ async def require_api_key(request: Request, call_next):
 async def search(
     body: SearchRequest,
     collection: str = PathParam(..., min_length=1, max_length=255),
+    k: int | None = Query(default=None, ge=1),
+    num_candidates: int | None = Query(default=None, ge=1),
 ) -> dict:
     client: MilvusClient = app.state.milvus
     if not client.has_collection(collection):
         raise HTTPException(
             status_code=404,
             detail=f"Milvus collection {collection!r} does not exist",
+        )
+
+    limit = k if k is not None else app.state.top_k
+    if num_candidates is not None and num_candidates < limit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"num_candidates ({num_candidates}) must be >= k ({limit})",
         )
 
     query = body.query.strip()
@@ -136,11 +150,15 @@ async def search(
     # subnormals to 0 instead of tripping Milvus's underflow validator.
     id_field: str = app.state.id_fields.get(collection, _DEFAULT_ID_FIELD)
     vec = np.asarray(vectors[0], dtype=np.float16)
+    # num_candidates maps to HNSW efSearch; ignored by non-HNSW indexes.
+    params: dict = {}
+    if num_candidates is not None:
+        params["ef"] = num_candidates
     results = client.search(
         collection_name=collection,
         data=[vec],
-        limit=app.state.top_k,
-        search_params={"metric_type": "COSINE", "params": {}},
+        limit=limit,
+        search_params={"metric_type": "COSINE", "params": params},
         output_fields=[id_field],
     )
 
