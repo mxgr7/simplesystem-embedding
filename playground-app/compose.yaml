@@ -30,7 +30,7 @@ services:
     env_file:
       - .env
     environment:
-      ID_FIELDS: offers=id,offers_playground=playground_id
+      ID_FIELDS: offers=id,offers_playground=playground_id,offers_playground_trimmed=playground_id
       API_KEY: ${SEARCH_API_KEY}
     network_mode: host
     depends_on:
