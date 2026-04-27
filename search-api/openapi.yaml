@@ -1,0 +1,499 @@
+openapi: 3.1.0
+info:
+  title: search-api
+  version: "0"
+  description: |
+    Thin JSON wrapper around a TEI-compatible embedder, a Milvus dense
+    collection, and a Milvus BM25 codes collection. Exposes a single
+    Elasticsearch-shaped search endpoint and a Prometheus scrape endpoint.
+
+    All search behaviour is parametrised by query string. Request bodies
+    only carry the user query and an opaque `index` label echoed back into
+    each hit.
+
+servers:
+  - url: http://localhost:8000
+    description: Local dev / docker-compose default
+
+security:
+  - apiKeyHeader: []
+  - apiKeyAuth: []
+
+paths:
+  /{collection}/_search:
+    post:
+      summary: Run a search against a Milvus dense collection (+ BM25 codes companion).
+      description: |
+        `collection` names the dense collection (e.g. `offers`). The
+        BM25 codes companion collection (e.g. `offers_codes`) is
+        server-configured via `MILVUS_CODES_COLLECTION`.
+
+        ## Modes
+
+        | mode                  | dense | bm25 | classifier | notes |
+        | --------------------- | :---: | :--: | :--------: | ----- |
+        | `vector`              | ✓     |      |            | dense ANN only |
+        | `bm25`                |       | ✓    |            | BM25 over codes only |
+        | `hybrid`              | ✓     | ✓    |            | RRF-fused, classifier off |
+        | `hybrid_classified`   | ✓     | ✓    | ✓          | strict path for opaque IDs, else hybrid (default) |
+
+        For `hybrid_classified`, the classifier may pick a strict
+        BM25-only path with `strict_codes_limit` candidates. If that
+        returns zero hits and `enable_fallback=1` (the default), the
+        request falls through to a hybrid (dense + BM25, RRF-fused)
+        execution.
+
+        ## HNSW efSearch
+
+        `num_candidates` maps to Milvus HNSW `ef`. It must be ≥ the dense
+        leg's limit:
+          * `vector` mode: `num_candidates ≥ k`
+          * `hybrid` / `hybrid_classified`: `num_candidates ≥ dense_limit`
+
+        ## Concurrency
+
+        The server applies a hard in-process cap (`MAX_CONCURRENT_SEARCHES`,
+        default 64). Excess requests get `503` with `Retry-After: 1`.
+      operationId: search
+      parameters:
+        - $ref: "#/components/parameters/Collection"
+        - $ref: "#/components/parameters/Mode"
+        - $ref: "#/components/parameters/K"
+        - $ref: "#/components/parameters/DenseLimit"
+        - $ref: "#/components/parameters/CodesLimit"
+        - $ref: "#/components/parameters/StrictCodesLimit"
+        - $ref: "#/components/parameters/RrfK"
+        - $ref: "#/components/parameters/NumCandidates"
+        - $ref: "#/components/parameters/EnableFallback"
+        - $ref: "#/components/parameters/Debug"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            examples:
+              simple:
+                summary: A vanilla product-search query
+                value:
+                  query: "cordless drill 18v"
+                  index: "offers-prod"
+              opaqueId:
+                summary: Opaque MPN — classifier will route to strict BM25
+                value:
+                  query: "GTB6-P5211"
+                  index: "offers-prod"
+      responses:
+        "200":
+          description: Search executed (may have zero hits).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+              examples:
+                hits:
+                  summary: Two hits from the RRF-fused hybrid path
+                  value:
+                    hits:
+                      - _index: "offers-prod"
+                        _id: "offer:42"
+                        _score: 0.0327
+                        _source_leg: "rrf"
+                      - _index: "offers-prod"
+                        _id: "offer:99"
+                        _score: 0.0312
+                        _source_leg: "rrf"
+                empty:
+                  summary: Empty query short-circuits to no hits
+                  value:
+                    hits: []
+                debug:
+                  summary: With `?debug=1`
+                  value:
+                    hits:
+                      - _index: "offers-prod"
+                        _id: "offer:42"
+                        _score: 0.0327
+                        _source_leg: "rrf"
+                    _debug:
+                      path: "hybrid"
+                      classifier_strict: false
+                      fallback_fired: false
+                      embed_ms: 12.4
+                      dense_ms: 18.7
+                      codes_ms: 9.1
+                      dense_hits: 200
+                      codes_hits: 18
+                      params:
+                        mode: "hybrid_classified"
+                        k: 100
+                        dense_limit: 200
+                        codes_limit: 20
+                        strict_codes_limit: 500
+                        rrf_k: 60
+                        num_candidates: null
+                        enable_fallback: true
+        "400":
+          description: |
+            Invalid query parameters. Examples: unknown `mode`, or
+            `num_candidates` smaller than the dense-leg limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                badMode:
+                  value:
+                    detail: "invalid mode 'fuzzy'; expected one of: vector, bm25, hybrid, hybrid_classified"
+                badNumCandidates:
+                  value:
+                    detail: "num_candidates (50) must be >= the dense leg's limit (200)"
+        "401":
+          description: Missing or invalid API key (only when `API_KEY` is configured server-side).
+          headers:
+            WWW-Authenticate:
+              schema:
+                type: string
+              example: 'ApiKey realm="search-api"'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                detail: "invalid or missing api key"
+        "404":
+          description: |
+            The dense collection (or, for non-`vector` modes, the codes
+            collection) does not exist in Milvus.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                noDense:
+                  value:
+                    detail: "Milvus dense collection 'offers' does not exist"
+                noCodes:
+                  value:
+                    detail: "Milvus codes collection 'offers_codes' does not exist"
+        "422":
+          description: Request body or path parameter failed Pydantic/FastAPI validation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "503":
+          description: |
+            Server is at its in-process concurrency limit. Clients should
+            back off and retry.
+          headers:
+            Retry-After:
+              schema:
+                type: string
+              example: "1"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                detail: "search-api at concurrency limit"
+
+  /metrics:
+    get:
+      summary: Prometheus scrape endpoint.
+      description: |
+        Exposed by `prometheus-fastapi-instrumentator`. Bypasses the API-key
+        and concurrency middlewares. Not part of the JSON API surface — the
+        response is Prometheus exposition text.
+      operationId: metrics
+      security: []
+      responses:
+        "200":
+          description: Prometheus exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    apiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Shared secret. Only enforced when `API_KEY` is set on the server.
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        Shared secret as `Authorization: ApiKey <key>`. Only enforced when
+        `API_KEY` is set on the server. Either this header or `X-API-Key`
+        is accepted.
+
+  parameters:
+    Collection:
+      name: collection
+      in: path
+      required: true
+      description: Milvus dense collection name (e.g. `offers`).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        example: offers
+
+    Mode:
+      name: mode
+      in: query
+      description: Search execution mode. Defaults to `hybrid_classified`.
+      schema:
+        $ref: "#/components/schemas/Mode"
+
+    K:
+      name: k
+      in: query
+      description: Final top-N hits returned. Defaults to `SEARCH_TOP_K` (100).
+      schema:
+        type: integer
+        minimum: 1
+        example: 50
+
+    DenseLimit:
+      name: dense_limit
+      in: query
+      description: |
+        Candidate pool size for the dense leg in `hybrid` /
+        `hybrid_classified`. Ignored in `vector` (which uses `k` directly)
+        and `bm25`.
+      schema:
+        type: integer
+        minimum: 1
+        default: 200
+
+    CodesLimit:
+      name: codes_limit
+      in: query
+      description: |
+        Candidate pool size for the BM25 leg in `hybrid` /
+        `hybrid_classified` (non-strict path) and in pure `bm25` mode.
+      schema:
+        type: integer
+        minimum: 1
+        default: 20
+
+    StrictCodesLimit:
+      name: strict_codes_limit
+      in: query
+      description: |
+        Candidate pool size for the BM25 leg when `hybrid_classified`
+        routes to the strict path (opaque ID / MPN queries).
+      schema:
+        type: integer
+        minimum: 1
+        default: 500
+
+    RrfK:
+      name: rrf_k
+      in: query
+      description: RRF `k` constant used to fuse dense and BM25 result lists.
+      schema:
+        type: integer
+        minimum: 1
+        default: 60
+
+    NumCandidates:
+      name: num_candidates
+      in: query
+      description: |
+        HNSW `efSearch`. Must be ≥ the dense leg's limit (`k` in `vector`
+        mode, otherwise `dense_limit`). Ignored by non-HNSW indexes.
+      schema:
+        type: integer
+        minimum: 1
+
+    EnableFallback:
+      name: enable_fallback
+      in: query
+      description: |
+        For `hybrid_classified` only. When `1` (default), a strict-path
+        empty result falls through to hybrid execution. When `0`, the
+        empty strict result is returned as-is.
+      schema:
+        $ref: "#/components/schemas/BoolFlag"
+
+    Debug:
+      name: debug
+      in: query
+      description: When `1`, include a `_debug` block in the response.
+      schema:
+        $ref: "#/components/schemas/BoolFlag"
+
+  schemas:
+    Mode:
+      type: string
+      enum:
+        - vector
+        - bm25
+        - hybrid
+        - hybrid_classified
+      default: hybrid_classified
+
+    BoolFlag:
+      description: |
+        String boolean. Truthy values: `1`, `true`, `yes`, `on`
+        (case-insensitive). Anything else is false. Empty / absent uses
+        the parameter's default.
+      type: string
+      example: "1"
+
+    SearchRequest:
+      type: object
+      required: [query, index]
+      properties:
+        query:
+          type: string
+          description: |
+            User query. Whitespace is trimmed; an empty query
+            short-circuits to `{ "hits": [] }` without contacting Milvus
+            or the embedder.
+          example: cordless drill 18v
+        index:
+          type: string
+          description: |
+            Opaque label echoed back as `_index` on each hit. Lets
+            callers tag results with their logical index name without
+            the server having to know about it.
+          example: offers-prod
+        category:
+          type: string
+          nullable: true
+          description: |
+            **Reserved.** Currently accepted but unused by the server.
+            Kept on the contract for forward compatibility.
+          default: null
+
+    SearchResponse:
+      type: object
+      required: [hits]
+      properties:
+        hits:
+          type: array
+          items:
+            $ref: "#/components/schemas/Hit"
+        _debug:
+          $ref: "#/components/schemas/Debug"
+          description: Present only when `?debug=1`.
+
+    Hit:
+      type: object
+      required: [_index, _id, _score, _source_leg]
+      description: |
+        Elasticsearch-shaped hit. The `_source_leg` field is a search-api
+        extension identifying which retrieval path produced the row.
+      properties:
+        _index:
+          type: string
+          description: Echo of the `index` field from the request body.
+          example: offers-prod
+        _id:
+          type: string
+          description: |
+            Document id, sourced from the Milvus field configured by
+            `ID_FIELDS` (or `id` by default).
+          example: "offer:42"
+        _score:
+          type: number
+          format: double
+          description: |
+            Leg-dependent score:
+              * `dense` — cosine similarity (Milvus `COSINE`).
+              * `bm25` — Milvus BM25 score.
+              * `rrf` — fused reciprocal-rank-fusion score; not comparable across queries.
+          example: 0.0327
+        _source_leg:
+          type: string
+          enum: [dense, bm25, rrf]
+          description: Which retrieval leg produced the hit.
+
+    Debug:
+      type: object
+      description: Per-request diagnostics. Shape is informational and may evolve.
+      properties:
+        path:
+          type: string
+          enum: [vector, bm25, hybrid, strict, fallback]
+          description: Which execution path actually ran.
+        classifier_strict:
+          type: boolean
+          nullable: true
+          description: |
+            Classifier verdict. Only set for `hybrid_classified`; null
+            otherwise.
+        fallback_fired:
+          type: boolean
+          description: True iff strict path returned 0 hits and we fell through to hybrid.
+        embed_ms:
+          type: number
+          nullable: true
+        dense_ms:
+          type: number
+          nullable: true
+        codes_ms:
+          type: number
+          nullable: true
+        dense_hits:
+          type: integer
+          nullable: true
+        codes_hits:
+          type: integer
+          nullable: true
+        params:
+          type: object
+          description: Effective search parameters after defaulting.
+          properties:
+            mode:
+              $ref: "#/components/schemas/Mode"
+            k:
+              type: integer
+            dense_limit:
+              type: integer
+            codes_limit:
+              type: integer
+            strict_codes_limit:
+              type: integer
+            rrf_k:
+              type: integer
+            num_candidates:
+              type: integer
+              nullable: true
+            enable_fallback:
+              type: boolean
+
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+
+    ValidationError:
+      type: object
+      description: FastAPI / Pydantic validation error envelope.
+      required: [detail]
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              loc:
+                type: array
+                items:
+                  oneOf:
+                    - type: string
+                    - type: integer
+              msg:
+                type: string
+              type:
+                type: string

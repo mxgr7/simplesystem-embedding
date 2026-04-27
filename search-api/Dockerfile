@@ -15,7 +15,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         "python-dotenv>=1.0.1" \
         "pymilvus>=2.4.0" \
         "numpy>=1.26.0" \
-        "prometheus-fastapi-instrumentator>=7.0.0"
+        "prometheus-fastapi-instrumentator>=7.0.0" \
+        "pyyaml>=6.0"
 
 COPY search-api ./search-api
 

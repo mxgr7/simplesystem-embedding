@@ -42,9 +42,10 @@ import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Path as PathParam, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient
@@ -53,6 +54,21 @@ from embed_client import EmbedClient
 from hybrid import Hit, Mode, SearchParams, run_search
 
 BASE_DIR = Path(__file__).resolve().parent
+OPENAPI_YAML_PATH = BASE_DIR / "openapi.yaml"
+_OPENAPI_YAML_TEXT = OPENAPI_YAML_PATH.read_text()
+_OPENAPI_SPEC = yaml.safe_load(_OPENAPI_YAML_TEXT)
+
+# Paths served without auth or the concurrency gate. The hand-written
+# OpenAPI doc and its viewers are public so that integrators can fetch
+# the contract without provisioning an API key.
+_PUBLIC_PATHS = frozenset({
+    "/metrics",
+    "/openapi.json",
+    "/openapi.yaml",
+    "/docs",
+    "/docs/oauth2-redirect",
+    "/redoc",
+})
 
 _DEFAULT_ID_FIELD = "id"
 _DEFAULT_CODES_COLLECTION = "offers_codes"
@@ -142,6 +158,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+def _custom_openapi() -> dict:
+    return _OPENAPI_SPEC
+
+
+app.openapi = _custom_openapi  # type: ignore[method-assign]
+
+
+@app.get("/openapi.yaml", include_in_schema=False)
+async def openapi_yaml() -> Response:
+    return Response(content=_OPENAPI_YAML_TEXT, media_type="application/yaml")
+
+
 Instrumentator().instrument(app).expose(
     app, endpoint="/metrics", include_in_schema=False
 )
@@ -149,7 +177,7 @@ Instrumentator().instrument(app).expose(
 
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
-    if request.url.path == "/metrics":
+    if request.url.path in _PUBLIC_PATHS:
         return await call_next(request)
 
     expected: str = request.app.state.api_key
@@ -175,7 +203,7 @@ async def require_api_key(request: Request, call_next):
 
 @app.middleware("http")
 async def limit_concurrency(request: Request, call_next):
-    if request.url.path == "/metrics":
+    if request.url.path in _PUBLIC_PATHS:
         return await call_next(request)
     gate: _ConcurrencyGate = request.app.state.gate
     if not gate.try_acquire():
