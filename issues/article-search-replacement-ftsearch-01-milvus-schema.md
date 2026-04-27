@@ -6,6 +6,10 @@
 
 References: spec §4.8, §6, §7, §9 #4.
 
+**Legacy reference** (next-gen): `article/search/commons/src/main/java/com/simplesystem/nextgen/article/search/commons/domain/SearchArticleDocument.java` (current ES document shape), `…/domain/CategoryPath.java` (`¦` U+00A6 separator with `|` U+007C as the in-element escape).
+
+**Milvus deployment**: `milvusdb/milvus:v2.6.15` (see `/home/mgerer/milvus/docker-compose.yml`). VARCHAR up to 65535, JSON path expressions in `expr`, `group_by_field` for search, `MilvusClient.alter_alias` — all available on this version.
+
 ## Scope
 
 Bring the dense `offers` Milvus collection schema up to parity-readiness: add every scalar field §7 calls out, widen the primary key to carry the legacy `articleId` composite, and stand up the alias-based deployment plumbing required by §4.8.
@@ -15,7 +19,7 @@ This packet only defines and creates the schema. Population is I1; consumption i
 ## In scope
 
 - New collection schema with all of §7:
-  - `vendor_id` (see open question on cardinality)
+  - `vendor_id VARCHAR(64)` — single UUID per offer. Legacy is single (`SearchArticleDocument.java:31`); the existing experimental `vendor_ids ARRAY` form in `scripts/milvus_import.py` is to be replaced.
   - `prices JSON` — full legacy nested-prices array, projected verbatim
   - `delivery_time_days_max INT`
   - `core_marker_enabled_sources ARRAY<STRING>`, `core_marker_disabled_sources ARRAY<STRING>`
@@ -24,9 +28,9 @@ This packet only defines and creates the schema. Population is I1; consumption i
   - `relationship_accessory_for ARRAY<STRING>`, `relationship_spare_part_for ARRAY<STRING>`, `relationship_similar_to ARRAY<STRING>`
   - `closed_catalog BOOL`
   - retain `name`, `manufacturerName`, `ean`, `article_number`, `catalog_version_ids`, `category_l1..l5`, `offer_embedding`
-- Widen `id` to comfortably hold `{friendlyId}:{base64Url(articleNumber)}` (current cap is 64; pick ≥ 256 and document the choice).
+- Widen `id` to `VARCHAR(256)`. Current cap is 64 (`scripts/milvus_import.py:83`); 256 leaves ample headroom for `{friendlyId}:{base64Url(articleNumber)}` (≥ 80 chars in practice). Milvus 2.6.15 allows up to 65535 — no hard limit hit.
 - Scalar indexes on the fields that filtering will hit on the hot path: `vendor_id`, `eclass5_code`, `eclass7_code`, `s2class_code`, `closed_catalog`, `delivery_time_days_max`. Confirm Milvus index types per field type.
-- Schema-creation script under `scripts/` that creates the collection (default name `offers_v2`, configurable) and registers a Milvus alias (default `offers`) pointing at it (`MilvusClient.alter_alias`).
+- Schema-creation script under `scripts/` that creates the collection and registers a Milvus alias (default `offers`) pointing at it (`MilvusClient.alter_alias`). **Naming convention**: versioned constants `offers_v{N}` (e.g. `offers_v2`, `offers_v3`); operator picks `N = current+1` when triggering reindex (I3 takes the name as a CLI argument).
 - ftsearch (`search-api/main.py`) keeps the path-param contract (`/{collection}/_search`) — alias resolution is an operator concern, not an API one. Document this explicitly.
 - Operational notes: how to bring up a new collection, how to register the alias, what to do during a swap.
 
@@ -52,5 +56,4 @@ This packet only defines and creates the schema. Population is I1; consumption i
 
 ## Open questions for this packet
 
-- `vendor_id` cardinality: legacy ES uses a single vendor field, but this repo's existing schema has `vendor_ids ARRAY`. Confirm one-vendor-per-row vs many; if many, keep as ARRAY and adjust §4.3 filter wording in the spec.
-- `prices JSON` query patterns: confirm the Milvus version in use supports the JSON path expressions ftsearch will need at filter time, or fall back to fetching the JSON and resolving in Python (F3/F4 will design accordingly — flag any constraints found here).
+(none — `vendor_id` cardinality locked to single, Milvus 2.6.15 supports JSON-path expressions and `group_by_field`.)

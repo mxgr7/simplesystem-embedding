@@ -6,6 +6,10 @@
 
 References: spec §4.7 (resilience table), §9 #7 (no auth).
 
+**Legacy reference** (next-gen): retry policy values in `article/search/query/src/main/resources/application.yml:91-94` (5 / 500ms / 1.5× / 5s). Tracing baggage W3C entries `userId`, `companyId`, `customerOciSessionId` from same file lines 56-60. Prometheus naming convention from `…/infrastructure/elastic/ElasticsearchMetrics.java` (namespace + `retries=` label tag for cardinality control).
+
+**Latency budget**: legacy SLO **p99 < 5s, p50 < 1s**. Default `FTSEARCH_TIMEOUT_MS=4500` (per call) leaves ~500ms ACL budget; reduce if the retry chain pushes p99 over.
+
 ## Scope
 
 Bring the ACL up to the operational shape §4.7 prescribes. The ACL is "thin" but it is on the request path and adds a network hop; resilience and observability glue is where that hop earns its keep instead of becoming a new failure mode.
@@ -16,12 +20,12 @@ Bring the ACL up to the operational shape §4.7 prescribes. The ACL is "thin" bu
   - Same policy shape as legacy / F7: max 5 attempts, 500ms base, 1.5× multiplier, max 5s delay.
   - Retry on idempotent failures (network errors, 5xx, 503 with `Retry-After`). Do NOT retry on 4xx — those are caller errors and re-running them is pointless.
   - Cap total request time so retries cannot push the request past the legacy SLO; document the budget.
-- **Explicit ftsearch call timeout**: per-call, configurable via env (`FTSEARCH_TIMEOUT_MS`); default sized to keep total p99 within the legacy SLO.
+- **Explicit ftsearch call timeout**: per-call, configurable via env `FTSEARCH_TIMEOUT_MS` (default **4500**, sized to keep total p99 < 5s with the retry chain).
 - **Tracing baggage** forwarding (§4.7):
   - Accept W3C `traceparent` (and `tracestate` if present) on inbound requests.
   - Forward on every outbound ftsearch call.
-  - Forward request-scoped baggage headers (`userId`, `companyId`, `customerOciSessionId`) onto ftsearch and into ACL logs.
-  - Document the exact header names accepted and forwarded.
+  - Forward W3C `baggage`-header entries `userId`, `companyId`, `customerOciSessionId` onto ftsearch and into ACL logs (matches Spring's `management.tracing.baggage.remote-fields`).
+  - Use `opentelemetry-api`; do not invent custom header names.
 - **RED metrics** (Rate / Errors / Duration) for the ACL hop:
   - Use `prometheus-fastapi-instrumentator`.
   - Add counters for ftsearch retries fired and retry exhaustion.

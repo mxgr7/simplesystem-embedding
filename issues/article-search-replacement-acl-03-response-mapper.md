@@ -6,6 +6,8 @@
 
 References: spec §2.2 (explain stub), §3 (response shape), §4.4 (summary shapes), §9 #4 (articleId).
 
+**Legacy reference** (next-gen): response envelope in `api-spec/specs/article-search/spec.yaml`. `articleId` encode/decode in `article/search/commons/src/main/java/com/simplesystem/nextgen/article/search/commons/domain/ArticleId.java:22-37` — wire format `{friendlyId}:{base64Url(articleNumber)}` is byte-identical between ftsearch and the ACL response.
+
 ## Scope
 
 Translate the ftsearch response into the legacy response envelope. Apply the only behavioural deviation that lives in the ACL — the `explain` stub (§2.2). Everything else is pass-through reshape.
@@ -52,4 +54,4 @@ Translate the ftsearch response into the legacy response envelope. Apply the onl
 
 ## Open questions for this packet
 
-- Field naming alignment between ftsearch's response (F2) and legacy: confirm whether F2 chose legacy names verbatim or chose its own; if its own, this mapper does the rename. (Recommendation for F2: pick legacy-shaped names where the mapping is 1:1; saves work here.)
+(none — F2 should pick legacy-shaped field names where the mapping is 1:1 to keep this mapper minimal; deviations land here as explicit renames.)

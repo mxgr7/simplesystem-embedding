@@ -6,6 +6,8 @@
 
 References: spec §3 (response shape), §4.4.
 
+**Legacy reference** (next-gen): kinds enumerated in `article/search/query/src/main/java/com/simplesystem/nextgen/article/search/query/domain/SummaryKind.java`. Note: legacy code has only **9 distinct kinds** — `PLATFORM_CATEGORIES` is exposed in OpenAPI but maps to `ECLASS5SET` in code (re-confirmed). Per-kind extractors live in `query/src/main/java/com/simplesystem/nextgen/article/search/query/infrastructure/search/`: `VendorsSummaryExtractor`, `ManufacturersSummaryExtractor`, `FeaturesSummaryExtractor`, `PricesSummaryExtractor`, `CategorySummaryExtractor`, `EClassGroupCategoriesSummaryExtractor`, `EClassesAggregationCountExtractor`. Reference fixtures: `query/src/test/resources/articles_aggregations/`. Milvus 2.6.15 supports `group_by_field` for search.
+
 ## Scope
 
 Compute every summary kind §4.4 lists over the full filtered hit set, returning them in the response shape the ACL will pass through.
@@ -54,5 +56,4 @@ The 10 summary kinds: `VENDORS`, `MANUFACTURERS`, `FEATURES`, `PRICES`, `CATEGOR
 
 ## Open questions for this packet
 
-- eClass / S2Class hierarchy source: confirm a static checked-in tree is acceptable (it doesn't change often). If it's tenant-overrideable, this packet doesn't cover that — flag a deviation.
-- Milvus `group_by_field` capability for the version in use: confirm before relying on it; fall back to "fetch + Python count" if not.
+- eClass / S2Class hierarchy source: confirm with product whether a static checked-in tree is acceptable (it doesn't change often). If tenant-overrideable, that's a separate workstream — flag during implementation.

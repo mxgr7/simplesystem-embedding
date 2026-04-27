@@ -6,6 +6,8 @@
 
 References: spec §3 (legacy request contract), §4.x (forwarding rules), §8 (cookbook).
 
+**Legacy reference** (next-gen): request shape `api-spec/specs/article-search/query-search-api.yaml` `SearchParams` (lines 113-237). `searchArticlesBy` enum at `article/search/query/src/main/java/com/simplesystem/nextgen/article/search/query/api/ArticleSearchOperations.java:91-117` (only `STANDARD` survives §2.1).
+
 ## Scope
 
 Translate every legacy request the ACL accepts into a single ftsearch call. The ACL is "thin": it is not a query planner, it does not split requests across services, it does not own filters or sorts of its own. It builds the ftsearch request and forwards.

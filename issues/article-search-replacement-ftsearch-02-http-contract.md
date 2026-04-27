@@ -51,7 +51,7 @@ This packet does NOT implement filter/sort/aggregation behaviour — it only loc
 - OpenAPI doc round-trips through any standard validator.
 - Schema diff vs. today's contract is reviewed by the ACL author (A1) before merge — the contract is now frozen for downstream packets.
 
-## Open questions for this packet
+## Resolved decisions
 
-- `pageSize=500` is the legacy cap; confirm ftsearch should also enforce it server-side (recommendation: yes — defence in depth, matches §3).
-- Naming: keep `/{collection}/_search` or move to a versioned route like `/v2/search`? Recommendation: keep, alias-resolved.
+- `pageSize=500` is the legacy cap (`query/src/main/resources/application.yml:22`); ftsearch enforces it server-side (defence in depth).
+- Route stays `/{collection}/_search` (alias-resolved). No versioned route.

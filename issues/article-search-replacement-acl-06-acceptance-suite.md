@@ -6,6 +6,8 @@
 
 References: spec §10 in full.
 
+**Fixture corpus** (locked): synthetic deterministic fixtures for §10 contract tests; **PostHog** (via `scripts/fetch_posthog_search_queries.py`) for the captured-traffic smoke run. Reference legacy aggregation fixtures at `next-gen/article/search/query/src/test/resources/articles_aggregations/` for shape/content inspiration where useful.
+
 ## Scope
 
 The single closing artefact of the project: an automated test suite that drives the running ACL → ftsearch → Milvus stack against a controlled fixture and asserts every line of §10. Result equality vs. legacy is explicitly NOT a goal (§10 prologue) — the suite is contract- and behaviour-focused on the new stack alone.
@@ -50,5 +52,4 @@ The single closing artefact of the project: an automated test suite that drives 
 
 ## Open questions for this packet
 
-- Fixture format: synthetic JSON checked in, or a small slice of MongoDB exported through I1's projection? Recommendation: synthetic and deterministic — captured-traffic playback is separate.
-- Captured-traffic source: PostHog logs already exist in `scripts/fetch_posthog_search_queries.py`; reuse that.
+(none — synthetic deterministic fixtures for contract tests; PostHog corpus for captured-traffic smoke.)

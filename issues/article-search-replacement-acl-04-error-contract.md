@@ -6,6 +6,8 @@
 
 References: spec §2.1 (rejection), §3.1 (envelope + table), §10 (acceptance lines).
 
+**Legacy reference** (next-gen): error envelope schema at `api-spec/specs/article-search/spec.yaml:246-278` (`{message, details, timestamp}`, `details` is array of `{field, message}`). Dropped enum constants enumerated in `article/search/query/src/main/java/com/simplesystem/nextgen/article/search/query/api/ArticleSearchOperations.java:91-117` — full list to reject: `ALL_ATTRIBUTES`, `ARTICLE_NUMBER`, `CUSTOMER_ARTICLE_NUMBER`, `VENDOR_ARTICLE_NUMBER`, `EAN`, `TEST_PROFILE_01..20`.
+
 ## Scope
 
 Reshape every error path so the ACL produces the legacy `{message, details, timestamp}` envelope, including for the input shapes §2.1 has dropped (stale enum values from old next-gen clients).

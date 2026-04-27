@@ -6,18 +6,21 @@
 
 References: spec §1, §2 (the deviations the OpenAPI must encode), §3 (verbatim contract).
 
+**Legacy reference** (next-gen): canonical legacy contract at `api-spec/specs/article-search/spec.yaml` (paths, error envelope at lines 246-278) and `query-search-api.yaml` (`SearchParams` lines 113-237 — defines `searchMode`, `searchArticlesBy`, all filters, sort, summaries). Health endpoint convention in legacy is Spring Boot Actuator (`/actuator/health`, `/actuator/prometheus`).
+
 ## Scope
 
 Stand up the ACL service skeleton in this repo and check in the narrowed legacy OpenAPI as the single source of truth for what next-gen will call. The OpenAPI is the most consequential artefact of this packet — every deviation from the legacy contract (§2) is encoded into the schema, so subsequent packets implement *this* OpenAPI rather than improvising.
 
 ## In scope
 
-- New top-level directory `./acl/` (or another agreed name) housing a FastAPI app:
+- New top-level directory **`./acl/`** (sits next to `./search-api/`) housing a FastAPI app:
   - Single endpoint stub: `POST /article-features/search` returning a 501-equivalent until A2/A3 fill it in.
-  - `/healthz`, `/metrics` (via `prometheus-fastapi-instrumentator`).
-  - App port **8081**; actuator port **9090** (separate uvicorn instance or a second router as the team prefers — match the spec).
-  - `security: []` on all endpoints — no auth, both endpoints are internal (§9 #7).
+  - `/healthz` on app port; `/metrics` (via `prometheus-fastapi-instrumentator`) on metrics port.
+  - **App port 8081, metrics port 9090** (separate uvicorn instance for the metrics port). `security: []` on all endpoints (§9 #7 — no auth, internal service).
+  - Service name **`article-search-acl`**.
   - Packaging that fits this repo's conventions (`pyproject.toml`, lint, formatter).
+  - Deployed in the **same docker-compose stack** as ftsearch (extend `playground-app/compose.yaml` or add a sibling compose file referencing the same TEI + Milvus services).
 - `acl/openapi.yaml` containing the narrowed legacy contract:
   - Mirror `api-spec/specs/article-search/*.yaml` (canonical legacy spec) for `POST /article-features/search` only — other paths are out of scope.
   - Apply every deviation from §2:
@@ -52,5 +55,4 @@ Stand up the ACL service skeleton in this repo and check in the narrowed legacy 
 
 ## Open questions for this packet
 
-- Directory placement: `./acl/` vs `./article-search-acl/`. Pick one; recommendation `./acl/` since it sits next to `./search-api/`.
-- Actuator port: spec says 9090; ftsearch uses `/metrics` on the main port today. Confirm whether the ACL really needs a separate actuator port or whether `/metrics` on 8081 suffices for this internal deployment.
+(none — directory `./acl/`, ports 8081 (app) / 9090 (metrics), same compose as ftsearch.)

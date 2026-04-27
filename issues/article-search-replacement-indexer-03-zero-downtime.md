@@ -6,6 +6,11 @@
 
 References: spec §4.8, §6 (the bulk path is "first-time hydration, schema migrations, and zero-downtime reindex per §4.8").
 
+**Locked operational tunables**:
+- Soak window: **7 days** (configurable via `SOAK_DAYS`).
+- Dual-write window: **bulk-start → alias-swap + 24 hours**, then dual-write stops. Rollback >24h after swap requires bulk re-import (I1), not an alias flip — document this prominently in the runbook.
+- New collection naming: **`offers_v{N}`** (versioned constants). Operator picks `N = current+1` and passes it to the reindex script.
+
 ## Scope
 
 The runbook + thin tooling for swinging the Milvus alias to a freshly-rebuilt collection without dropping search traffic. This is the legacy `@indexProperties.getName()` mechanism rebuilt around `MilvusClient.alter_alias`.
@@ -13,14 +18,14 @@ The runbook + thin tooling for swinging the Milvus alias to a freshly-rebuilt co
 ## In scope
 
 - **Reindex orchestration script** (`scripts/indexer_reindex.py` or `indexer/reindex.py`):
-  - Accept a target collection name (e.g. `offers_v3`).
+  - Accept a target collection name (e.g. `offers_v3`) — operator-supplied, monotonic by convention.
   - Step 1: create the new collection from F1's schema script.
   - Step 2: run I1's bulk pipeline against the new collection.
   - Step 3: instruct I2 (or a parallel consumer) to also write to the new collection until the alias swap (dual-write window). Document this — it may require a config flag on the I2 consumer.
   - Step 4: validation pass — count, sampled-row spot-checks, sanity searches, optional comparison to the live collection.
   - Step 5: alias swap via `MilvusClient.alter_alias`.
-  - Step 6: drain the dual-write window; confirm the old collection is no longer being written.
-  - Step 7 (deferred): drop the old collection after a soak.
+  - Step 6: drain the dual-write window (24h post-swap); confirm the old collection is no longer being written.
+  - Step 7 (deferred): drop the old collection after the 7-day soak.
 - **Validation gates**: each step gated on a clear pass/fail, with a documented rollback. The alias swap is reversible — keep the old collection until soak completes.
 - **Operator docs**: a runbook in `INDEX_HOSTING.md` (or a new doc) covering:
   - When to use this (schema change, bad data, failed bulk).
@@ -50,6 +55,4 @@ The runbook + thin tooling for swinging the Milvus alias to a freshly-rebuilt co
 
 ## Open questions for this packet
 
-- Soak window: how long do we keep the old collection around after a successful swap? Recommendation: 7 days, configurable.
-- Dual-write window: how long is the consumer expected to write to both collections? Long enough that any read still served from the old collection has a corresponding row in the new one. In practice: from "I1 bulk start" until "alias swap + Bounded-consistency window".
 - Whether ftsearch should ever be aware of an in-progress reindex (e.g. health endpoint reflecting it). Recommendation: no — the alias hides it entirely.

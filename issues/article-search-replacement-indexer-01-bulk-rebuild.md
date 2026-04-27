@@ -6,6 +6,14 @@
 
 References: spec §6, §7, §9 #4.
 
+**Legacy reference** (next-gen):
+- `articleId` encode/decode: `article/search/commons/src/main/java/com/simplesystem/nextgen/article/search/commons/domain/ArticleId.java:22-37`. Encoding: `FriendlyId.toFriendlyId(vendorId) + ":" + BaseEncoding.base64Url().omitPadding().encode(articleNumber.getBytes())`. Decoding reverses. **`friendlyId` is derived on the fly from the `vendorId` UUID — not stored** in MongoDB. Port the `FriendlyId` derivation directly.
+- Document shape: `commons/.../domain/SearchArticleDocument.java` (single `vendorId UUID` per offer).
+- Category path: `commons/.../domain/CategoryPath.java:16-40` — separator `¦` (U+00A6); replace `¦` inside elements with `|` (U+007C) at encode time.
+- Legacy indexer reads MongoDB **indirectly** via Kafka events (`indexer/application/src/main/resources/application.yml`, MongoDB env vars `MONGODB_PORTAL_URI_V2`, `MONGODB_PORTAL_DATABASE` lines 10-14). For our **bulk rebuild** we need a direct MongoDB scan; reuse the same env-var conventions.
+
+**TEI embedder** (existing): service defined in `playground-app/compose.yaml` — image `ghcr.io/huggingface/text-embeddings-inference:cpu-1.8`, model mounted at `/model` from `${TEI_MODEL_DIR:-/data/tei-models/useful-cub-58-st}`, mean pooling, port 8080. For heavy reimport runs, a dedicated GPU instance will be provisioned; the indexer must accept an alternative `EMBED_URL` env at runtime to point at it.
+
 ## Scope
 
 Project every parity-critical field from MongoDB into the new Milvus collection schema (F1), and run a full reimport that hydrates the collection from scratch. The projection module is the canonical mapper used by both this packet and I2 (incremental Kafka).
@@ -15,17 +23,17 @@ This packet establishes the indexer surface in the repo. Today the repo has bulk
 ## In scope
 
 - **Projection module** (`indexer/projection.py` or similar): pure function `mongo_record → milvus_row`:
-  - **PK / `id`**: construct `{friendlyId}:{base64Url(articleNumber)}` (§9 #4). If MongoDB stores `friendlyId` directly use it; otherwise derive per legacy code (lift from next-gen).
-  - **`offer_embedding`**: produce via the existing TEI embedder (reuse `search-api/embed_client.py` patterns or call the embedder directly from the indexer — pick one and document).
+  - **PK / `id`**: construct `{friendlyId}:{base64Url(articleNumber)}` (§9 #4). `friendlyId` is **derived from the `vendorId` UUID** — port `FriendlyId.toFriendlyId` from next-gen `commons/.../FriendlyId.java`. The base64Url uses URL-safe alphabet, no padding.
+  - **`offer_embedding`**: produce via the existing TEI service (`EMBED_URL` env). Reuse `search-api/embed_client.py` patterns to avoid embedding-model drift between indexer and query path.
   - **`name`, `manufacturerName`, `ean`, `article_number`**: straight projections.
-  - **`vendor_id`** (or `vendor_ids`): per F1's resolved cardinality.
+  - **`vendor_id`**: single UUID (per F1's locked schema; legacy is single `UUID vendorId`).
   - **`catalog_version_ids`**: as today.
-  - **`category_l1..l5`**: `¦`-separated path encoding (matches the existing convention).
+  - **`category_l1..l5`**: `¦` (U+00A6) separator; if a path element itself contains `¦`, replace it with `|` (U+007C) before joining (per legacy `CategoryPath.java`).
   - **`prices`**: project the legacy nested `prices` array verbatim into JSON: `[{"price": float, "currency": "EUR", "priority": int, "sourcePriceListId": "uuid"}, ...]`. Do NOT collapse — ftsearch resolves at query time (§7).
   - **`delivery_time_days_max`**, **`closed_catalog`**: straight projections.
   - **`core_marker_enabled_sources`**, **`core_marker_disabled_sources`**: array projections.
   - **`eclass5_code`**, **`eclass7_code`**, **`s2class_code`**: integer projections.
-  - **`features`**: tokenise into `name=value` strings (§7). The indexer must reject or escape `=` inside values so the separator stays unambiguous; pick one (recommendation: reject loud, log the offender, drop the feature) and document.
+  - **`features`**: tokenise into `name=value` strings (§7). Legacy stores features structurally (`Set<OfferFeature>{name, values}`) and never serialises through `=`, so there's no precedent. **Policy: reject + log + drop** the offending feature when a value contains `=`. The rest of the row still indexes.
   - **`relationship_accessory_for`**, **`relationship_spare_part_for`**, **`relationship_similar_to`**: array projections.
 - **Bulk pipeline** (`indexer/bulk.py` and a CLI under `scripts/`):
   - Read all relevant records from MongoDB (use existing connection logic if any; otherwise add it cleanly).
@@ -60,6 +68,4 @@ This packet establishes the indexer surface in the repo. Today the repo has bulk
 
 ## Open questions for this packet
 
-- MongoDB connection details: confirm where credentials and connection strings come from (env? secret manager?); align with existing repo conventions.
-- Embedder reuse: ftsearch currently calls a TEI service via `embed_client.py`. The indexer can call the same service or run its own; pick one. Recommendation: the same service to avoid embedding-model drift.
-- `friendlyId` source: confirm whether MongoDB stores it or it must be derived from another field. If derived, lift the derivation from next-gen so behaviour matches.
+(none — MongoDB env vars resolved (`MONGODB_PORTAL_URI_V2`, `MONGODB_PORTAL_DATABASE`); embedder reuse confirmed; `friendlyId` derivation lifted from next-gen `FriendlyId`.)

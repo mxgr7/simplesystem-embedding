@@ -6,6 +6,11 @@
 
 References: spec §6, §9 #8 (Bounded consistency tolerance).
 
+**Legacy reference** (next-gen): `article/search/indexer/application/src/main/resources/application.yml`. Confirmed values:
+- Topic: **`${ENVIRONMENT_NAME}.portal.marketplace.facts.articles.changed`** (line 119).
+- Dead-letter pattern: **`${ENVIRONMENT_NAME}.article.search-indexer-%s.facts.articles.failed`** (line 127).
+- Consumer group: **`article-indexer`** (line 48) — propose `article-search-indexer` (or similar suffix) for the new pipeline so it composes alongside without overlapping legacy offsets. Confirm with infra before first deploy.
+
 ## Scope
 
 Stand up the Kafka consumer that turns MongoDB record-id change notifications into Milvus upserts using the projection module from I1. After I1's bulk run hydrates the collection, this packet keeps it fresh.
@@ -13,8 +18,8 @@ Stand up the Kafka consumer that turns MongoDB record-id change notifications in
 ## In scope
 
 - **Kafka consumer** (`indexer/incremental.py`):
-  - Subscribe to the change-notification topic (name + cluster details from infra; document where they're configured).
-  - Consumer group identity + offset commit policy (commit after successful Milvus upsert, not before).
+  - Subscribe to `${ENVIRONMENT_NAME}.portal.marketplace.facts.articles.changed`.
+  - Consumer group: distinct from legacy `article-indexer` (proposed `article-search-indexer`); commit offsets **after** successful Milvus upsert.
   - Idempotent at the message level: re-delivering the same record id results in the same Milvus row.
   - Per-message flow:
     1. Fetch the current MongoDB record by id.
@@ -39,7 +44,7 @@ Stand up the Kafka consumer that turns MongoDB record-id change notifications in
 
 - `indexer/incremental.py` + entry-point.
 - Embedding-skip hash machinery in the projection (extends I1's module).
-- Dead-letter sink (file? topic? log? — pick one and document).
+- Dead-letter sink: Kafka topic following the legacy pattern `${ENVIRONMENT_NAME}.article.search-indexer-%s.facts.articles.failed` (`%s` = consumer-group suffix or pipeline name).
 - Metrics + dashboards (or at least a documented PromQL set).
 - Tests covering: upsert, delete, dedupe-by-hash skip, retry-then-success, retry exhaustion → dead letter.
 
@@ -53,6 +58,4 @@ Stand up the Kafka consumer that turns MongoDB record-id change notifications in
 
 ## Open questions for this packet
 
-- Topic name / cluster: confirm with infra.
-- Consumer group identity: confirm naming convention so it composes with existing observability.
-- Whether the consumer should serve any HTTP surface (e.g. a `/healthz`, a manual replay endpoint). Recommendation: tiny FastAPI sidecar serving healthz + a controlled replay endpoint, but only if ops asks.
+- Whether the consumer should serve any HTTP surface (e.g. `/healthz`, a manual replay endpoint). Recommendation: tiny FastAPI sidecar serving healthz + a controlled replay endpoint, but only if ops asks.
