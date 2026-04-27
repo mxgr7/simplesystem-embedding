@@ -5,8 +5,11 @@ Modes (`SearchParams.mode`):
   vector             — dense ANN only
   bm25               — BM25 over offers_codes only
   hybrid             — dense + bm25, RRF fused; classifier NOT consulted
-  hybrid_classified  — classifier picks strict path (BM25-only, large limit)
-                       or hybrid; with optional 0-result fallback to hybrid
+  hybrid_classified  — multi-word queries skip the classifier and go
+                       vector-only; single-token queries are routed by the
+                       classifier to either the strict path (BM25-only,
+                       large limit, optional 0-result fallback to hybrid)
+                       or the hybrid path
 
 The classifier patterns mirror §"Query classifier" exactly. Length floor 4
 prevents trivial 2–3 char matches. False positives are caught by the
@@ -297,6 +300,15 @@ async def run_search(
         return _to_hits(fused, "rrf"), _debug_dict(timings, params)
 
     # HYBRID_CLASSIFIED
+    # Multi-word queries are free-text by construction — none of the
+    # classifier patterns admit whitespace, and BM25 over offers_codes is
+    # tokenised on atomic identifiers, so it contributes noise rather than
+    # signal on phrase queries. Route them straight to dense.
+    if len(q.split()) > 1:
+        timings.path = "vector"
+        dense = await do_dense()
+        return _to_hits(dense[: params.k], "dense"), _debug_dict(timings, params)
+
     timings.classifier_strict = is_strict_identifier(q)
     if timings.classifier_strict:
         timings.path = "strict"

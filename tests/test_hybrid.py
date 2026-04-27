@@ -244,6 +244,21 @@ class RunSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(debug["classifier_strict"])
         self.assertEqual([h.id for h in hits], ["d1"])
 
+    async def test_hybrid_classified_multiword_goes_vector_only(self):
+        dense = _make_dense_client([("d1", 0.9), ("d2", 0.8)])
+        codes = _make_codes_client([("c1", 5.0)])
+        hits, debug = await run_search(
+            "blue ballpoint pen",
+            SearchParams(mode=Mode.HYBRID_CLASSIFIED, k=10),
+            dense_client=dense, codes_client=codes, embed=_embed,
+        )
+        self.assertEqual([h.id for h in hits], ["d1", "d2"])
+        self.assertTrue(all(h.source == "dense" for h in hits))
+        self.assertEqual(debug["path"], "vector")
+        # Classifier is short-circuited before it runs.
+        self.assertIsNone(debug["classifier_strict"])
+        codes.search.assert_not_called()
+
     async def test_strict_zero_results_falls_back_to_hybrid(self):
         dense = _make_dense_client([("d1", 0.9)])
         # First call (strict, large limit) returns []; second call (hybrid
