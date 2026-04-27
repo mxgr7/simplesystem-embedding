@@ -27,6 +27,12 @@ Environment variables:
                             returned as ``_id``: ``col=field,col2=field2``.
   API_KEY                   Shared secret. Required via
                             ``Authorization: ApiKey <key>`` or ``X-API-Key``.
+  MAX_CONCURRENT_SEARCHES   Hard cap on in-flight search requests. Excess
+                            requests return 503 + ``Retry-After: 1``. Sized
+                            to keep p99 well under SLO under burst load;
+                            saturation throughput sits well below the cap
+                            so this only fires during true overload.
+                            Default 64. Set to 0 to disable.
 """
 
 from __future__ import annotations
@@ -50,6 +56,31 @@ BASE_DIR = Path(__file__).resolve().parent
 
 _DEFAULT_ID_FIELD = "id"
 _DEFAULT_CODES_COLLECTION = "offers_codes"
+_DEFAULT_MAX_CONCURRENCY = 64
+
+
+class _ConcurrencyGate:
+    """Non-blocking in-process concurrency cap.
+
+    asyncio is single-threaded, so the int read+write between awaits is
+    atomic — no lock needed. ``limit <= 0`` disables the gate.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.inflight = 0
+
+    def try_acquire(self) -> bool:
+        if self.limit <= 0:
+            return True
+        if self.inflight >= self.limit:
+            return False
+        self.inflight += 1
+        return True
+
+    def release(self) -> None:
+        if self.limit > 0 and self.inflight > 0:
+            self.inflight -= 1
 
 
 def _required_env(name: str) -> str:
@@ -99,6 +130,9 @@ async def lifespan(app: FastAPI):
     app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "100"))
     app.state.id_fields = _parse_id_fields(os.environ.get("ID_FIELDS", ""))
     app.state.api_key = os.environ.get("API_KEY", "")
+    app.state.gate = _ConcurrencyGate(
+        int(os.environ.get("MAX_CONCURRENT_SEARCHES", _DEFAULT_MAX_CONCURRENCY))
+    )
     try:
         yield
     finally:
@@ -137,6 +171,23 @@ async def require_api_key(request: Request, call_next):
             headers={"WWW-Authenticate": 'ApiKey realm="search-api"'},
         )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def limit_concurrency(request: Request, call_next):
+    if request.url.path == "/metrics":
+        return await call_next(request)
+    gate: _ConcurrencyGate = request.app.state.gate
+    if not gate.try_acquire():
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "search-api at concurrency limit"},
+            headers={"Retry-After": "1"},
+        )
+    try:
+        return await call_next(request)
+    finally:
+        gate.release()
 
 
 def _parse_mode(raw: str | None) -> Mode:
