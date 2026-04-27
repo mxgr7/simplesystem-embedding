@@ -1,0 +1,52 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # ---- milvus stack (reached over the external 'milvus' docker network) ----
+
+  - job_name: milvus-standalone
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["milvus-standalone:9091"]
+        labels:
+          stack: milvus
+
+  - job_name: etcd
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["milvus-etcd:2379"]
+        labels:
+          stack: milvus
+
+  - job_name: minio
+    # Requires MINIO_PROMETHEUS_AUTH_TYPE=public on the minio container.
+    # The /cluster endpoint redirects to a node-scoped path on first hit.
+    metrics_path: /minio/v2/metrics/cluster
+    static_configs:
+      - targets: ["milvus-minio:9000"]
+        labels:
+          stack: milvus
+
+  # ---- playground stack (reached via host gateway since the apps run host-net) ----
+
+  - job_name: tei
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          stack: playground
+
+  - job_name: playground-app
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          stack: playground
+
+  - job_name: search-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8001"]
+        labels:
+          stack: playground

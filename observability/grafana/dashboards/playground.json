@@ -1,0 +1,181 @@
+{
+  "title": "Playground (TEI / playground-app / search-api)",
+  "uid": "playground-stack",
+  "schemaVersion": 38,
+  "version": 2,
+  "editable": true,
+  "refresh": "1m",
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "tags": ["playground", "tei", "fastapi"],
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Service health",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Up",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 1},
+      "targets": [
+        {"expr": "up{job=\"tei\"}", "refId": "A", "legendFormat": "tei"},
+        {"expr": "up{job=\"playground-app\"}", "refId": "B", "legendFormat": "playground-app"},
+        {"expr": "up{job=\"search-api\"}", "refId": "C", "legendFormat": "search-api"}
+      ],
+      "options": {"colorMode": "background", "textMode": "value_and_name", "orientation": "horizontal"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "row",
+      "id": 200,
+      "title": "TEI (text-embeddings-inference)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 2,
+      "title": "Embed request rate (req/s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 7},
+      "targets": [
+        {"expr": "sum by (method) (rate(te_request_count[5m]))", "refId": "A", "legendFormat": "{{method}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0, "stacking": {"mode": "normal"}}, "unit": "reqps"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Request latency (p50/p95/p99, s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 7},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(te_request_duration_bucket[5m])))", "refId": "A", "legendFormat": "p50", "interval": "1m"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_request_duration_bucket[5m])))", "refId": "B", "legendFormat": "p95", "interval": "1m"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(te_request_duration_bucket[5m])))", "refId": "C", "legendFormat": "p99", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Queue size",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 15},
+      "targets": [
+        {"expr": "te_queue_size", "refId": "A", "legendFormat": "queue", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Batch inference size (avg)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 15},
+      "targets": [
+        {"expr": "rate(te_batch_inference_size_sum[5m]) / rate(te_batch_inference_size_count[5m])", "refId": "A", "legendFormat": "avg batch", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Batch inference duration p95 (s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 15},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_batch_inference_duration_bucket[5m])))", "refId": "A", "legendFormat": "p95", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "row",
+      "id": 300,
+      "title": "search-api",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 22},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Request rate by status (req/s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 23},
+      "targets": [
+        {"expr": "sum by (status) (rate(http_requests_total{job=\"search-api\"}[5m]))", "refId": "A", "legendFormat": "{{status}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0, "stacking": {"mode": "normal"}}, "unit": "reqps"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 8,
+      "title": "Latency by handler (p95, s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 23},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le, handler) (rate(http_request_duration_seconds_bucket{job=\"search-api\"}[5m])))", "refId": "A", "legendFormat": "{{handler}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "row",
+      "id": 400,
+      "title": "playground-app",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 31},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 9,
+      "title": "Request rate by status (req/s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "sum by (status) (rate(http_requests_total{job=\"playground-app\"}[5m]))", "refId": "A", "legendFormat": "{{status}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0, "stacking": {"mode": "normal"}}, "unit": "reqps"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Latency by handler (p95, s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le, handler) (rate(http_request_duration_seconds_bucket{job=\"playground-app\"}[5m])))", "refId": "A", "legendFormat": "{{handler}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "In-flight requests",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 40},
+      "targets": [
+        {"expr": "sum by (job) (http_requests_inprogress)", "refId": "A", "legendFormat": "{{job}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    }
+  ]
+}

@@ -20,7 +20,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         "pymilvus>=2.4.0" \
         "duckdb>=1.5.0" \
         "pandas>=2.2.3" \
-        "pyarrow>=19.0.1"
+        "pyarrow>=19.0.1" \
+        "prometheus-fastapi-instrumentator>=7.0.0"
 
 COPY playground-app ./playground-app
 
