@@ -24,7 +24,7 @@ is mmap-backed; sparse posting lists are mmap-backed via the index param.
 Index timing: SPARSE_INVERTED_INDEX is defined BEFORE the first bulk-insert
 job. Milvus 2.6's bulk-insert pipeline auto-builds the index inline during
 its IndexBuilding stage; post-hoc create_index would be a no-op. See
-APRIL_21.md for the prior incident.
+APRIL_21_offers_bulk_import.md for the prior incident.
 """
 
 from __future__ import annotations
@@ -192,7 +192,7 @@ def wait_for_jobs(jobs: dict[str, int]) -> int:
 def wait_index_finished(col: Collection, field: str, poll_s: int = 5) -> float:
     """state=Finished with indexed_rows=0 on a non-empty collection means
     no build task is registered, NOT success. Only accept Finished when
-    indexed_rows == total_rows. APRIL_21.md."""
+    indexed_rows == total_rows. APRIL_21_offers_bulk_import.md."""
     t0 = time.time()
     while True:
         progress = utility.index_building_progress(col.name, index_name=field)

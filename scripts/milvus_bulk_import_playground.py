@@ -27,7 +27,7 @@ The two nullable fields carry NULL on the 845,927 "sparse" rows (4.6% of input)
 which have no enrichment data. All rows are imported — vector search covers the
 full corpus; scalar filters naturally miss sparse rows.
 
-See APRIL_21.md for the operational lessons this script inherits (index-before-
+See APRIL_21_offers_bulk_import.md for the operational lessons this script inherits (index-before-
 bulk-insert, pipelined stage+submit, inline `IndexBuilding` in the job).
 """
 
@@ -260,7 +260,7 @@ def wait_for_jobs(jobs: dict[str, int]) -> int:
 def wait_index_finished(col: Collection, field: str, poll_s: int = 5) -> float:
     """Guard: state=Finished with indexed_rows=0 on a non-empty collection is
     the 'no build task registered' response, NOT success. Only accept
-    Finished when indexed_rows == total_rows. See APRIL_21.md for history."""
+    Finished when indexed_rows == total_rows. See APRIL_21_offers_bulk_import.md for history."""
     t0 = time.time()
     while True:
         progress = utility.index_building_progress(col.name, index_name=field)
@@ -318,7 +318,7 @@ def main() -> None:
 
     # Indexes MUST be defined before the first bulk-insert job is submitted.
     # Milvus 2.6's bulk-insert pipeline builds them inline; post-hoc
-    # create_index is a no-op (state=Finished, indexed_rows=0). APRIL_21.md.
+    # create_index is a no-op (state=Finished, indexed_rows=0). APRIL_21_offers_bulk_import.md.
     print(f"\nDefining HNSW index on offer_embedding "
           f"(M={HNSW_M}, efConstruction={HNSW_EF_CONSTRUCTION})...", flush=True)
     col.create_index(

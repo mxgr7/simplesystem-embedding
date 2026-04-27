@@ -87,7 +87,7 @@ forcing a 10× shrink to 5k/batch — that, together with the raw payload
 size, is why insert rate drops to 5.2k rows/s. Post-load RSS grew
 +5.2 GB (the data is held in the columnar store for return-as-output;
 `load_fields` does not help, only `mmap` can disk-back it — see
-`APRIL_20.md`). MinIO +15 GB captures the compressed binlog of ~5 GB of
+`APRIL_20_hnsw_reindex.md`). MinIO +15 GB captures the compressed binlog of ~5 GB of
 raw description data. Still well within RAM and disk budget on this
 bucket, but at full 16× scale this extrapolates to ~83 GB RSS and
 ~240 GB MinIO just for description — worth keeping on disk via
@@ -170,7 +170,7 @@ corpus would OOM somewhere during iter 10 (`catalog_version_ids`).
 
 The three knobs that bring it back inside the budget — each
 independently large enough to matter — are exactly those identified in
-`APRIL_20.md`:
+`APRIL_20_hnsw_reindex.md`:
 
 1. **HNSW instead of IVF_FLAT** (saves ~45 GB at full scale). IVF_FLAT
    in Knowhere upcasts fp16 → fp32 internally for build and search,
@@ -183,7 +183,7 @@ independently large enough to matter — are exactly those identified in
    `load_fields` (insert_log still resident, but query-time materialize
    from disk) or mmap the field.
 
-Cross-check: APRIL_20.md reports the actual full-dataset run at
+Cross-check: APRIL_20_hnsw_reindex.md reports the actual full-dataset run at
 **94.9 GB RSS** with HNSW + scalar mmap + `load_fields=[id,
 offer_embedding]`. That matches an HNSW-halved baseline (~50 GB
 vector + ~1 GB heap) plus residual mmap'd-but-not-fully-evicted

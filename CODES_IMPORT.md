@@ -138,7 +138,7 @@ schema.add_function(Function(
 ))
 ```
 
-Index (defined **before** the first bulk-insert submit, per APRIL_21.md):
+Index (defined **before** the first bulk-insert submit, per APRIL_21_offers_bulk_import.md):
 
 ```python
 idx.add_index("sparse_codes",

@@ -143,7 +143,7 @@ $ utility.get_query_segment_info('offers')            → 224 segments
 index dominates. `insert_log` at 104 GB is the per-field binlog data
 (embedding fp16 bytes + all scalar fields).
 
-### Why RSS is 125 GiB (vs APRIL_20.md's 94.9 GiB)
+### Why RSS is 125 GiB (vs APRIL_20_hnsw_reindex.md's 94.9 GiB)
 
 This run's field footprint is larger than APRIL_20's. APRIL_20 was a re-index
 of a collection with only {id, offer_embedding, 7 scalar arrays}. This run
