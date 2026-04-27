@@ -39,8 +39,21 @@ DAYS_DEFAULT = 30
 EVENT_NAME_DEFAULT = "search_performed"
 
 EAN_RE = re.compile(r"^(\d{8}|\d{12,14})$")
-HYPHEN_DIGIT_RE = re.compile(r"^(?=.*\d)[a-z0-9]+(?:-[a-z0-9]+)+$", re.IGNORECASE)
-ALPHA_DIGIT_RE = re.compile(r"^[a-z]+\d+[a-z0-9]*$", re.IGNORECASE)
+HYPHEN_DIGIT_RE = re.compile(
+    r"^(?=.{7,}$)(?=(?:[^\d]*\d){3,})[a-z0-9]+(?:-[a-z0-9]+)+$", re.IGNORECASE
+)
+ALPHA_DIGIT_RE = re.compile(r"^(?=.{7,}$)[a-z]+\d{4,}[a-z0-9]*$", re.IGNORECASE)
+GENERIC_TOKENS = frozenset({
+    "cr2032", "cr2025", "cr2016", "cr1632", "cr1620",
+    "lr44", "lr41", "lr1130", "sr44", "sr41",
+    "rj45", "rj11", "rj12",
+    "usb-c", "usb-a", "usb-b", "hdmi", "displayport", "vga", "dvi-d",
+    "cat5", "cat5e", "cat6", "cat6a", "cat7", "cat8",
+    "ffp1", "ffp2", "ffp3", "n95", "n99", "kn95",
+    "wd-40", "wd40",
+    "m3", "m4", "m5", "m6", "m8", "m10", "m12", "m16", "m20",
+    "ip54", "ip65", "ip66", "ip67", "ip68",
+})
 
 
 def hogql(host: str, project_id: str, api_key: str, query: str) -> dict:
@@ -102,7 +115,9 @@ def fetch_queries(host: str, project_id: str, api_key: str,
 def is_strict(q: str) -> bool:
     """Mirrors hybrid.is_strict_identifier without importing it (this script
     sits next to the import infrastructure but doesn't depend on it)."""
-    q = q.strip()
+    q = q.strip().lower()
+    if q in GENERIC_TOKENS:
+        return False
     if not (4 <= len(q) <= 40):
         return False
     return bool(

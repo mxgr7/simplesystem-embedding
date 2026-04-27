@@ -35,18 +35,55 @@ from pymilvus import MilvusClient
 # ──────────────────────────────────────────────────────────────────────
 # Classifier (§"Query classifier")
 # ──────────────────────────────────────────────────────────────────────
+#
+# Tightened from the original v0 patterns: short generic tokens like rj45,
+# wd-40, cr2032, ffp2 were getting routed to the strict path, which gives
+# the wrong cardinal answer (BM25 atomic-token retrieval returns ≤ a
+# handful of hits, dense handles them well). The strict path now requires
+# both length ≥7 AND a meaningful digit count, which excludes those
+# industry-generic tokens while still catching real opaque MPNs and
+# hyphenated codes (tze-231, gtb6-p5211, 221-413, e1987303). A static
+# denylist catches anything that would still slip through.
 
 ID_PATTERNS = [
-    r"\d{8}",                                  # EAN-8
-    r"\d{12,14}",                              # UPC-A / EAN-13 / GTIN-14
-    r"(?=.*\d)[a-z0-9]+(?:-[a-z0-9]+)+",       # hyphenated WITH at least one digit
-    r"[a-z]+\d+[a-z0-9]*",                     # alpha-then-digit
+    r"\d{8}",                                                    # EAN-8
+    r"\d{12,14}",                                                # UPC-A / EAN-13 / GTIN-14
+    # Hyphenated: ≥7 chars total AND ≥3 digits anywhere.
+    r"(?=.{7,}$)(?=(?:[^\d]*\d){3,})[a-z0-9]+(?:-[a-z0-9]+)+",
+    # Alpha-then-digit: ≥7 chars total AND ≥4 consecutive digits after the
+    # letter prefix.
+    r"(?=.{7,}$)[a-z]+\d{4,}[a-z0-9]*",
 ]
 _ID_RE = re.compile("|".join(f"^{p}$" for p in ID_PATTERNS), re.IGNORECASE)
 
+# Industry-generic tokens that pass shape checks but route incorrectly to
+# strict (the right answer is a dense+BM25 hybrid). Empirically grounded —
+# extend as new offenders surface in the query logs. Match is case- and
+# whitespace-insensitive (handled by is_strict_identifier's normalisation).
+GENERIC_TOKENS = frozenset({
+    # Coin / button cell batteries
+    "cr2032", "cr2025", "cr2016", "cr1632", "cr1620",
+    "lr44", "lr41", "lr1130", "sr44", "sr41",
+    # Network / data connectors
+    "rj45", "rj11", "rj12",
+    "usb-c", "usb-a", "usb-b", "hdmi", "displayport", "vga", "dvi-d",
+    # Twisted-pair cable categories
+    "cat5", "cat5e", "cat6", "cat6a", "cat7", "cat8",
+    # Respirator filter classes
+    "ffp1", "ffp2", "ffp3", "n95", "n99", "kn95",
+    # Lubricants
+    "wd-40", "wd40",
+    # Metric thread sizes
+    "m3", "m4", "m5", "m6", "m8", "m10", "m12", "m16", "m20",
+    # Ingress-protection ratings
+    "ip54", "ip65", "ip66", "ip67", "ip68",
+})
+
 
 def is_strict_identifier(q: str) -> bool:
-    q = q.strip()
+    q = q.strip().lower()
+    if q in GENERIC_TOKENS:
+        return False
     if not (4 <= len(q) <= 40):
         return False
     return bool(_ID_RE.fullmatch(q))

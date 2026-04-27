@@ -35,18 +35,10 @@ class IsStrictIdentifierTests(unittest.TestCase):
         ("4031100000000", True),           # EAN-13
         ("123456789012", True),            # UPC-A
         ("12345678901234", True),          # GTIN-14
-        ("tze-231", True),                 # hyphenated with digit
-        ("h07v-k", True),                  # hyphenated with digit
-        ("wd-40", True),                   # hyphenated with digit
-        ("221-413", True),                 # hyphenated with digit
-        ("gtb6-p5211", True),              # hyphenated with digit
-        ("cr2032", True),                  # alpha-then-digit
-        ("rj45", True),                    # alpha-then-digit
-        ("lr44", True),                    # alpha-then-digit
-        ("ffp2", True),                    # alpha-then-digit
-        ("dtw300", True),                  # alpha-then-digit
-        ("e1987303", True),                # alpha-then-digit
-        ("RJ45", True),                    # case-insensitive
+        ("tze-231", True),                 # hyphenated, 7 chars, 3 digits
+        ("221-413", True),                 # hyphenated, 7 chars, 6 digits
+        ("gtb6-p5211", True),              # hyphenated, 10 chars, 5 digits
+        ("e1987303", True),                # alpha-then-digit, 8 chars, 7 digits
         ("TZE-231", True),                 # case-insensitive
     ]
 
@@ -69,6 +61,19 @@ class IsStrictIdentifierTests(unittest.TestCase):
         ("   ", False),                    # whitespace only
         ("hello world", False),            # contains space
         ("a" * 41, False),                 # over length cap
+        # Industry-generic tokens — pre-tightening these were classified
+        # strict, but the right answer is a dense+BM25 hybrid.
+        ("rj45", False),                   # 4 chars — fails length ≥7
+        ("RJ45", False),                   # case-insensitive variant
+        ("lr44", False),                   # fails length ≥7
+        ("ffp2", False),                   # fails length ≥7
+        ("cr2032", False),                 # 6 chars, fails length ≥7
+        ("dtw300", False),                 # 6 chars, fails length ≥7
+        ("h07v-k", False),                 # 6 chars, fails length ≥7
+        ("wd-40", False),                  # 5 chars, fails length ≥7
+        # Denylist hits (would otherwise satisfy regex shape).
+        ("usb-c", False),                  # short generic — denylist
+        ("displayport", False),            # generic — no digits but defense-in-depth
     ]
 
     def test_positives(self):
@@ -82,7 +87,7 @@ class IsStrictIdentifierTests(unittest.TestCase):
                 self.assertEqual(is_strict_identifier(q), expected)
 
     def test_strips_surrounding_whitespace(self):
-        self.assertTrue(is_strict_identifier("  rj45  "))
+        self.assertTrue(is_strict_identifier("  e1987303  "))
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -195,7 +200,7 @@ class RunSearchTests(unittest.IsolatedAsyncioTestCase):
         dense = _make_dense_client([])
         codes = _make_codes_client([("c1", 5.0), ("c2", 5.0)])
         hits, debug = await run_search(
-            "rj45",
+            "e1987303",
             SearchParams(mode=Mode.HYBRID_CLASSIFIED, k=10),
             dense_client=dense, codes_client=codes, embed=_embed,
         )
@@ -225,7 +230,7 @@ class RunSearchTests(unittest.IsolatedAsyncioTestCase):
         # single mock, so set both to []; the dense leg supplies results.
         codes = _make_codes_client([])
         hits, debug = await run_search(
-            "rj45",
+            "e1987303",
             SearchParams(mode=Mode.HYBRID_CLASSIFIED, k=10, enable_fallback=True),
             dense_client=dense, codes_client=codes, embed=_embed,
         )
@@ -237,7 +242,7 @@ class RunSearchTests(unittest.IsolatedAsyncioTestCase):
         dense = _make_dense_client([("d1", 0.9)])
         codes = _make_codes_client([])
         hits, debug = await run_search(
-            "rj45",
+            "e1987303",
             SearchParams(mode=Mode.HYBRID_CLASSIFIED, k=10, enable_fallback=False),
             dense_client=dense, codes_client=codes, embed=_embed,
         )
