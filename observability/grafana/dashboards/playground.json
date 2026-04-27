@@ -20,15 +20,31 @@
     {
       "type": "stat",
       "id": 1,
-      "title": "Up",
+      "title": "TEI",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 1},
-      "targets": [
-        {"expr": "up{job=\"tei\"}", "refId": "A", "legendFormat": "tei"},
-        {"expr": "up{job=\"playground-app\"}", "refId": "B", "legendFormat": "playground-app"},
-        {"expr": "up{job=\"search-api\"}", "refId": "C", "legendFormat": "search-api"}
-      ],
-      "options": {"colorMode": "background", "textMode": "value_and_name", "orientation": "horizontal"},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 1},
+      "targets": [{"expr": "up{job=\"tei\"}", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "id": 12,
+      "title": "playground-app",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 1},
+      "targets": [{"expr": "up{job=\"playground-app\"}", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "id": 13,
+      "title": "search-api",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 1},
+      "targets": [{"expr": "up{job=\"search-api\"}", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
       "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
     },
     {
@@ -62,7 +78,7 @@
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_request_duration_bucket[5m])))", "refId": "B", "legendFormat": "p95", "interval": "1m"},
         {"expr": "histogram_quantile(0.99, sum by (le) (rate(te_request_duration_bucket[5m])))", "refId": "C", "legendFormat": "p99", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
     },
     {
@@ -74,7 +90,7 @@
       "targets": [
         {"expr": "te_queue_size", "refId": "A", "legendFormat": "queue", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "short"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
     },
     {
@@ -98,7 +114,7 @@
       "targets": [
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_batch_inference_duration_bucket[5m])))", "refId": "A", "legendFormat": "p95", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
     },
     {
@@ -130,7 +146,7 @@
       "targets": [
         {"expr": "histogram_quantile(0.95, sum by (le, handler) (rate(http_request_duration_seconds_bucket{job=\"search-api\"}[5m])))", "refId": "A", "legendFormat": "{{handler}}", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
     },
     {
@@ -162,7 +178,7 @@
       "targets": [
         {"expr": "histogram_quantile(0.95, sum by (le, handler) (rate(http_request_duration_seconds_bucket{job=\"playground-app\"}[5m])))", "refId": "A", "legendFormat": "{{handler}}", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
     },
     {
@@ -174,7 +190,7 @@
       "targets": [
         {"expr": "sum by (job) (http_requests_inprogress)", "refId": "A", "legendFormat": "{{job}}", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "short"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "short"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
     }
   ]

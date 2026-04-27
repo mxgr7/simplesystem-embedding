@@ -2,7 +2,7 @@
   "title": "Milvus / etcd / MinIO",
   "uid": "milvus-stack",
   "schemaVersion": 38,
-  "version": 2,
+  "version": 4,
   "editable": true,
   "refresh": "1m",
   "time": {"from": "now-1h", "to": "now"},
@@ -11,8 +11,8 @@
   "panels": [
     {
       "type": "row",
-      "id": 100,
-      "title": "Milvus",
+      "id": 50,
+      "title": "Service health",
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
       "collapsed": false,
       "panels": []
@@ -20,19 +20,47 @@
     {
       "type": "stat",
       "id": 1,
-      "title": "Up",
+      "title": "Milvus",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 1},
       "targets": [{"expr": "up{job=\"milvus-standalone\"}", "refId": "A"}],
       "options": {"colorMode": "background", "textMode": "auto"},
       "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "id": 9,
+      "title": "etcd has leader",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 1},
+      "targets": [{"expr": "etcd_server_has_leader", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "NO", "color": "red"}, "1": {"text": "YES", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "id": 12,
+      "title": "MinIO",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 1},
+      "targets": [{"expr": "up{job=\"minio\"}", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Milvus",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "collapsed": false,
+      "panels": []
     },
     {
       "type": "timeseries",
       "id": 2,
       "title": "Proxy request rate (req/s by type)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 10, "x": 4, "y": 1},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
       "targets": [
         {"expr": "sum by (function_name) (rate(milvus_proxy_req_count{status=\"success\"}[5m]))", "refId": "A", "legendFormat": "{{function_name}}", "interval": "1m"}
       ],
@@ -44,11 +72,11 @@
       "id": 3,
       "title": "Proxy request latency p95 (s)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 10, "x": 14, "y": 1},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
       "targets": [
         {"expr": "histogram_quantile(0.95, sum by (le, function_name) (rate(milvus_proxy_req_latency_bucket[5m])))", "refId": "A", "legendFormat": "{{function_name}}", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
     },
     {
@@ -56,7 +84,7 @@
       "id": 4,
       "title": "Search vectors / s",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 9},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 14},
       "targets": [
         {"expr": "sum(rate(milvus_proxy_search_vectors_count[5m]))", "refId": "A", "legendFormat": "search", "interval": "1m"}
       ],
@@ -68,7 +96,7 @@
       "id": 5,
       "title": "Insert vectors / s",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 9},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 14},
       "targets": [
         {"expr": "sum(rate(milvus_proxy_insert_vectors_count[5m]))", "refId": "A", "legendFormat": "insert", "interval": "1m"}
       ],
@@ -80,7 +108,7 @@
       "id": 6,
       "title": "Loaded segments (querynode)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 9},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 14},
       "targets": [
         {"expr": "sum(milvus_querynode_loaded_segments_num) by (collection_id, segment_state)", "refId": "A", "legendFormat": "{{collection_id}} / {{segment_state}}", "interval": "1m"}
       ],
@@ -92,7 +120,7 @@
       "id": 7,
       "title": "Standalone process: RSS memory",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 17},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 22},
       "targets": [
         {"expr": "process_resident_memory_bytes{job=\"milvus-standalone\"}", "refId": "A", "legendFormat": "rss", "interval": "1m"}
       ],
@@ -104,7 +132,7 @@
       "id": 8,
       "title": "Standalone process: CPU (cores)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 17},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 22},
       "targets": [
         {"expr": "rate(process_cpu_seconds_total{job=\"milvus-standalone\"}[5m])", "refId": "A", "legendFormat": "cpu", "interval": "1m"}
       ],
@@ -115,26 +143,16 @@
       "type": "row",
       "id": 200,
       "title": "etcd",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 24},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 29},
       "collapsed": false,
       "panels": []
-    },
-    {
-      "type": "stat",
-      "id": 9,
-      "title": "Has leader",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 25},
-      "targets": [{"expr": "etcd_server_has_leader", "refId": "A"}],
-      "options": {"colorMode": "background", "textMode": "auto"},
-      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "NO", "color": "red"}, "1": {"text": "YES", "color": "green"}}}]}, "overrides": []}
     },
     {
       "type": "timeseries",
       "id": 10,
       "title": "DB size",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 10, "x": 4, "y": 25},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 30},
       "targets": [
         {"expr": "etcd_mvcc_db_total_size_in_bytes", "refId": "A", "legendFormat": "size", "interval": "1m"},
         {"expr": "etcd_mvcc_db_total_size_in_use_in_bytes", "refId": "B", "legendFormat": "in use", "interval": "1m"}
@@ -147,38 +165,28 @@
       "id": 11,
       "title": "fsync duration p95 (s)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 10, "x": 14, "y": 25},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 30},
       "targets": [
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])))", "refId": "A", "legendFormat": "wal fsync", "interval": "1m"},
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(etcd_disk_backend_commit_duration_seconds_bucket[5m])))", "refId": "B", "legendFormat": "backend commit", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2}, "unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
     },
     {
       "type": "row",
       "id": 300,
       "title": "MinIO",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 33},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 38},
       "collapsed": false,
       "panels": []
-    },
-    {
-      "type": "stat",
-      "id": 12,
-      "title": "Up",
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 34},
-      "targets": [{"expr": "up{job=\"minio\"}", "refId": "A"}],
-      "options": {"colorMode": "background", "textMode": "auto"},
-      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
     },
     {
       "type": "timeseries",
       "id": 13,
       "title": "Cluster capacity used (bytes)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 10, "x": 4, "y": 34},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 39},
       "targets": [
         {"expr": "minio_cluster_capacity_usable_total_bytes - minio_cluster_capacity_usable_free_bytes", "refId": "A", "legendFormat": "used", "interval": "1m"},
         {"expr": "minio_cluster_capacity_usable_total_bytes", "refId": "B", "legendFormat": "total", "interval": "1m"}
@@ -191,7 +199,7 @@
       "id": 14,
       "title": "Bucket usage (bytes)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 10, "x": 14, "y": 34},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 39},
       "targets": [
         {"expr": "minio_bucket_usage_total_bytes", "refId": "A", "legendFormat": "{{bucket}}", "interval": "1m"}
       ],
@@ -203,7 +211,7 @@
       "id": 15,
       "title": "S3 request rate by api",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 42},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 47},
       "targets": [
         {"expr": "sum by (api) (rate(minio_s3_requests_total[5m]))", "refId": "A", "legendFormat": "{{api}}", "interval": "1m"}
       ],
@@ -215,7 +223,7 @@
       "id": 16,
       "title": "S3 traffic (bytes/s)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 42},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 47},
       "targets": [
         {"expr": "rate(minio_s3_traffic_received_bytes[5m])", "refId": "A", "legendFormat": "received", "interval": "1m"},
         {"expr": "rate(minio_s3_traffic_sent_bytes[5m])", "refId": "B", "legendFormat": "sent", "interval": "1m"}
