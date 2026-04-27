@@ -13,9 +13,9 @@ prevents trivial 2–3 char matches. False positives are caught by the
 0-result fallback; false negatives still fall through to hybrid where BM25
 will pick them up — see §"Asymmetric error handling".
 
-Strict-path tied-score order: doc says product-level secondary sort is out
-of scope. We add a deterministic ascending-`id` tiebreaker so A/B logging
-is reproducible, nothing more.
+Tied-score order: doc says product-level secondary sort is out of scope.
+We add a deterministic id-ascending tiebreaker on every leg and at the
+RRF merge so A/B logging is reproducible — nothing more.
 """
 
 from __future__ import annotations
@@ -152,6 +152,10 @@ def _dense_search(
     for h in raw:
         ent = h.get("entity", {}) if isinstance(h, dict) else {}
         out.append((str(ent.get(id_field, "")), float(h["distance"])))
+    # Deterministic per-leg ordering: score desc, id asc within ties. ANN
+    # ties are rare on fp16 cosine but possible (e.g., duplicate offers);
+    # locking the tiebreak removes a non-determinism source from RRF.
+    out.sort(key=lambda r: (-r[1], r[0]))
     return out
 
 
@@ -163,7 +167,6 @@ def _bm25_search(
     limit: int,
     sparse_field: str = "sparse_codes",
     id_field: str = "id",
-    tied_id_asc: bool = False,
 ) -> list[tuple[str, float]]:
     res = client.search(
         collection_name=collection,
@@ -178,9 +181,11 @@ def _bm25_search(
     for h in raw:
         ent = h.get("entity", {}) if isinstance(h, dict) else {}
         out.append((str(ent.get(id_field, "")), float(h["distance"])))
-    if tied_id_asc:
-        # Stable secondary sort: by score desc, then id asc within ties.
-        out.sort(key=lambda r: (-r[1], r[0]))
+    # Deterministic per-leg ordering: score desc, id asc within ties. BM25
+    # ties are common when query tokens partition cleanly across docs;
+    # without this the rank-N vs rank-N+1 assignment (and thus the RRF
+    # contribution) is non-deterministic across calls.
+    out.sort(key=lambda r: (-r[1], r[0]))
     return out
 
 
@@ -195,12 +200,17 @@ def rrf_merge(
 ) -> list[tuple[str, float]]:
     """Reciprocal Rank Fusion — parameter-free over per-list scores. Ranks
     are 1-based; identical scores within a list are not flattened (callers
-    that care can pre-sort)."""
+    must pre-sort with a deterministic tiebreaker — the helpers above do
+    score-desc + id-asc).
+
+    Final tie-break is id ascending so that two ids with identical fused
+    scores resolve in a reproducible order regardless of which leg
+    inserted them first."""
     scores: dict[str, float] = defaultdict(float)
     for hits in result_lists:
         for rank, (hid, _score) in enumerate(hits, start=1):
             scores[hid] += 1.0 / (k + rank)
-    return sorted(scores.items(), key=lambda x: -x[1])[:top_n]
+    return sorted(scores.items(), key=lambda x: (-x[1], x[0]))[:top_n]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -256,11 +266,11 @@ async def run_search(
         timings.dense_hits = len(out)
         return out
 
-    async def do_bm25(limit: int, *, tied_id_asc: bool) -> list[tuple[str, float]]:
+    async def do_bm25(limit: int) -> list[tuple[str, float]]:
         t0 = time.perf_counter()
         out = await asyncio.to_thread(
             _bm25_search, codes_client, codes_collection,
-            text=q.lower(), limit=limit, tied_id_asc=tied_id_asc,
+            text=q.lower(), limit=limit,
         )
         timings.codes_ms = (time.perf_counter() - t0) * 1000
         timings.codes_hits = len(out)
@@ -274,14 +284,14 @@ async def run_search(
 
     if params.mode == Mode.BM25:
         timings.path = "bm25"
-        bm = await do_bm25(params.codes_limit, tied_id_asc=True)
+        bm = await do_bm25(params.codes_limit)
         return _to_hits(bm[: params.k], "bm25"), _debug_dict(timings, params)
 
     if params.mode == Mode.HYBRID:
         timings.path = "hybrid"
         dense, bm = await asyncio.gather(
             do_dense(),
-            do_bm25(params.codes_limit, tied_id_asc=False),
+            do_bm25(params.codes_limit),
         )
         fused = rrf_merge([dense, bm], k=params.rrf_k, top_n=params.k)
         return _to_hits(fused, "rrf"), _debug_dict(timings, params)
@@ -290,7 +300,7 @@ async def run_search(
     timings.classifier_strict = is_strict_identifier(q)
     if timings.classifier_strict:
         timings.path = "strict"
-        bm = await do_bm25(params.strict_codes_limit, tied_id_asc=True)
+        bm = await do_bm25(params.strict_codes_limit)
         if bm:
             return _to_hits(bm[: params.k], "bm25"), _debug_dict(timings, params)
         if not params.enable_fallback:
@@ -304,7 +314,7 @@ async def run_search(
         timings.path = "hybrid"
     dense, bm = await asyncio.gather(
         do_dense(),
-        do_bm25(params.codes_limit, tied_id_asc=False),
+        do_bm25(params.codes_limit),
     )
     fused = rrf_merge([dense, bm], k=params.rrf_k, top_n=params.k)
     return _to_hits(fused, "rrf"), _debug_dict(timings, params)

@@ -107,14 +107,35 @@ class RrfMergeTests(unittest.TestCase):
         merged = rrf_merge([dense, codes], k=60, top_n=10)
         self.assertEqual(merged[0][0], "a")
 
-    def test_codes_top_one_ties_dense_top_one(self):
-        # An exact-identifier hit at codes rank 1 should land above a
-        # dense rank-2 hit (1/61 > 1/62).
+    def test_codes_top_one_outranks_dense_rank_two(self):
+        # Codes rank-1 (1/61) beats dense rank-2 (1/62); dense rank-1 ("d1")
+        # is also at 1/61, so the top two share a fused score and the
+        # tiebreak is id-ascending: "c1" < "d1".
         dense = [("d1", 0.9), ("d2", 0.85)]
         codes = [("c1", 10.0)]
         merged = rrf_merge([dense, codes], k=60, top_n=10)
         ids = [hid for hid, _ in merged]
-        self.assertEqual(ids[:2], ["d1", "c1"])
+        self.assertEqual(ids[:2], ["c1", "d1"])
+
+    def test_ties_broken_by_id_ascending(self):
+        # Two ids appearing only at rank 1 in their respective lists tie
+        # at 1/(60+1). Without a deterministic tiebreak, dict insertion
+        # order would decide. With id-asc, "alpha" < "beta".
+        merged = rrf_merge([[("beta", 0.9)], [("alpha", 5.0)]], k=60, top_n=10)
+        self.assertEqual([hid for hid, _ in merged], ["alpha", "beta"])
+
+    def test_deterministic_across_leg_ordering(self):
+        # Given the caller contract (each leg score-desc, id-asc on ties),
+        # swapping the order of the leg lists at the merge call must not
+        # change the output. The id-asc final tiebreak makes the merge
+        # commutative over the leg axis when fused scores tie.
+        dense = [("d1", 0.9), ("d2", 0.85)]
+        codes = [("a", 5.0), ("z", 4.0)]
+        m1 = rrf_merge([dense, codes], k=60, top_n=10)
+        m2 = rrf_merge([codes, dense], k=60, top_n=10)
+        self.assertEqual([h for h, _ in m1], [h for h, _ in m2])
+        # Tied rank-1 hits across legs resolve "a" before "d1".
+        self.assertEqual([h for h, _ in m1][:2], ["a", "d1"])
 
     def test_top_n_truncates(self):
         dense = [(f"d{i}", 1.0 - i * 0.01) for i in range(50)]
