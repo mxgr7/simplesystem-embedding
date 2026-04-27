@@ -1,0 +1,36 @@
+Running structural-filter probes…
+  12 probes OK
+
+Pass 1: computing frequency-cap denylist over all 16 buckets…
+  denylist size: 81  (113.6s)
+
+Pass 2: materialising per-bucket staging parquets…
+  bucket=00.parquet: in= 9,954,348  out= 9,891,740  ean= 6,821,314 mpn= 8,032,174 art= 9,151,615  (6.1s)
+  bucket=01.parquet: in= 9,951,864  out= 9,889,250  ean= 6,822,882 mpn= 8,029,883 art= 9,150,481  (10.2s)
+  bucket=02.parquet: in= 9,955,033  out= 9,892,388  ean= 6,822,187 mpn= 8,033,673 art= 9,152,517  (9.9s)
+  bucket=03.parquet: in= 9,952,055  out= 9,889,565  ean= 6,820,064 mpn= 8,034,492 art= 9,150,461  (4.4s)
+  bucket=04.parquet: in= 9,955,580  out= 9,892,822  ean= 6,824,846 mpn= 8,036,177 art= 9,150,410  (4.1s)
+  bucket=05.parquet: in= 9,956,666  out= 9,893,927  ean= 6,826,644 mpn= 8,036,035 art= 9,153,451  (4.2s)
+  bucket=06.parquet: in= 9,957,159  out= 9,893,753  ean= 6,823,257 mpn= 8,035,493 art= 9,153,933  (4.2s)
+  bucket=07.parquet: in= 9,953,828  out= 9,890,759  ean= 6,819,353 mpn= 8,033,296 art= 9,151,238  (3.4s)
+  bucket=08.parquet: in= 9,956,192  out= 9,893,081  ean= 6,824,248 mpn= 8,033,745 art= 9,152,765  (3.6s)
+  bucket=09.parquet: in= 9,949,283  out= 9,886,293  ean= 6,821,925 mpn= 8,029,663 art= 9,146,153  (3.3s)
+  bucket=10.parquet: in= 9,953,854  out= 9,891,409  ean= 6,822,635 mpn= 8,035,185 art= 9,151,611  (3.2s)
+  bucket=11.parquet: in= 9,956,023  out= 9,893,069  ean= 6,823,636 mpn= 8,034,310 art= 9,154,248  (3.1s)
+  bucket=12.parquet: in= 9,956,054  out= 9,892,799  ean= 6,824,947 mpn= 8,035,234 art= 9,152,535  (2.9s)
+  bucket=13.parquet: in= 9,953,747  out= 9,890,720  ean= 6,820,888 mpn= 8,032,022 art= 9,151,401  (2.8s)
+  bucket=14.parquet: in= 9,952,761  out= 9,890,117  ean= 6,823,775 mpn= 8,032,705 art= 9,150,430  (2.8s)
+  bucket=15.parquet: in= 9,960,827  out= 9,898,013  ean= 6,829,025 mpn= 8,040,285 art= 9,158,586  (2.8s)
+
+Computing distinct-value counts on the materialised data…
+
+Sanity probes against the materialised text_codes corpus…
+  '00000000': 0 rows
+  '4031100000000': 0 rows
+  'n/a': 0 rows
+  'magnet': 0 rows
+
+Writing audit report to /home/mgerer/simplesystem-embedding/reports/codes_audit.md
+
+Done in 232.3s. Output: /data/datasets/offers_codes_staging.parquet
+  rows kept: 158,269,705 / 159,275,274 (99.37%)

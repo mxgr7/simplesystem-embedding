@@ -1,14 +1,25 @@
-"""FastAPI + htmx search playground over a Milvus offers collection.
+"""FastAPI + htmx playground for the offers index.
+
+Search itself is delegated to the sibling search-api service (a single
+source of truth for hybrid behaviour); the playground only renders the UI
+and joins display fields keyed on the IDs that come back. Run them both
+through ``compose.yaml``.
 
 Environment variables:
-  EMBED_URL            Base URL of a TEI-compatible embedding service.
-  QUERY_PREFIX         String prepended to every query before embedding.
-                       Matches the training-time query template (e.g. "query: "
-                       for E5-family models). Default: empty.
-  MILVUS_URI           Milvus gRPC URI (e.g. http://localhost:19530).
-  MILVUS_COLLECTION    Milvus collection name (default: ``offers``).
-  PAGE_SIZE            Results per page / per "load more" click (default: 50).
-  SEARCH_TOP_K         Max retrievable hits per query (default: 100).
+  EMBED_URL                Reported in the debug panel; actual embedding
+                           happens inside search-api.
+  QUERY_PREFIX             Reported in debug panel; actual prefixing also
+                           happens inside search-api.
+  MILVUS_URI               Milvus gRPC URI. Used for the display-field
+                           lookup and for debug-panel collection metadata.
+  MILVUS_COLLECTION        Dense collection name (default ``offers``).
+  MILVUS_CODES_COLLECTION  Codes collection (default ``offers_codes``).
+  SEARCH_API_URL           Base URL of the search-api service
+                           (default ``http://localhost:8001``).
+  SEARCH_API_KEY           API key for search-api (sent as ``X-API-Key``).
+  PAGE_SIZE                Results per page / per "load more" click
+                           (default 50).
+  SEARCH_TOP_K             Default ``k`` when not overridden in the form.
 """
 
 from __future__ import annotations
@@ -22,19 +33,29 @@ from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Path as PathParam, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from prometheus_fastapi_instrumentator import Instrumentator
+from pymilvus import MilvusClient
 
-from embed_client import EmbedClient
-from milvus_search import OUTPUT_FIELDS, Hit, MilvusSearch
+from milvus_search import (
+    OUTPUT_FIELDS,
+    CollectionInfo,
+    Display,
+    OffersLookup,
+    describe_collection,
+)
 from offer_lookup import OfferLookup
 from random_query import RandomQueryPicker
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_FILE = BASE_DIR.parent / "logs" / "playground-app.log"
+
+VALID_MODES = ("vector", "bm25", "hybrid", "hybrid_classified")
 
 
 def _build_request_logger() -> logging.Logger:
@@ -71,37 +92,85 @@ def _parse_positive_int(raw: str, default):
     return value if value > 0 else default
 
 
+def _parse_optional_positive_int(raw: str) -> int | None:
+    return _parse_positive_int(raw, default=None)
+
+
+def _flag(raw: str, default: bool) -> bool:
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _parse_mode(raw: str) -> str:
+    raw = (raw or "").strip()
+    if raw in VALID_MODES:
+        return raw
+    return "hybrid_classified"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_dotenv(BASE_DIR / ".env")
     load_dotenv(BASE_DIR.parent / ".env")
 
-    app.state.embed_url = _required_env("EMBED_URL")
-    app.state.embed = EmbedClient(app.state.embed_url)
-    app.state.milvus = MilvusSearch(
-        uri=_required_env("MILVUS_URI"),
-        collection=os.environ.get("MILVUS_COLLECTION", "offers"),
-    )
+    milvus_uri = _required_env("MILVUS_URI")
+    dense_col = os.environ.get("MILVUS_COLLECTION", "offers")
+    codes_col = os.environ.get("MILVUS_CODES_COLLECTION", "offers_codes")
+
+    app.state.milvus_uri = milvus_uri
+    app.state.dense_collection = dense_col
+    app.state.codes_collection = codes_col
+    app.state.milvus = MilvusClient(milvus_uri)
+    app.state.offers_lookup = OffersLookup(app.state.milvus, dense_col)
+
+    app.state.search_api_url = os.environ.get(
+        "SEARCH_API_URL", "http://localhost:8001"
+    ).rstrip("/")
+    app.state.search_api_key = os.environ.get("SEARCH_API_KEY", "")
+    app.state.http = httpx.AsyncClient(timeout=30.0)
+
+    app.state.embed_url = os.environ.get("EMBED_URL", "")
+    app.state.query_prefix = os.environ.get("QUERY_PREFIX", "")
     app.state.page_size = int(os.environ.get("PAGE_SIZE", "50"))
     app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "100"))
-    app.state.query_prefix = os.environ.get("QUERY_PREFIX", "")
+
     app.state.auth_user = os.environ.get("PLAYGROUND_USER", "admin")
     app.state.auth_password = os.environ.get("PLAYGROUND_PASSWORD", "")
-    app.state.milvus_info = app.state.milvus.describe()
+
+    app.state.dense_info = describe_collection(app.state.milvus, milvus_uri, dense_col)
+    try:
+        app.state.codes_info = describe_collection(app.state.milvus, milvus_uri, codes_col)
+    except Exception:
+        # The codes collection may not exist yet (e.g. before the bulk
+        # import has run). Surface as missing in the debug panel rather
+        # than crashing the whole app.
+        logging.getLogger("playground").warning(
+            "codes collection %r not available at startup", codes_col,
+        )
+        app.state.codes_info = None
+
     app.state.offers = OfferLookup(_required_env("OFFERS_PARQUET_DIR"))
     app.state.random_query = RandomQueryPicker(_required_env("QUERIES_PARQUET_DIR"))
     try:
         yield
     finally:
-        await app.state.embed.aclose()
+        await app.state.http.aclose()
         app.state.offers.close()
 
 
 app = FastAPI(lifespan=lifespan)
 
 
+Instrumentator().instrument(app).expose(
+    app, endpoint="/metrics", include_in_schema=False
+)
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    if request.url.path == "/metrics":
+        return await call_next(request)
     t0 = time.perf_counter()
     response = await call_next(request)
     elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -121,6 +190,8 @@ async def log_requests(request: Request, call_next):
 
 @app.middleware("http")
 async def require_basic_auth(request: Request, call_next):
+    if request.url.path == "/metrics":
+        return await call_next(request)
     password = request.app.state.auth_password
     if not password:
         return await call_next(request)
@@ -156,7 +227,8 @@ async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "index.html",
-        {"query": "", "initial_html": "", "css_version": _css_version()},
+        {"query": "", "initial_html": "", "css_version": _css_version(),
+         "form": _empty_form_state()},
     )
 
 
@@ -165,84 +237,121 @@ async def search(
     request: Request,
     q: str = Query("", min_length=0),
     offset: int = Query(0, ge=0),
+    mode: str = Query(""),
     k: str = Query(""),
     num_candidates: str = Query(""),
+    dense_limit: str = Query(""),
+    codes_limit: str = Query(""),
+    rrf_k: str = Query(""),
+    enable_fallback: str = Query(""),
 ) -> HTMLResponse:
     q = q.strip()
     page_size: int = request.app.state.page_size
+
+    parsed_mode = _parse_mode(mode)
     top_k: int = _parse_positive_int(k, default=request.app.state.top_k)
-    ef: int | None = _parse_positive_int(num_candidates, default=None)
+    nc: int | None = _parse_optional_positive_int(num_candidates)
+    dl: int | None = _parse_optional_positive_int(dense_limit)
+    cl: int | None = _parse_optional_positive_int(codes_limit)
+    rk: int | None = _parse_optional_positive_int(rrf_k)
+    fb: bool = _flag(enable_fallback, default=True)
+    form_state = _form_state(parsed_mode, k, num_candidates, dense_limit,
+                             codes_limit, rrf_k, fb)
 
     is_htmx = request.headers.get("hx-request") == "true"
     is_load_more = is_htmx and offset > 0
 
     if not q:
         ctx = {"query": "", "cards": [], "next_offset": None, "total_hits": 0,
-               "took_ms": 0, "embed_ms": 0}
+               "took_ms": 0, "embed_ms": 0, "form": form_state}
         if is_htmx:
             return templates.TemplateResponse(request, "results.html", ctx)
         return templates.TemplateResponse(
-            request, "index.html", {**ctx, "initial_html": ""}
+            request, "index.html",
+            {**ctx, "initial_html": "", "css_version": _css_version()}
         )
 
     t_total = time.perf_counter()
 
-    rendered_query = f"{request.app.state.query_prefix}{q}"
-    t0 = time.perf_counter()
-    try:
-        vectors = await request.app.state.embed.embed([rendered_query])
-    except Exception as exc:
-        logging.getLogger("playground").exception("embed request failed")
-        return _render_error(
-            request,
-            query=q,
-            error={
-                "title": "Embedding service unavailable",
-                "detail": f"{type(exc).__name__}: {exc}".strip()
-                          or "The embedding backend did not respond.",
-            },
-            is_htmx=is_htmx,
-            is_load_more=is_load_more,
-        )
-    embed_ms = (time.perf_counter() - t0) * 1000
+    api_params: dict[str, str] = {"mode": parsed_mode, "k": str(top_k), "debug": "1"}
+    if nc is not None: api_params["num_candidates"] = str(nc)
+    if dl is not None: api_params["dense_limit"] = str(dl)
+    if cl is not None: api_params["codes_limit"] = str(cl)
+    if rk is not None: api_params["rrf_k"] = str(rk)
+    api_params["enable_fallback"] = "1" if fb else "0"
+
+    headers = {}
+    if request.app.state.search_api_key:
+        headers["X-API-Key"] = request.app.state.search_api_key
+
+    url = (
+        f"{request.app.state.search_api_url}/"
+        f"{request.app.state.dense_collection}/_search"
+    )
+    payload = {"query": q, "category": None, "index": "playground"}
 
     t0 = time.perf_counter()
     try:
-        if vectors:
-            hits, search_params = request.app.state.milvus.search(
-                vectors[0], limit=top_k, ef=ef
-            )
-        else:
-            hits, search_params = [], {"metric_type": "COSINE", "params": {}}
-    except Exception as exc:
-        logging.getLogger("playground").exception("milvus search failed")
-        return _render_error(
-            request,
-            query=q,
-            error={
-                "title": "Milvus search failed",
-                "detail": f"{type(exc).__name__}: {exc}".strip()
-                          or "Milvus did not return a result.",
-            },
-            is_htmx=is_htmx,
-            is_load_more=is_load_more,
+        resp = await request.app.state.http.post(
+            url, params=api_params, json=payload, headers=headers
         )
-    milvus_ms = (time.perf_counter() - t0) * 1000
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = (exc.response.text or "").strip()
+        return _render_error(
+            request, query=q,
+            error={
+                "title": f"search-api returned {exc.response.status_code}",
+                "detail": body[:500] or exc.response.reason_phrase,
+            },
+            is_htmx=is_htmx, is_load_more=is_load_more, form=form_state,
+        )
+    except Exception as exc:
+        logging.getLogger("playground").exception("search-api call failed")
+        return _render_error(
+            request, query=q,
+            error={
+                "title": "Search backend unavailable",
+                "detail": f"{type(exc).__name__}: {exc}".strip()
+                          or "Could not reach the search-api service.",
+            },
+            is_htmx=is_htmx, is_load_more=is_load_more, form=form_state,
+        )
+    api_ms = (time.perf_counter() - t0) * 1000
 
-    visible = hits[: offset + page_size]
+    body = resp.json()
+    api_hits = body.get("hits", [])
+    api_debug = body.get("_debug", {}) or {}
+
+    ids = [h["_id"] for h in api_hits if h.get("_id")]
+    t0 = time.perf_counter()
+    by_id = request.app.state.offers_lookup.fetch(ids) if ids else {}
+    lookup_ms = (time.perf_counter() - t0) * 1000
+
+    ordered: list[tuple[dict, Display]] = []
+    for h in api_hits:
+        hid = h.get("_id", "")
+        disp = by_id.get(hid)
+        if disp is None:
+            # IDs not found in the dense collection — would indicate
+            # offers_codes drift from offers. Skip rather than render a
+            # broken card.
+            continue
+        ordered.append((h, disp))
+
+    visible = ordered[: offset + page_size]
     page_slice = visible[offset:]
-    cards = [_build_card(h) for h in page_slice]
+    cards = [_build_card(h, d) for h, d in page_slice]
 
-    next_offset = offset + page_size if len(hits) > offset + page_size else None
-    total_hits = len(hits)
+    next_offset = offset + page_size if len(ordered) > offset + page_size else None
+    total_hits = len(ordered)
     took_ms = int((time.perf_counter() - t_total) * 1000)
 
-    top_score = hits[0].score if hits else None
-    last_score = hits[-1].score if hits else None
+    top_score = ordered[0][0].get("_score") if ordered else None
+    last_score = ordered[-1][0].get("_score") if ordered else None
+    legs_seen = sorted({h.get("_source_leg", "") for h, _ in ordered})
 
-    info = request.app.state.milvus_info
-
-    category_facet = _aggregate_category_l1(hits)
+    category_facet = _aggregate_category_l1([d for _, d in ordered])
 
     ctx = {
         "query": q,
@@ -250,81 +359,122 @@ async def search(
         "next_offset": next_offset,
         "total_hits": total_hits,
         "took_ms": took_ms,
-        "embed_ms": int(embed_ms),
+        "embed_ms": int(api_debug.get("embed_ms") or 0),
         "category_facet": category_facet,
-        "debug": {
-            # Query
-            "query": q,
-            "rendered_query": rendered_query,
-            "query_prefix": request.app.state.query_prefix,
-            "embed_url": request.app.state.embed_url,
-            "embed_dim": len(vectors[0]) if vectors else 0,
-            "offset": offset,
-            "page_size": page_size,
-            "top_k": top_k,
-            "num_candidates": ef,
-            # Timing
-            "took_ms": took_ms,
-            "embed_ms": round(embed_ms, 1),
-            "milvus_ms": round(milvus_ms, 1),
-            "other_ms": round(max(0.0, took_ms - embed_ms - milvus_ms), 1),
-            # Results
-            "hits": total_hits,
-            "shown": len(cards),
-            "top_score": round(top_score, 4) if top_score is not None else None,
-            "last_score": round(last_score, 4) if last_score is not None else None,
-            # Milvus static info
-            "milvus_uri": info.uri,
-            "collection": info.collection,
-            "row_count": info.row_count,
-            "load_state": info.load_state,
-            "partitions": info.num_partitions,
-            "shards": info.num_shards,
-            "vector_field": info.vector_field,
-            "vector_dim": info.vector_dim,
-            "vector_dtype": info.vector_dtype,
-            "index_type": info.index_type,
-            "metric_type": info.metric_type,
-            "index_params": info.index_params,
-            "indexed_rows": info.indexed_rows,
-            "index_state": info.index_state,
-            "scalar_indexes": info.scalar_indexes,
-            # Search-time params actually sent to Milvus
-            "search_params": search_params,
-            "output_fields": OUTPUT_FIELDS,
-        },
+        "form": form_state,
+        "debug": _debug_payload(
+            request, q, parsed_mode, top_k, api_params, api_debug,
+            api_ms, lookup_ms, took_ms, total_hits, len(cards),
+            top_score, last_score, legs_seen,
+        ),
     }
 
     if is_load_more:
         return templates.TemplateResponse(request, "_card_items.html", ctx)
-
     if is_htmx:
         return templates.TemplateResponse(request, "results.html", ctx)
-
     fragment = templates.get_template("results.html").render(request=request, **ctx)
     return templates.TemplateResponse(
-        request,
-        "index.html",
+        request, "index.html",
         {"query": q, "initial_html": fragment, "css_version": _css_version()},
     )
 
 
-def _render_error(
+def _empty_form_state() -> dict:
+    return {
+        "mode": "hybrid_classified", "k": "", "num_candidates": "",
+        "dense_limit": "", "codes_limit": "", "rrf_k": "",
+        "enable_fallback": True,
+    }
+
+
+def _form_state(
+    mode: str, k: str, nc: str, dl: str, cl: str, rk: str, fb: bool,
+) -> dict:
+    return {
+        "mode": mode, "k": k, "num_candidates": nc,
+        "dense_limit": dl, "codes_limit": cl, "rrf_k": rk,
+        "enable_fallback": fb,
+    }
+
+
+def _debug_payload(
     request: Request,
-    *,
-    query: str,
-    error: dict,
-    is_htmx: bool,
-    is_load_more: bool,
+    q: str, mode: str, top_k: int,
+    api_params: dict, api_debug: dict,
+    api_ms: float, lookup_ms: float, took_ms: int,
+    total_hits: int, shown: int,
+    top_score: float | None, last_score: float | None,
+    legs_seen: list[str],
+) -> dict:
+    rendered = f"{request.app.state.query_prefix}{q}"
+    dense: CollectionInfo = request.app.state.dense_info
+    codes: CollectionInfo | None = request.app.state.codes_info
+
+    return {
+        "query": q,
+        "rendered_query": rendered,
+        "query_prefix": request.app.state.query_prefix,
+        "embed_url": request.app.state.embed_url,
+        "embed_dim": dense.vector_dim if dense else 0,
+        "page_size": request.app.state.page_size,
+        "top_k": top_k,
+        "mode": mode,
+        "search_api_url": request.app.state.search_api_url,
+        "api_params": api_params,
+        "path": api_debug.get("path"),
+        "classifier_strict": api_debug.get("classifier_strict"),
+        "fallback_fired": api_debug.get("fallback_fired"),
+        "embed_ms": api_debug.get("embed_ms"),
+        "dense_ms": api_debug.get("dense_ms"),
+        "codes_ms": api_debug.get("codes_ms"),
+        "dense_hits": api_debug.get("dense_hits"),
+        "codes_hits": api_debug.get("codes_hits"),
+        "params_echo": api_debug.get("params"),
+        "took_ms": took_ms,
+        "api_ms": round(api_ms, 1),
+        "lookup_ms": round(lookup_ms, 1),
+        "other_ms": round(max(0.0, took_ms - api_ms - lookup_ms), 1),
+        "hits": total_hits,
+        "shown": shown,
+        "top_score": round(top_score, 4) if top_score is not None else None,
+        "last_score": round(last_score, 4) if last_score is not None else None,
+        "legs_seen": legs_seen,
+        "milvus_uri": request.app.state.milvus_uri,
+        "dense": _info_dict(dense),
+        "codes": _info_dict(codes) if codes else None,
+        "output_fields": OUTPUT_FIELDS,
+    }
+
+
+def _info_dict(info: CollectionInfo | None) -> dict | None:
+    if info is None:
+        return None
+    return {
+        "collection": info.collection,
+        "row_count": info.row_count,
+        "load_state": info.load_state,
+        "partitions": info.num_partitions,
+        "shards": info.num_shards,
+        "vector_field": info.vector_field,
+        "vector_dim": info.vector_dim,
+        "vector_dtype": info.vector_dtype,
+        "index_type": info.index_type,
+        "metric_type": info.metric_type,
+        "index_params": info.index_params,
+        "indexed_rows": info.indexed_rows,
+        "index_state": info.index_state,
+        "scalar_indexes": info.scalar_indexes,
+    }
+
+
+def _render_error(
+    request: Request, *, query: str, error: dict,
+    is_htmx: bool, is_load_more: bool, form: dict,
 ) -> HTMLResponse:
     ctx = {
-        "query": query,
-        "cards": [],
-        "next_offset": None,
-        "total_hits": 0,
-        "took_ms": 0,
-        "embed_ms": 0,
-        "error": error,
+        "query": query, "cards": [], "next_offset": None, "total_hits": 0,
+        "took_ms": 0, "embed_ms": 0, "error": error, "form": form,
     }
     if is_load_more:
         return templates.TemplateResponse(request, "_error_li.html", ctx)
@@ -332,8 +482,7 @@ def _render_error(
         return templates.TemplateResponse(request, "results.html", ctx)
     fragment = templates.get_template("results.html").render(request=request, **ctx)
     return templates.TemplateResponse(
-        request,
-        "index.html",
+        request, "index.html",
         {"query": query, "initial_html": fragment, "css_version": _css_version()},
     )
 
@@ -365,23 +514,24 @@ async def offer_details(
     )
 
 
-def _aggregate_category_l1(hits: list[Hit], limit: int = 15) -> list[dict]:
+def _aggregate_category_l1(displays: list[Display], limit: int = 15) -> list[dict]:
     counter: Counter[str] = Counter()
-    for hit in hits:
-        for path in hit.category_paths:
+    for d in displays:
+        for path in d.category_paths:
             if path:
                 counter[path[0]] += 1
     return [{"name": name, "count": count} for name, count in counter.most_common(limit)]
 
 
-def _build_card(hit: Hit) -> dict:
+def _build_card(api_hit: dict, d: Display) -> dict:
     return {
-        "id": hit.id,
-        "score": hit.score,
-        "name": hit.name or "(unnamed offer)",
-        "manufacturer": hit.manufacturer,
-        "ean": hit.ean,
-        "article_number": hit.article_number,
-        "catalog_version_ids": hit.catalog_version_ids,
-        "category_paths": hit.category_paths,
+        "id": d.id,
+        "score": float(api_hit.get("_score", 0.0)),
+        "score_source": api_hit.get("_source_leg", ""),
+        "name": d.name or "(unnamed offer)",
+        "manufacturer": d.manufacturer,
+        "ean": d.ean,
+        "article_number": d.article_number,
+        "catalog_version_ids": d.catalog_version_ids,
+        "category_paths": d.category_paths,
     }

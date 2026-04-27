@@ -11,7 +11,7 @@
   <div class="site-header">
     <div class="site-header-inner">
       <h1 class="site-title">Fine-tuned Embedding Search <span class="site-title-sep">—</span> Playground</h1>
-      <p class="site-subtitle">e5 fine-tune · Milvus + HNSW · simplesystem offer catalog</p>
+      <p class="site-subtitle">e5 fine-tune · Milvus dense + BM25 codes · simplesystem offer catalog</p>
     </div>
   </div>
   <header class="topbar">
@@ -24,7 +24,7 @@
                 hx-swap="innerHTML"
                 hx-push-url="true"
                 hx-indicator="#search-indicator"
-                hx-include="[name='k'],[name='num_candidates']">
+                hx-include="[name='mode'],[name='k'],[name='num_candidates'],[name='dense_limit'],[name='codes_limit'],[name='rrf_k'],[name='enable_fallback']">
             <svg class="search-icon" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true"><circle cx="9.5" cy="9.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m14 14 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             <input type="text" name="q" placeholder="Search here" value="{{ query }}" autocomplete="off" autofocus>
             <button type="button" class="clear-btn" aria-label="Clear" onclick="this.form.q.value='';this.form.q.focus();">
@@ -40,12 +40,43 @@
       </div>
       <div class="search-params" id="search-params">
         <label class="param">
+          <span class="param-label">mode</span>
+          <select name="mode">
+            <option value="hybrid_classified" {% if (form.mode if form is defined else 'hybrid_classified') == 'hybrid_classified' %}selected{% endif %}>hybrid (classified)</option>
+            <option value="hybrid" {% if form is defined and form.mode == 'hybrid' %}selected{% endif %}>hybrid (always)</option>
+            <option value="vector" {% if form is defined and form.mode == 'vector' %}selected{% endif %}>vector only</option>
+            <option value="bm25" {% if form is defined and form.mode == 'bm25' %}selected{% endif %}>bm25 only</option>
+          </select>
+        </label>
+        <label class="param">
           <span class="param-label">k</span>
-          <input type="number" name="k" min="1" max="10000" step="1" placeholder="100" inputmode="numeric">
+          <input type="number" name="k" min="1" max="10000" step="1" placeholder="100" inputmode="numeric"
+                 value="{{ form.k if form is defined else '' }}">
         </label>
         <label class="param">
           <span class="param-label">num_candidates</span>
-          <input type="number" name="num_candidates" min="0" max="100000" step="1" placeholder="auto" inputmode="numeric">
+          <input type="number" name="num_candidates" min="0" max="100000" step="1" placeholder="auto" inputmode="numeric"
+                 value="{{ form.num_candidates if form is defined else '' }}">
+        </label>
+        <label class="param">
+          <span class="param-label">dense_limit</span>
+          <input type="number" name="dense_limit" min="1" max="10000" step="1" placeholder="200" inputmode="numeric"
+                 value="{{ form.dense_limit if form is defined else '' }}">
+        </label>
+        <label class="param">
+          <span class="param-label">codes_limit</span>
+          <input type="number" name="codes_limit" min="1" max="1000" step="1" placeholder="20" inputmode="numeric"
+                 value="{{ form.codes_limit if form is defined else '' }}">
+        </label>
+        <label class="param">
+          <span class="param-label">rrf_k</span>
+          <input type="number" name="rrf_k" min="1" max="10000" step="1" placeholder="60" inputmode="numeric"
+                 value="{{ form.rrf_k if form is defined else '' }}">
+        </label>
+        <label class="param param-checkbox">
+          <input type="checkbox" name="enable_fallback" value="1"
+                 {% if form is not defined or form.enable_fallback %}checked{% endif %}>
+          <span class="param-label">strict 0-result fallback</span>
         </label>
         <span class="param-hint">stored in your browser · change re-runs the search</span>
       </div>
@@ -61,19 +92,38 @@
 
   <script>
     (function () {
-      var KEYS = { k: "playground.k", num_candidates: "playground.num_candidates" };
+      var FIELDS = ["mode", "k", "num_candidates", "dense_limit", "codes_limit", "rrf_k", "enable_fallback"];
+      var KEYS = {};
+      FIELDS.forEach(function (f) { KEYS[f] = "playground." + f; });
+
       var form = document.querySelector("form.search-box");
-      var inputs = {
-        k: document.querySelector('input[name="k"]'),
-        num_candidates: document.querySelector('input[name="num_candidates"]'),
-      };
-      Object.keys(inputs).forEach(function (name) {
-        var saved = localStorage.getItem(KEYS[name]);
-        if (saved !== null) inputs[name].value = saved;
-        inputs[name].addEventListener("change", function () {
-          var v = inputs[name].value.trim();
-          if (v === "") localStorage.removeItem(KEYS[name]);
-          else localStorage.setItem(KEYS[name], v);
+      var inputs = {};
+      FIELDS.forEach(function (f) {
+        inputs[f] = document.querySelector('[name="' + f + '"]');
+      });
+
+      // Restore from localStorage and listen for changes.
+      FIELDS.forEach(function (f) {
+        var el = inputs[f];
+        if (!el) return;
+        var saved = localStorage.getItem(KEYS[f]);
+        if (saved !== null) {
+          if (el.type === "checkbox") {
+            el.checked = saved === "1";
+          } else {
+            el.value = saved;
+          }
+        }
+        el.addEventListener("change", function () {
+          var v;
+          if (el.type === "checkbox") {
+            v = el.checked ? "1" : "0";
+            localStorage.setItem(KEYS[f], v);
+          } else {
+            v = el.value.trim();
+            if (v === "") localStorage.removeItem(KEYS[f]);
+            else localStorage.setItem(KEYS[f], v);
+          }
           var q = form.querySelector('input[name="q"]').value.trim();
           if (q && window.htmx) window.htmx.trigger(form, "submit");
         });

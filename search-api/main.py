@@ -1,25 +1,32 @@
-"""Thin JSON wrapper around a TEI embedder + Milvus search.
+"""Thin JSON wrapper around a TEI embedder + Milvus dense + BM25 codes search.
 
-Sibling of ``playground-app/`` but without htmx/UI: accepts a query, embeds
-it, runs a cosine search against a Milvus collection selected by URL path,
-and returns Elasticsearch-shaped hits (``_index``, ``_id``, ``_score``).
+Endpoint: ``POST /{collection}/_search`` — `collection` names the dense
+collection (e.g. ``offers``). The codes companion collection (e.g.
+``offers_codes``) is server-configured. Returns Elasticsearch-shaped hits.
 
-Query params ``k`` and ``num_candidates`` override the top-k and the HNSW
-``efSearch`` pool size on a per-request basis; ``num_candidates`` must be
->= ``k`` and is ignored by non-HNSW indexes.
+Search behaviour is fully parametrised by query string:
+
+  mode                vector | bm25 | hybrid | hybrid_classified  (default
+                      hybrid_classified). See ``search-api/hybrid.py``.
+  k                   final top-N returned (default SEARCH_TOP_K).
+  dense_limit         dense candidate pool in hybrid path (default 200).
+  codes_limit         codes candidate pool in hybrid path (default 20).
+  strict_codes_limit  codes pool in strict path (default 500).
+  rrf_k               RRF k constant (default 60).
+  num_candidates      HNSW efSearch (must be >= k; ignored by non-HNSW).
+  enable_fallback     1|0 — strict-path 0-result fallback to hybrid (default 1).
+  debug               1|0 — include `_debug` in response (default 0).
 
 Environment variables:
-  EMBED_URL         Base URL of a TEI-compatible embedding service.
-  QUERY_PREFIX      String prepended to every query before embedding.
-  MILVUS_URI        Milvus gRPC URI (e.g. http://localhost:19530).
-  SEARCH_TOP_K      Default max hits per query when ``k`` is not set
-                    (default: 100).
-  ID_FIELDS         Per-collection override of the Milvus field returned as
-                    ``_id``. Format: ``col1=field1,col2=field2``. Collections
-                    not listed fall back to ``id``.
-  API_KEY           Shared secret. Clients must present it via either
-                    ``Authorization: ApiKey <key>`` or ``X-API-Key: <key>``.
-                    If unset/empty, auth is disabled.
+  EMBED_URL                 Base URL of a TEI-compatible embedding service.
+  QUERY_PREFIX              String prepended to every query before embedding.
+  MILVUS_URI                Milvus gRPC URI.
+  MILVUS_CODES_COLLECTION   Codes collection name (default "offers_codes").
+  SEARCH_TOP_K              Default ``k`` (default 100).
+  ID_FIELDS                 Per-collection override of the Milvus field
+                            returned as ``_id``: ``col=field,col2=field2``.
+  API_KEY                   Shared secret. Required via
+                            ``Authorization: ApiKey <key>`` or ``X-API-Key``.
 """
 
 from __future__ import annotations
@@ -29,19 +36,20 @@ import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Path as PathParam, Query, Request
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from pymilvus import MilvusClient
 
 from embed_client import EmbedClient
+from hybrid import Hit, Mode, SearchParams, run_search
 
 BASE_DIR = Path(__file__).resolve().parent
 
-
 _DEFAULT_ID_FIELD = "id"
+_DEFAULT_CODES_COLLECTION = "offers_codes"
 
 
 def _required_env(name: str) -> str:
@@ -79,7 +87,14 @@ async def lifespan(app: FastAPI):
     load_dotenv(BASE_DIR.parent / ".env")
 
     app.state.embed = EmbedClient(_required_env("EMBED_URL"))
-    app.state.milvus = MilvusClient(_required_env("MILVUS_URI"))
+    milvus_uri = _required_env("MILVUS_URI")
+    # Two clients per hybrid_v0.md "decoupled clients" — same URI, separate
+    # connection state so future per-collection settings can diverge.
+    app.state.milvus = MilvusClient(milvus_uri)
+    app.state.codes_milvus = MilvusClient(milvus_uri)
+    app.state.codes_collection = os.environ.get(
+        "MILVUS_CODES_COLLECTION", _DEFAULT_CODES_COLLECTION
+    )
     app.state.query_prefix = os.environ.get("QUERY_PREFIX", "")
     app.state.top_k = int(os.environ.get("SEARCH_TOP_K", "100"))
     app.state.id_fields = _parse_id_fields(os.environ.get("ID_FIELDS", ""))
@@ -93,8 +108,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+Instrumentator().instrument(app).expose(
+    app, endpoint="/metrics", include_in_schema=False
+)
+
+
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
+    if request.url.path == "/metrics":
+        return await call_next(request)
+
     expected: str = request.app.state.api_key
     if not expected:
         return await call_next(request)
@@ -116,60 +139,122 @@ async def require_api_key(request: Request, call_next):
     return await call_next(request)
 
 
+def _parse_mode(raw: str | None) -> Mode:
+    if not raw:
+        return Mode.HYBRID_CLASSIFIED
+    try:
+        return Mode(raw)
+    except ValueError:
+        valid = ", ".join(m.value for m in Mode)
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid mode {raw!r}; expected one of: {valid}",
+        )
+
+
+def _flag(raw: str | None, default: bool) -> bool:
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @app.post("/{collection}/_search")
 async def search(
     body: SearchRequest,
+    request: Request,
     collection: str = PathParam(..., min_length=1, max_length=255),
+    mode: str | None = Query(default=None),
     k: int | None = Query(default=None, ge=1),
+    dense_limit: int | None = Query(default=None, ge=1),
+    codes_limit: int | None = Query(default=None, ge=1),
+    strict_codes_limit: int | None = Query(default=None, ge=1),
+    rrf_k: int | None = Query(default=None, ge=1),
     num_candidates: int | None = Query(default=None, ge=1),
+    enable_fallback: str | None = Query(default=None),
+    debug: str | None = Query(default=None),
 ) -> dict:
-    client: MilvusClient = app.state.milvus
-    if not client.has_collection(collection):
+    dense_client: MilvusClient = request.app.state.milvus
+    codes_client: MilvusClient = request.app.state.codes_milvus
+    codes_collection: str = request.app.state.codes_collection
+
+    parsed_mode = _parse_mode(mode)
+    needs_dense = parsed_mode in (Mode.VECTOR, Mode.HYBRID, Mode.HYBRID_CLASSIFIED)
+    needs_codes = parsed_mode != Mode.VECTOR
+
+    if needs_dense and not dense_client.has_collection(collection):
         raise HTTPException(
             status_code=404,
-            detail=f"Milvus collection {collection!r} does not exist",
+            detail=f"Milvus dense collection {collection!r} does not exist",
+        )
+    if needs_codes and not codes_client.has_collection(codes_collection):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Milvus codes collection {codes_collection!r} does not exist",
         )
 
-    limit = k if k is not None else app.state.top_k
-    if num_candidates is not None and num_candidates < limit:
-        raise HTTPException(
-            status_code=400,
-            detail=f"num_candidates ({num_candidates}) must be >= k ({limit})",
+    final_k = k if k is not None else request.app.state.top_k
+    params = SearchParams(
+        mode=parsed_mode,
+        k=final_k,
+        dense_limit=dense_limit if dense_limit is not None else 200,
+        codes_limit=codes_limit if codes_limit is not None else 20,
+        strict_codes_limit=strict_codes_limit if strict_codes_limit is not None else 500,
+        rrf_k=rrf_k if rrf_k is not None else 60,
+        num_candidates=num_candidates,
+        enable_fallback=_flag(enable_fallback, default=True),
+    )
+
+    # HNSW efSearch ≥ the dense leg's limit. For vector mode that's `k`;
+    # for hybrid/hybrid_classified it's `dense_limit` (which the dense leg
+    # uses as its candidate pool — k is the post-fusion top-N).
+    if num_candidates is not None:
+        dense_leg_limit = (
+            params.k if params.mode == Mode.VECTOR else params.dense_limit
         )
+        if num_candidates < dense_leg_limit:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"num_candidates ({num_candidates}) must be >= the dense "
+                    f"leg's limit ({dense_leg_limit})"
+                ),
+            )
 
     query = body.query.strip()
     if not query:
         return {"hits": []}
 
-    rendered = f"{app.state.query_prefix}{query}"
-    vectors = await app.state.embed.embed([rendered])
-    if not vectors:
-        return {"hits": []}
+    rendered = f"{request.app.state.query_prefix}{query}"
+    id_field: str = request.app.state.id_fields.get(collection, _DEFAULT_ID_FIELD)
 
-    # Collection stores fp16 vectors; matching the query precision flushes
-    # subnormals to 0 instead of tripping Milvus's underflow validator.
-    id_field: str = app.state.id_fields.get(collection, _DEFAULT_ID_FIELD)
-    vec = np.asarray(vectors[0], dtype=np.float16)
-    # num_candidates maps to HNSW efSearch; ignored by non-HNSW indexes.
-    params: dict = {}
-    if num_candidates is not None:
-        params["ef"] = num_candidates
-    results = client.search(
-        collection_name=collection,
-        data=[vec],
-        limit=limit,
-        search_params={"metric_type": "COSINE", "params": params},
-        output_fields=[id_field],
+    async def embed_fn(text: str) -> list[float]:
+        # The dense path embeds with QUERY_PREFIX prepended; BM25 path uses
+        # the raw lowercased query (handled inside hybrid.run_search). We
+        # always pass the rendered (prefixed) query into the embedder.
+        vectors = await request.app.state.embed.embed([rendered])
+        return vectors[0] if vectors else []
+
+    hits, debug_info = await run_search(
+        query,
+        params,
+        dense_client=dense_client,
+        codes_client=codes_client,
+        embed=embed_fn,
+        dense_collection=collection,
+        codes_collection=codes_collection,
+        dense_id_field=id_field,
     )
 
-    raw = results[0] if results else []
-    hits = [
+    es_hits = [
         {
             "_index": body.index,
-            "_id": str(h["entity"].get(id_field, "")),
-            "_score": float(h["distance"]),
+            "_id": h.id,
+            "_score": h.score,
+            "_source_leg": h.source,
         }
-        for h in raw
+        for h in hits
     ]
-    hits.sort(key=lambda h: h["_score"], reverse=True)
-    return {"hits": hits}
+    response: dict = {"hits": es_hits}
+    if _flag(debug, default=False):
+        response["_debug"] = debug_info
+    return response

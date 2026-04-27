@@ -6,36 +6,19 @@
   </header>
 
   <section class="debug-section">
-    <h3>Timing</h3>
+    <h3>Path</h3>
     <dl class="debug-grid">
-      <dt>total</dt>
+      <dt>mode</dt><dd>{{ debug.mode }}</dd>
+      <dt>path taken</dt>
       <dd>
-        <b>{{ debug.took_ms }} ms</b>
-        <span class="debug-breakdown">
-          embed {{ debug.embed_ms }} · milvus {{ debug.milvus_ms }} · other {{ debug.other_ms }}
-        </span>
+        <b>{{ debug.path or "—" }}</b>
+        {% if debug.classifier_strict is not none %}
+          · classifier strict={{ "yes" if debug.classifier_strict else "no" }}
+        {% endif %}
+        {% if debug.fallback_fired %}· fallback fired{% endif %}
       </dd>
-    </dl>
-  </section>
-
-  <section class="debug-section">
-    <h3>Query</h3>
-    <dl class="debug-grid">
-      <dt>raw</dt><dd>{{ debug.query }}</dd>
-      <dt>rendered</dt><dd>{{ debug.rendered_query }}</dd>
-      <dt>prefix</dt><dd>{{ debug.query_prefix or "∅" }}</dd>
-      <dt>embed url</dt><dd>{{ debug.embed_url }}</dd>
-      <dt>embed dim</dt><dd>{{ debug.embed_dim }}</dd>
-      <dt>top k</dt><dd>{{ debug.top_k }}</dd>
-      <dt>num_candidates</dt><dd>{{ debug.num_candidates if debug.num_candidates is not none else "auto (index default)" }}</dd>
-      <dt>search params</dt><dd>{{ debug.search_params }}</dd>
-      <dt>output fields</dt><dd>{{ debug.output_fields|join(', ') }}</dd>
-    </dl>
-  </section>
-
-  <section class="debug-section">
-    <h3>Results</h3>
-    <dl class="debug-grid">
+      <dt>legs in result</dt>
+      <dd>{{ debug.legs_seen|join(', ') if debug.legs_seen else '—' }}</dd>
       <dt>scores</dt>
       <dd>
         {% if debug.top_score is not none %}
@@ -46,32 +29,93 @@
   </section>
 
   <section class="debug-section">
-    <h3>Collection</h3>
+    <h3>Timing</h3>
     <dl class="debug-grid">
-      <dt>uri</dt><dd>{{ debug.milvus_uri }}</dd>
-      <dt>name</dt><dd>{{ debug.collection }}</dd>
-      <dt>rows</dt><dd>{{ "{:,}".format(debug.row_count) }}</dd>
-      <dt>load</dt><dd>{{ debug.load_state }}</dd>
-      <dt>partitions</dt><dd>{{ debug.partitions }} · {{ debug.shards }} shard{{ "s" if debug.shards != 1 else "" }}</dd>
+      <dt>total</dt>
+      <dd>
+        <b>{{ debug.took_ms }} ms</b>
+        <span class="debug-breakdown">
+          api {{ debug.api_ms }} · lookup {{ debug.lookup_ms }} · other {{ debug.other_ms }}
+        </span>
+      </dd>
+      <dt>api breakdown</dt>
+      <dd>
+        embed {{ debug.embed_ms if debug.embed_ms is not none else '—' }} ·
+        dense {{ debug.dense_ms if debug.dense_ms is not none else '—' }} ·
+        codes {{ debug.codes_ms if debug.codes_ms is not none else '—' }}
+      </dd>
+      <dt>leg hits</dt>
+      <dd>
+        dense {{ debug.dense_hits if debug.dense_hits is not none else '—' }} ·
+        codes {{ debug.codes_hits if debug.codes_hits is not none else '—' }}
+      </dd>
     </dl>
   </section>
 
   <section class="debug-section">
-    <h3>Index</h3>
+    <h3>Query</h3>
     <dl class="debug-grid">
-      <dt>vector</dt><dd>{{ debug.vector_field }} · {{ debug.vector_dim }}d {{ debug.vector_dtype }}</dd>
-      <dt>type</dt><dd>{{ debug.index_type }} · {{ debug.metric_type }}</dd>
-      {% if debug.index_params %}
-      <dt>params</dt>
-      <dd>{% for k, v in debug.index_params.items() %}{{ k }}={{ v }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>
-      {% endif %}
-      <dt>built</dt>
-      <dd>{{ debug.index_state }} · {{ "{:,}".format(debug.indexed_rows) }} rows</dd>
-      {% if debug.scalar_indexes %}
-      <dt>scalar idx</dt>
-      <dd>{{ debug.scalar_indexes|join(', ') }}</dd>
+      <dt>raw</dt><dd>{{ debug.query }}</dd>
+      <dt>rendered</dt><dd>{{ debug.rendered_query }}</dd>
+      <dt>prefix</dt><dd>{{ debug.query_prefix or "∅" }}</dd>
+      <dt>embed url</dt><dd>{{ debug.embed_url or '—' }}</dd>
+      <dt>embed dim</dt><dd>{{ debug.embed_dim }}</dd>
+      <dt>top k</dt><dd>{{ debug.top_k }}</dd>
+      <dt>api params</dt>
+      <dd>
+        {% for k, v in debug.api_params.items() %}{{ k }}={{ v }}{% if not loop.last %} · {% endif %}{% endfor %}
+      </dd>
+      <dt>output fields</dt><dd>{{ debug.output_fields|join(', ') }}</dd>
+    </dl>
+  </section>
+
+  <section class="debug-section">
+    <h3>Dense collection</h3>
+    {% set d = debug.dense %}
+    {% if d %}
+    <dl class="debug-grid">
+      <dt>name</dt><dd>{{ d.collection }}</dd>
+      <dt>rows</dt><dd>{{ "{:,}".format(d.row_count) }}</dd>
+      <dt>load</dt><dd>{{ d.load_state }}</dd>
+      <dt>vector</dt><dd>{{ d.vector_field }} · {{ d.vector_dim }}d {{ d.vector_dtype }}</dd>
+      <dt>index</dt>
+      <dd>
+        {{ d.index_type }} · {{ d.metric_type }}
+        {% if d.index_params %}·
+          {% for k, v in d.index_params.items() %}{{ k }}={{ v }}{% if not loop.last %} · {% endif %}{% endfor %}
+        {% endif %}
+      </dd>
+      <dt>built</dt><dd>{{ d.index_state }} · {{ "{:,}".format(d.indexed_rows) }} rows</dd>
+      {% if d.scalar_indexes %}
+      <dt>scalar idx</dt><dd>{{ d.scalar_indexes|join(', ') }}</dd>
       {% endif %}
     </dl>
+    {% else %}
+    <p class="debug-empty">missing</p>
+    {% endif %}
+  </section>
+
+  <section class="debug-section">
+    <h3>Codes collection</h3>
+    {% set c = debug.codes %}
+    {% if c %}
+    <dl class="debug-grid">
+      <dt>name</dt><dd>{{ c.collection }}</dd>
+      <dt>rows</dt><dd>{{ "{:,}".format(c.row_count) }}</dd>
+      <dt>load</dt><dd>{{ c.load_state }}</dd>
+      <dt>vector</dt><dd>{{ c.vector_field }} · {{ c.vector_dtype }}</dd>
+      <dt>index</dt>
+      <dd>
+        {{ c.index_type }} · {{ c.metric_type }}
+        {% if c.index_params %}·
+          {% for k, v in c.index_params.items() %}{{ k }}={{ v }}{% if not loop.last %} · {% endif %}{% endfor %}
+        {% endif %}
+      </dd>
+      <dt>built</dt><dd>{{ c.index_state }} · {{ "{:,}".format(c.indexed_rows) }} rows</dd>
+    </dl>
+    {% else %}
+    <p class="debug-empty">not configured</p>
+    {% endif %}
   </section>
 </aside>
 {% endif %}

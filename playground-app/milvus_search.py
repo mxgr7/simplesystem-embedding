@@ -1,15 +1,22 @@
-"""Thin wrapper around the pymilvus client for the offers collection.
+"""Milvus access for the playground app.
 
-Card metadata is read from the Milvus collection directly via
-``output_fields`` — the collection already stores the display fields, so
-there is no separate catalog lookup.
+The playground delegates the actual search call to the sibling search-api
+service over HTTP (see ``main.py``); here we cover the two operations the
+search-api does not return:
+
+  * ``MilvusInfo.describe(...)`` — collection + index metadata for the
+    debug panel, fetched once at startup.
+  * ``OffersLookup.fetch(ids)`` — display-field lookup keyed on the offer
+    ``id``s returned by the search response. The dense ``offers`` collection
+    already carries name/manufacturer/category etc., so we issue a single
+    ``client.query(filter='id in [...]', output_fields=...)``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
-import numpy as np
 from pymilvus import MilvusClient
 
 OUTPUT_FIELDS = [
@@ -22,9 +29,8 @@ _CATEGORY_SEP = "¦"
 
 
 @dataclass(slots=True)
-class Hit:
+class Display:
     id: str
-    score: float
     name: str
     manufacturer: str
     ean: str
@@ -35,7 +41,7 @@ class Hit:
 
 @dataclass(slots=True)
 class CollectionInfo:
-    """Static info about the target collection, fetched once at startup."""
+    """Static info about a Milvus collection, fetched once at startup."""
 
     uri: str
     collection: str
@@ -43,7 +49,7 @@ class CollectionInfo:
     load_state: str
     num_partitions: int
     num_shards: int
-    vector_field: str
+    vector_field: str            # may be "" for a code-only collection
     vector_dim: int
     vector_dtype: str
     index_type: str
@@ -55,94 +61,92 @@ class CollectionInfo:
     scalar_indexes: list[str]
 
 
-class MilvusSearch:
-    def __init__(self, uri: str, collection: str) -> None:
-        self._client = MilvusClient(uri)
-        self._uri = uri
-        self.collection = collection
-        if not self._client.has_collection(collection):
-            raise RuntimeError(f"Milvus collection {collection!r} missing at {uri}")
+def describe_collection(client: MilvusClient, uri: str, collection: str) -> CollectionInfo:
+    desc = client.describe_collection(collection)
+    stats = client.get_collection_stats(collection_name=collection)
+    load = client.get_load_state(collection_name=collection)
 
-    def describe(self) -> CollectionInfo:
-        desc = self._client.describe_collection(self.collection)
-        stats = self._client.get_collection_stats(collection_name=self.collection)
-        load = self._client.get_load_state(collection_name=self.collection)
+    fields = desc.get("fields", [])
+    # Pick the first field whose Milvus type name suggests a vector. Works
+    # for FLOAT_VECTOR / FLOAT16_VECTOR / SPARSE_FLOAT_VECTOR alike.
+    vec_field: dict = {}
+    for f in fields:
+        type_name = getattr(f.get("type"), "name", str(f.get("type", "")))
+        if "VECTOR" in type_name:
+            vec_field = f
+            break
+    vec_name = vec_field.get("name", "")
+    vec_dim = int(vec_field.get("params", {}).get("dim", 0))
+    vec_dtype = getattr(vec_field.get("type"), "name", str(vec_field.get("type", "")))
 
-        vec_field = next(
-            (f for f in desc.get("fields", []) if f.get("name") == _VECTOR_FIELD), {}
-        )
-        vec_dim = int(vec_field.get("params", {}).get("dim", 0))
-        vec_dtype = getattr(vec_field.get("type"), "name", str(vec_field.get("type", "")))
+    indexes = list(client.list_indexes(collection_name=collection))
+    vec_idx: dict = {}
+    scalar_idx: list[str] = []
+    for name in indexes:
+        info = client.describe_index(collection_name=collection, index_name=name)
+        if info.get("field_name") == vec_name:
+            vec_idx = info
+        else:
+            scalar_idx.append(f"{info.get('field_name')} ({info.get('index_type')})")
 
-        indexes = list(self._client.list_indexes(collection_name=self.collection))
-        vec_idx = {}
-        scalar_idx: list[str] = []
-        for name in indexes:
-            info = self._client.describe_index(
-                collection_name=self.collection, index_name=name
-            )
-            if info.get("field_name") == _VECTOR_FIELD:
-                vec_idx = info
-            else:
-                scalar_idx.append(
-                    f"{info.get('field_name')} ({info.get('index_type')})"
-                )
+    return CollectionInfo(
+        uri=uri,
+        collection=collection,
+        row_count=int(stats.get("row_count", 0)),
+        load_state=getattr(load.get("state"), "name", str(load.get("state", ""))),
+        num_partitions=int(desc.get("num_partitions", 0)),
+        num_shards=int(desc.get("num_shards", 0)),
+        vector_field=vec_name,
+        vector_dim=vec_dim,
+        vector_dtype=vec_dtype,
+        index_type=str(vec_idx.get("index_type", "")),
+        metric_type=str(vec_idx.get("metric_type", "")),
+        index_params=dict(vec_idx.get("params", {})),
+        indexed_rows=int(vec_idx.get("indexed_rows", 0)),
+        index_state=str(vec_idx.get("state", "")),
+        consistency_level=desc.get("consistency_level"),
+        scalar_indexes=scalar_idx,
+    )
 
-        return CollectionInfo(
-            uri=self._uri,
-            collection=self.collection,
-            row_count=int(stats.get("row_count", 0)),
-            load_state=getattr(load.get("state"), "name", str(load.get("state", ""))),
-            num_partitions=int(desc.get("num_partitions", 0)),
-            num_shards=int(desc.get("num_shards", 0)),
-            vector_field=_VECTOR_FIELD,
-            vector_dim=vec_dim,
-            vector_dtype=vec_dtype,
-            index_type=str(vec_idx.get("index_type", "")),
-            metric_type=str(vec_idx.get("metric_type", "")),
-            index_params=dict(vec_idx.get("params", {})),
-            indexed_rows=int(vec_idx.get("indexed_rows", 0)),
-            index_state=str(vec_idx.get("state", "")),
-            consistency_level=desc.get("consistency_level"),
-            scalar_indexes=scalar_idx,
-        )
 
-    def search(
-        self,
-        embedding: list[float],
-        limit: int,
-        ef: int | None = None,
-    ) -> tuple[list[Hit], dict]:
-        # Collection stores fp16 vectors; matching the query precision flushes
-        # subnormals to 0 instead of tripping Milvus's underflow validator.
-        query = np.asarray(embedding, dtype=np.float16)
-        params: dict = {}
-        if ef is not None and ef > 0:
-            params["ef"] = ef
-        search_params = {"metric_type": "COSINE", "params": params}
-        results = self._client.search(
-            collection_name=self.collection,
-            data=[query],
-            limit=limit,
-            search_params=search_params,
+class OffersLookup:
+    """Resolve offer ``id``s to display fields by issuing a single
+    ``client.query`` against the dense collection. The dense collection
+    already stores everything the card needs."""
+
+    def __init__(self, client: MilvusClient, collection: str) -> None:
+        self._client = client
+        self._collection = collection
+
+    def fetch(self, ids: Sequence[str]) -> dict[str, Display]:
+        if not ids:
+            return {}
+        # Quote each id; Milvus query expr requires a list literal of strings.
+        # IDs are 32-char hex hashes per the source data, so escaping is a
+        # belt-and-braces measure rather than a real attack vector.
+        quoted = ",".join(f'"{i.replace(chr(34), "")}"' for i in ids)
+        rows = self._client.query(
+            collection_name=self._collection,
+            filter=f"id in [{quoted}]",
             output_fields=OUTPUT_FIELDS,
+            limit=len(ids),
         )
+        return {
+            str(r.get("id", "")): _to_display(r)
+            for r in rows
+        }
 
-        hits = results[0] if results else []
-        out: list[Hit] = []
-        for h in hits:
-            ent = h["entity"]
-            out.append(Hit(
-                id=ent.get("id", ""),
-                score=float(h["distance"]),
-                name=_s(ent.get("name")),
-                manufacturer=_s(ent.get("manufacturerName")),
-                ean=_s(ent.get("ean")),
-                article_number=_s(ent.get("article_number")),
-                catalog_version_ids=[_s(v) for v in (ent.get("catalog_version_ids") or [])],
-                category_paths=_category_paths(ent),
-            ))
-        return out, search_params
+
+def _to_display(entity: dict) -> Display:
+    return Display(
+        id=str(entity.get("id", "")),
+        name=_s(entity.get("name")),
+        manufacturer=_s(entity.get("manufacturerName")),
+        ean=_s(entity.get("ean")),
+        article_number=_s(entity.get("article_number")),
+        catalog_version_ids=[_s(v) for v in (entity.get("catalog_version_ids") or [])],
+        category_paths=_category_paths(entity),
+    )
 
 
 def _s(value: object) -> str:
