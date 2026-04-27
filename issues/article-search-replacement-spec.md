@@ -40,17 +40,17 @@ This is no longer a literal drop-in replacement — but every deviation is docum
 **ACL responsibilities (thin, by design):**
 - Expose a narrowed derivative of `api-spec/specs/article-search/*.yaml` — same paths, same error envelope, DTOs trimmed where §2 records a deviation.
 - Translate each legacy request into one or more ftsearch calls and assemble the response.
-- Forward request-scoped baggage (tenant, traceparent) onto ftsearch.
+- Forward request-scoped baggage (tracing/observability only — `userId`, `companyId`, `customerOciSessionId`, W3C traceparent) onto ftsearch.
 - Return shaped errors in the legacy `{message, details, timestamp}` envelope.
 
 **ftsearch responsibilities (everything else):**
 - Hybrid relevance ranking (already in place).
-- Scalar filtering, hierarchical-category filtering, vendor/manufacturer filters, price/feature filters — implemented in the FastAPI layer over Milvus expr filters and any auxiliary stores ftsearch chooses to read.
+- Scalar filtering, hierarchical-category filtering, vendor/manufacturer filters, price/feature filters — implemented in the FastAPI layer over Milvus expr filters. No auxiliary stores at query time (§6).
 - Faceting / `summaries.*` aggregation.
 - Sorting beyond relevance (name, price, articleId).
 - Hit-count semantics. (`explain` is honored as a stub returning `"N/A"` — §2.2.)
 - Identifier-query tokenization (article number / EAN / vendor SKU).
-- Multi-tenant catalog visibility enforcement.
+- Catalog visibility scoping — request-scoped via `selectedArticleSources` fields, not tenant-authenticated (the service is internal; see §9 #7).
 
 Next-gen integration: base-URL config flip + a one-time client regeneration against the updated OpenAPI (see §2 for the deviations that drive Java-side cleanup).
 
@@ -102,10 +102,10 @@ The ACL validates against its OpenAPI; ftsearch validates again as defense-in-de
 **Functional consequences.** Several legacy use cases lose their dedicated mode and fall through to classified hybrid:
 
 - *EAN, article-number, vendor-article-number search* — handled by classified hybrid via the strict-identifier classifier; should remain serviceable but quality is now a property of the classifier rather than a guarantee.
-- *Customer-article-number search* — depended on a tenant-scoped lookup keyed off `customerArticleNumbersIndexingSourceIds`. Classified hybrid does not have this lookup today. If parity here is required, ftsearch needs an explicit customer-article-number index plus classifier-routing support; otherwise this is a feature loss.
+- *Customer-article-number search* — depended on a tenant-scoped lookup keyed off `customerArticleNumbersIndexingSourceIds`. **Dropped.** Classified hybrid does not have this lookup and we are not building one; the feature loss is accepted as part of removing the `CUSTOMER_ARTICLE_NUMBER` mode.
 - *ALL_ATTRIBUTES, TEST_PROFILE_01..20* — no remaining users expected; these go away cleanly.
 
-**Next-gen migration.** Regenerating the search client from the new OpenAPI removes the dropped enum constants from the generated Java enum, turning every caller that still references them into a compile error. All such callers should switch to `STANDARD`. Callers that relied on customer-article-number search semantically need a parallel decision (accept feature loss, or wait for a ftsearch index extension).
+**Next-gen migration.** Regenerating the search client from the new OpenAPI removes the dropped enum constants from the generated Java enum, turning every caller that still references them into a compile error. All such callers should switch to `STANDARD`. Callers that relied on customer-article-number search semantically lose that capability (see above) — there is no replacement.
 
 ### 2.2 `explain` returns `"N/A"` instead of a score breakdown — (M)
 
@@ -119,7 +119,7 @@ The ACL validates against its OpenAPI; ftsearch validates again as defense-in-de
 
 ### 2.3 Future deviations
 
-Additional deviations will be added here as they are decided — particularly around fields that depend on data ftsearch doesn't carry today (price-sourced filters, per-tenant catalog visibility nuances, eClass hierarchies). When in doubt during implementation: prefer recording a deviation here over silently degrading behavior.
+Additional deviations will be added here as they are decided — particularly around fields that depend on data ftsearch doesn't carry today (price-sourced filters, eClass hierarchies). When in doubt during implementation: prefer recording a deviation here over silently degrading behavior.
 
 ---
 
@@ -129,7 +129,13 @@ Additional deviations will be added here as they are decided — particularly ar
 
 **Query params**: `page` (1-indexed, default 1), `pageSize` (default 10, **max 500**), `sort` (repeatable; values like `articleId,desc`, `name,asc`, `price,desc`).
 
-**Request body — required fields**: `searchArticlesBy`, `selectedArticleSources`, `maxDeliveryTime`, `coreSortimentOnly`, `closedMarketplaceOnly`, `currency` (`^[A-Z]{3}$`), `explain`.
+**Request body — required fields**: `searchMode`, `searchArticlesBy`, `selectedArticleSources`, `maxDeliveryTime`, `coreSortimentOnly`, `closedMarketplaceOnly`, `currency` (`^[A-Z]{3}$`), `explain`.
+
+**Currency fields — two roles, both consulted (legacy parity).** The top-level `currency` and `priceFilter.currencyCode` are *not* duplicates:
+- **Top-level `currency`** pins which `prices.*` entries qualify for the price filter, sort-by-price, and the `PRICES` aggregation. It governs the match.
+- **`priceFilter.currencyCode`** is consumed only to decode the integer `priceFilter.min`/`max` into a decimal amount via that currency's default fraction-digit count (EUR → 2 decimals: `1500` → `15.00`; JPY → 0 decimals: `1500` → `1500`). Required (non-null) whenever `min` or `max` is set; never used to match `prices.currency`.
+
+The two are independent on the wire. In practice the frontend sends them matched, but legacy does *not* enforce equality and the ACL/ftsearch must not either — top-level currency drives matching, `priceFilter.currencyCode` drives bound-decoding, and that is what gets forwarded to ftsearch.
 
 **Full request body** (all fields the ACL must accept and honor, even when ignored):
 
@@ -249,7 +255,7 @@ The ACL passes `sort` query params to ftsearch unchanged. ftsearch owns the impl
 | ---------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------- |
 | Relevance (default, sort omitted)  | ES `_score` desc, name asc                 | Use Milvus score; tiebreak on `articleId`                              |
 | `name,asc` / `name,desc`           | Nested sort on `offers.name.raw`, mode=Min | Sort using a denormalized scalar in Milvus or re-sort top-K internally |
-| `price,asc` / `price,desc`         | Nested sort on `prices.price`, mode=Min    | Same — denormalize `price_min` into the collection or post-sort        |
+| `price,asc` / `price,desc`         | Nested sort on `prices.price`, mode=Min    | Per row, take `min(price)` over `prices` filtered by request `currency` × `sourcePriceListIds` (same scope as the priceFilter); over-fetch and post-sort top-K |
 | `articleId,asc` / `articleId,desc` | Native field sort                          | Sort by Milvus PK / id                                                 |
 
 For sorts ftsearch implements via re-sort, it must over-fetch from Milvus (e.g. `k = pageSize × pages_to_cover`) and paginate after sorting. The ACL never sees this — it just receives the already-paginated page from ftsearch.
@@ -262,22 +268,22 @@ The ACL forwards filters as structured fields on the ftsearch request. ftsearch 
 | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `selectedArticleSources.closedCatalogVersionIds`                                        | nested `offers.catalogVersionIds`                                                   | Milvus expr filter (`array_contains_any(catalog_version_ids, [...])`) — already present in collection |
 | `catalogVersionIdsOrderedByPreference`                                                  | same, but order matters for which offer wins                                        | Post-process / pick min by preference                                                                 |
-| `sourcePriceListIds`                                                                    | nested `prices.sourcePriceListIds`                                                  | Add to collection or join in ftsearch                                                                 |
+| `sourcePriceListIds`                                                                    | nested `prices.priceListId` term filter                                             | Filter the row's `prices` JSON array by `sourcePriceListId ∈ request.sourcePriceListIds`              |
 | `articleIdsFilter`                                                                      | terms on `articleId`                                                                | Milvus expr `id in [...]`                                                                             |
 | `vendorIdsFilter`                                                                       | terms on `vendorId`                                                                 | Need vendor field in collection (currently only manufacturerName)                                     |
 | `manufacturersFilter`                                                                   | terms on `manufacturer`                                                             | Milvus expr on `manufacturerName` — already present                                                   |
 | `maxDeliveryTime`                                                                       | numeric range                                                                       | Add to collection (denormalized scalar)                                                               |
-| `requiredFeatures`                                                                      | nested terms on `features.name`/`values`                                            | Add features array/JSON to collection or join in ftsearch                                             |
-| `priceFilter`                                                                           | nested numeric range on `prices.price`                                              | Denormalize `price_min` per currency into collection or join                                          |
-| `accessoriesForArticleNumber` / `sparePartsForArticleNumber` / `similarToArticleNumber` | nested `offers.accessoryFor`/`sparePartFor`/`similarTo` term                        | Add relationship arrays or join in ftsearch                                                           |
+| `requiredFeatures`                                                                      | nested terms on `features.name`/`values`                                            | Per `{name, values:[…]}` group, `array_contains_any(features, ["name=v1","name=v2",…])`; AND across groups (see §7 for the `name=value` token shape) |
+| `priceFilter`                                                                           | nested numeric range on `prices.price` after currency × priceList × priority scope  | Resolve from `prices` array: filter by request `currency` × `sourcePriceListIds`, take the highest-priority entry, range-check against `priceFilter.min/max`. Decode `min`/`max` (int64) into decimals using `priceFilter.currencyCode`'s fraction-digits (EUR→2, JPY→0); `priceFilter.currencyCode` does **not** participate in matching `prices.currency` — top-level `currency` does (§3, legacy parity). |
+| `accessoriesForArticleNumber` / `sparePartsForArticleNumber` / `similarToArticleNumber` | nested `offers.accessoryFor`/`sparePartFor`/`similarTo` term                        | Add relationship arrays to collection                                                                 |
 | `currentCategoryPathElements`                                                           | path prefix match                                                                   | Milvus `category_l1..l5` already there but separator is `¦`; needs translation                        |
 | `currentEClass5Code` / `currentEClass7Code` / `currentS2ClassCode`                      | terms on eClass group fields                                                        | Add eClass fields to collection                                                                       |
 | `coreSortimentOnly`                                                                     | terms on `enabledCoreArticleMarkerSources` minus `disabledCoreArticleMarkerSources` | Add core-marker fields to collection                                                                  |
-| `closedMarketplaceOnly`                                                                 | catalog version "closed" flag                                                       | Joinable from catalog metadata or denormalize as `closed_catalog` flag                                |
+| `closedMarketplaceOnly`                                                                 | catalog version "closed" flag                                                       | Denormalize as `closed_catalog` flag                                                                  |
 | `coreArticlesVendorsFilter`                                                             | vendor + core marker combo                                                          | Same as above                                                                                         |
 | `blockedEClassVendorsFilters`                                                           | inverse filter (vendorId × eClassGroup)                                             | Negative Milvus expr once eClass + vendor are in the collection                                       |
 
-**Net consequence**: The Milvus collection schema is **insufficient** for parity. ftsearch must extend the collection to include the filterable scalar fields (or do auxiliary lookups inside the FastAPI layer). Expanding the collection is faster at query time and is the recommended path.
+**Net consequence**: The Milvus collection schema is **insufficient** for parity. ftsearch must extend the collection to include the filterable scalar fields (§7). All parity-critical data is row-local in Milvus; auxiliary lookups at query time are out of scope (§6).
 
 ### 4.4 Aggregations / facets
 
@@ -287,8 +293,8 @@ All 10 summary kinds must be computable. The ACL forwards the requested `summari
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `VENDORS`                         | Hit-set vendor IDs → Milvus `group_by_field=vendor_id`, or post-aggregate in FastAPI                                        |
 | `MANUFACTURERS`                   | Same on `manufacturer_name`                                                                                                 |
-| `FEATURES`                        | Requires features in collection (or auxiliary store ftsearch reads); count per `name=value` token                           |
-| `PRICES`                          | `MIN`/`MAX` per currency over hit IDs from denormalized `price_min` / `price_currency`                                      |
+| `FEATURES`                        | Requires features in collection; count per `name=value` token                                                               |
+| `PRICES`                          | For each hit, filter the row's `prices` array by request `currency` × `sourcePriceListIds`, then `MIN`/`MAX` of `price` over the union, grouped by `currency`. In practice this returns one entry per request currency (legacy filter pins currency); the array shape on the wire is preserved. |
 | `CATEGORIES`                      | Hierarchical; needs `category_l1..l5`. Compute `sameLevel` and `children` from `currentCategoryPathElements` parent prefix. |
 | `ECLASS5` / `ECLASS7` / `S2CLASS` | Same hierarchical pattern on eClass codes                                                                                   |
 | `PLATFORM_CATEGORIES`             | Alias of `CATEGORIES` (or `S2CLASS` if `s2ClassForProductCategories: true`)                                                 |
@@ -327,10 +333,10 @@ The ACL adds one network hop on top of legacy search; ftsearch carries the heavy
 | Retries          | Spring Retry, max 5, 500ms base, 1.5× multiplier, max 5s delay             | Retry on transient ftsearch failures with same policy     | Internal retries on Milvus + auxiliary calls                              |
 | Timeouts         | Implicit Spring MVC                                                        | Explicit ftsearch call timeout                            | Explicit per-call timeouts; total request budget ≤ existing p99           |
 | Caching          | None app-side; ES caches                                                   | None (stateless mapper)                                   | Optional caching for category/eClass hierarchies and identifier lookups   |
-| Tracing          | Sleuth, 100% sampling, baggage `userId`/`companyId`/`customerOciSessionId` | Accept & forward W3C traceparent + baggage to ftsearch    | Propagate to Milvus / aux store calls                                     |
+| Tracing          | Sleuth, 100% sampling, baggage `userId`/`companyId`/`customerOciSessionId` | Accept & forward W3C traceparent + baggage to ftsearch    | Propagate to Milvus calls                                                 |
 | Metrics          | Micrometer p50/p70/p95/p99 + Prometheus                                    | ACL exposes its own RED metrics                           | Already has prometheus-fastapi-instrumentator                             |
 | Health           | `/actuator/health` on :9090                                                | `/healthz` (and Spring-compatible actuator if needed)     | `/healthz`                                                                |
-| Refresh          | ES 30s                                                                     | n/a                                                       | Document Milvus consistency level (current default is `Bounded`)          |
+| Refresh          | ES 30s                                                                     | n/a                                                       | `Bounded` consistency (§9 #8) — matches legacy's seconds-of-staleness tolerance |
 
 ### 4.8 Index-versioning / zero-downtime contract
 
@@ -350,19 +356,19 @@ What ftsearch offers today vs. what's needed for parity. Unless noted, the gap i
 | Filter by category L1–L5                                                        | ✅ field exists, `¦` separator           | ftsearch translates path into prefix match                     |
 | Filter by `vendorId`                                                            | ❌ field absent                          | Add to Milvus collection schema                                |
 | Search by EAN / article number / vendor SKU (formerly dedicated modes)          | ⚠️ via BM25 codes collection             | Routed by classified hybrid's strict-identifier classifier (§4.5) |
-| Filter by price                                                                 | ❌ no price field                        | Add denormalized scalar to Milvus or join inside ftsearch      |
-| Filter by features                                                              | ❌                                       | Add features field to collection or aux store ftsearch reads   |
-| Filter by delivery time / core sortiment / closed marketplace / blocked vendors | ❌                                       | Add fields or aux joins inside ftsearch                        |
+| Filter by price                                                                 | ❌ no price field                        | Project the legacy nested `prices` array into a row-local JSON field; resolve currency × priceList × priority at query time |
+| Filter by features                                                              | ❌                                       | Add `features ARRAY<VARCHAR>` of `name=value` tokens to collection (§7) |
+| Filter by delivery time / core sortiment / closed marketplace / blocked vendors | ❌                                       | Add fields to collection                                       |
 | Filter by eClass5 / eClass7 / S2Class                                           | ❌                                       | Add fields to collection                                       |
-| Search by customer article number (formerly `CUSTOMER_ARTICLE_NUMBER` mode)     | ❌                                       | Open: feature-loss vs. ftsearch classifier extension (§2.1)    |
-| Multi-currency price aggregation                                                | ❌                                       | Denormalized price scalars or aux store in ftsearch            |
+| Search by customer article number (formerly `CUSTOMER_ARTICLE_NUMBER` mode)     | ❌                                       | Dropped — feature loss accepted with the mode removal (§2.1)   |
+| Multi-currency price aggregation                                                | ❌                                       | Aggregate min/max within the row's `prices` array filtered by request `currency` × `sourcePriceListIds`; group by currency on the wire (one entry per request in practice) |
 | All `summaries.*`                                                               | ❌                                       | Implement in ftsearch FastAPI layer                            |
 | Sorting by name / price                                                         | ❌                                       | Implement in ftsearch (denormalize or post-sort top-K)         |
 | Sort `name` `price` `articleId` (asc/desc)                                      | ❌                                       | Same                                                           |
 | `explain: true` payload                                                         | ⚠️ has `_debug` per hit if `debug=1`     | ACL stubs `"N/A"` per hit (§2.2); ftsearch unchanged           |
 | `searchMode: SUMMARIES_ONLY` (page-size-zero behavior)                          | ❌                                       | ftsearch honors mode; aggregations over full filtered hit set  |
 | Validation errors as `{message, details, timestamp}`                            | ❌ FastAPI default 422                   | Custom error handler in **ACL** (legacy envelope)              |
-| Per-tenant catalog version visibility                                           | ⚠️ field present, not enforced           | ftsearch must enforce in expr                                  |
+| Catalog version scoping (request-scoped, not tenant-authenticated)              | ⚠️ field present, not enforced           | ftsearch enforces `selectedArticleSources.*` in Milvus expr    |
 | German analyzer parity for identifier queries                                   | ⚠️ `query.lower()` only                  | ftsearch pre-tokenizes identifier formats                      |
 | Retries with exponential backoff                                                | ❌                                       | ACL retries on ftsearch transient failures                     |
 | `articleId` composite format                                                    | ❌ today's `id` is opaque per-collection | Indexer projects legacy `{friendlyId}:{base64Url(articleNumber)}` into Milvus' PK so the wire value matches legacy verbatim |
@@ -380,8 +386,8 @@ What ftsearch offers today vs. what's needed for parity. Unless noted, the gap i
 **Data the indexer must project from MongoDB into Milvus** (the exact field set is in §7):
 
 1. **Article metadata** — for sort-by-name, sort-by-articleId, feature aggregation.
-2. **Prices** — `(articleId, sourcePriceListId, price, currency)`. Needed for priceFilter, price summaries, sort-by-price.
-3. **Customer article numbers** — `(customerNumberSourceId, customerArticleNumber, articleId)` triples. Only required if §2.1's customer-article-number feature loss is not accepted and ftsearch is extended to route this case via the classifier.
+2. **Prices** — full legacy nested-prices set: `(price, currency, priority, sourcePriceListId)` per nested entry, many per article. Projected verbatim into the row's `prices` JSON array (§7). The price selected for filter/sort/aggregation is resolved at query time from the request's `currency` × `sourcePriceListIds` × `PricingType.priority`, mirroring the legacy ES nested filter — there is no single denormalized scalar to project.
+3. ~~**Customer article numbers**~~ — not projected. The `CUSTOMER_ARTICLE_NUMBER` mode is dropped (§2.1); the lookup it depended on is not carried over.
 4. **Catalog version metadata** — to know which catalogs are "closed" and to enforce visibility.
 5. **eClass / S2Class hierarchy** — for hierarchical aggregations and filtering.
 6. **Vendor / manufacturer registry** — for vendor-side filters and core-sortiment markers.
@@ -404,15 +410,26 @@ category_l1..l5               STRING (¦-separated paths) — exists
 
 # NEW
 vendor_id                     STRING
-price_min                     FLOAT (min across price-list sources, denormalized)
-price_currency                STRING
+prices                        JSON — full legacy nested-prices array projected verbatim:
+                                     [{"price": float, "currency": "EUR", "priority": int, "sourcePriceListId": "uuid"}, ...]
+                                     ftsearch resolves the request's currency × sourcePriceListIds × priority at query time
+                                     (identical to legacy ES nested filter + SortMode.Min). Single scalars don't suffice:
+                                     an article carries multiple prices across currencies and price lists, and the chosen
+                                     price depends on per-request scope.
 delivery_time_days_max        INT
 core_marker_enabled_sources   ARRAY<STRING>
 core_marker_disabled_sources  ARRAY<STRING>
 eclass5_code                  INT
 eclass7_code                  INT
 s2class_code                  INT
-features                      JSON or ARRAY<STRING> ("name=value" tokens)
+features                      ARRAY<VARCHAR> of "name=value" tokens, separator `=`.
+                                     Indexer must reject (or escape) values that contain `=` so the
+                                     separator stays unambiguous; chosen over JSON because Milvus
+                                     ARRAY membership expr (`array_contains_any`) is mature and
+                                     matches `requiredFeatures`'s "AND across names, OR within values"
+                                     shape directly, and FEATURES aggregation post-processes tokens
+                                     in FastAPI either way (Milvus `group_by_field` doesn't traverse
+                                     JSON paths or array elements per-key/per-value).
 relationship_accessory_for    ARRAY<STRING>
 relationship_spare_part_for   ARRAY<STRING>
 relationship_similar_to       ARRAY<STRING>
@@ -447,8 +464,10 @@ These were originally open questions; all are now resolved. Each links to where 
 2. **`searchMode: SUMMARIES_ONLY`** — Kept. All three modes (`HITS_ONLY`, `SUMMARIES_ONLY`, `BOTH`) supported; cheap to implement on top of the same Milvus call ftsearch already runs.
 3. **`explain: true`** — Schema unchanged. The ACL returns the literal string `"N/A"` for every hit's `explanation` when `explain=true` (§2.2). The only consumer (`ExplanationButton.tsx`) keeps working — the downloaded `.txt` just contains `"N/A"`. Revisit if a useful breakdown is wanted later.
 4. **`articleId` value** — Wire format must match legacy exactly: `{friendlyId}:{base64UrlEncodedArticleNumber}`. The indexer projects (or constructs, when MongoDB doesn't store it directly) this composite into Milvus' PK; ftsearch returns and accepts the legacy value verbatim, the ACL passes it through. Not a deviation.
-5. **Locale** — German only for v1.
-6. **Authentication** — None on either hop; both endpoints are `security: []` (§3).
+5. **Customer-article-number search** — Dropped along with the `CUSTOMER_ARTICLE_NUMBER` mode (§2.1). No replacement; the tenant-scoped customer-number lookup is not carried over to ftsearch.
+6. **Locale** — German only for v1.
+7. **Authentication** — None on either hop; both endpoints are `security: []` (§3). Both ACL and ftsearch are internal services not exposed to the public network, so authenticating per-request is unnecessary. Catalog visibility is scoped by the request's `selectedArticleSources` fields, not by an authenticated tenant identity.
+8. **Milvus consistency level** — `Bounded`. Matches legacy ES's seconds-of-staleness tolerance (legacy refresh is 30s); no caller depends on read-your-writes from search. Indexer's Kafka-driven upserts (§6) become visible within Milvus' graceful period.
 
 ---
 
