@@ -205,16 +205,36 @@ def test_eclasses_filter(client: TestClient, fixture_rows: list[dict]) -> None:
     assert _ids(body) == {fixture_rows[0]["id"], fixture_rows[2]["id"]}
 
 
-def test_closed_marketplace_only(client: TestClient, fixture_rows: list[dict]) -> None:
+def test_closed_marketplace_only_without_cv_returns_nothing(client: TestClient) -> None:
+    """Per legacy `OfferFilterBuilder`: an empty `closedCatalogVersionIds`
+    list with `closedMarketplaceOnly=true` matches no offers."""
     body = _post(client, closedMarketplaceOnly=True)
-    assert _ids(body) == {fixture_rows[4]["id"]}
+    assert _ids(body) == set()
 
 
-def test_closed_catalog_versions_filter(client: TestClient, fixture_rows: list[dict]) -> None:
-    body = _post(client, selectedArticleSources={
-        "closedCatalogVersionIds": ["aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"],
+def test_closed_marketplace_only_intersects_closed_cv(
+    client: TestClient, fixture_rows: list[dict],
+) -> None:
+    """`eeeeeeee-5555-...` is on rows 2 and 4 — both should pass."""
+    body = _post(client, closedMarketplaceOnly=True, selectedArticleSources={
+        "closedCatalogVersionIds": ["eeeeeeee-5555-5555-5555-eeeeeeeeeeee"],
     })
-    assert _ids(body) == {fixture_rows[0]["id"]}
+    assert _ids(body) == {fixture_rows[2]["id"], fixture_rows[4]["id"]}
+
+
+def test_closed_catalog_versions_alone_is_noop(
+    client: TestClient, fixture_rows: list[dict],
+) -> None:
+    """Without `closedMarketplaceOnly=true`, ftsearch treats the closed-CV
+    list as request metadata only — no standalone CV intersection. (The
+    ACL re-adds always-intersect for legacy parity.)"""
+    body = _post(client,
+                 vendorIdsFilter=[r["vendor_id"] for r in fixture_rows],
+                 selectedArticleSources={
+                     "closedCatalogVersionIds": ["aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"],
+                 })
+    # All fixture rows pass — closedCatalogVersionIds did not narrow.
+    assert len(_ids(body)) == len(fixture_rows)
 
 
 def test_relationship_accessory_for(client: TestClient, fixture_rows: list[dict]) -> None:

@@ -27,7 +27,7 @@ Filters are AND-composed at the top level. Within each multi-valued filter the e
   - `currentEClass5Code` / `currentEClass7Code` / `currentS2ClassCode` → equality on the matching int field
   - `eClassesFilter` → `eclass5_code in [...]` (legacy `EClassesFilterProvider` operates on the eClass5 code tree).
   - `coreSortimentOnly` → `array_contains_any(core_marker_enabled_sources, [...])` AND NOT `array_contains_any(core_marker_disabled_sources, [...])`. The source IDs come from `selectedArticleSources` — see `CoreSortimentFilterProvider.java` for the exact field set the legacy uses.
-  - `closedMarketplaceOnly` → `closed_catalog == true`
+  - `closedMarketplaceOnly` → `array_contains_any(catalog_version_ids, [closedCatalogVersionIds])`. Per legacy `OfferFilterBuilder`: when the flag is set, intersect on the closed-CV list; on an empty list legacy emits a `terms` query against `[]` which matches nothing. ftsearch does *not* impose a standalone CV intersection on `closedCatalogVersionIds` when the flag is off — that is request-side metadata only (used by `coreSortimentOnly` logic). The ACL re-adds always-intersect semantics for legacy parity.
   - `coreArticlesVendorsFilter` → vendor-id intersected with core marker; compose from the two
   - `blockedEClassVendorsFilters` → negative expr (NOT (vendor_id in [...] AND eclassN_code in [...])) per entry
   - `accessoriesForArticleNumber` / `sparePartsForArticleNumber` / `similarToArticleNumber` → `array_contains(relationship_*, "<articleNumber>")`

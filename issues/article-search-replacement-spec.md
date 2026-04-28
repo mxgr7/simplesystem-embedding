@@ -279,7 +279,7 @@ The ACL forwards filters as structured fields on the ftsearch request. ftsearch 
 | `currentCategoryPathElements`                                                           | path prefix match                                                                   | Milvus `category_l1..l5` already there but separator is `¦`; needs translation                        |
 | `currentEClass5Code` / `currentEClass7Code` / `currentS2ClassCode`                      | terms on eClass group fields                                                        | Add eClass fields to collection                                                                       |
 | `coreSortimentOnly`                                                                     | terms on `enabledCoreArticleMarkerSources` minus `disabledCoreArticleMarkerSources` | Add core-marker fields to collection                                                                  |
-| `closedMarketplaceOnly`                                                                 | catalog version "closed" flag                                                       | Denormalize as `closed_catalog` flag                                                                  |
+| `closedMarketplaceOnly`                                                                 | switches the CV-list source: `closedCatalogVersionIds` when true, otherwise `catalogVersionIdsOrderedByPreference` | When true, intersect `catalog_version_ids` with `selectedArticleSources.closedCatalogVersionIds`; empty list ⇒ match nothing (legacy `OfferFilterBuilder`). No row-level flag exists. |
 | `coreArticlesVendorsFilter`                                                             | vendor + core marker combo                                                          | Same as above                                                                                         |
 | `blockedEClassVendorsFilters`                                                           | inverse filter (vendorId × eClassGroup)                                             | Negative Milvus expr once eClass + vendor are in the collection                                       |
 
@@ -433,8 +433,11 @@ features                      ARRAY<VARCHAR> of "name=value" tokens, separator `
 relationship_accessory_for    ARRAY<STRING>
 relationship_spare_part_for   ARRAY<STRING>
 relationship_similar_to       ARRAY<STRING>
-closed_catalog                BOOL
 ```
+
+(`closedMarketplaceOnly` does not need a row-level flag — legacy filters
+by intersecting `catalog_version_ids` with the request's
+`closedCatalogVersionIds` list, see §4.3.)
 
 This puts every parity-critical filter into the search call with no external lookups. Aggregations beyond hierarchical category/eClass can run as Milvus `query` (no vector) with `group_by_field` on the filtered set.
 

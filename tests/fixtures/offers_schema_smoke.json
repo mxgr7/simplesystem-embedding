@@ -30,8 +30,7 @@
       "features": ["Werkstoff=Stahl", "Gewicht=12.5", "Achshöhe=200"],
       "relationship_accessory_for": [],
       "relationship_spare_part_for": [],
-      "relationship_similar_to": [],
-      "closed_catalog": false
+      "relationship_similar_to": []
     },
     {
       "_covers": "Category element containing ¦ (escaped to | per CategoryPath rule); depth 5",
@@ -60,8 +59,7 @@
       "features": ["Spannung=18V", "Akkutyp=LiIon"],
       "relationship_accessory_for": [],
       "relationship_spare_part_for": [],
-      "relationship_similar_to": [],
-      "closed_catalog": false
+      "relationship_similar_to": []
     },
     {
       "_covers": "Multi-value feature → multiple name=value tokens; German diacritics",
@@ -96,8 +94,7 @@
       ],
       "relationship_accessory_for": [],
       "relationship_spare_part_for": [],
-      "relationship_similar_to": [],
-      "closed_catalog": false
+      "relationship_similar_to": []
     },
     {
       "_covers": "All three relationship arrays populated",
@@ -126,11 +123,10 @@
       "features": [],
       "relationship_accessory_for": ["ACC-001", "ACC-002"],
       "relationship_spare_part_for": ["BASE-MODEL-A", "BASE-MODEL-B"],
-      "relationship_similar_to": ["SIMILAR-X", "SIMILAR-Y", "SIMILAR-Z"],
-      "closed_catalog": false
+      "relationship_similar_to": ["SIMILAR-X", "SIMILAR-Y", "SIMILAR-Z"]
     },
     {
-      "_covers": "closed_catalog=true; both core_marker enabled+disabled sets populated",
+      "_covers": "Both core_marker enabled+disabled sets populated",
       "id": "closeCatId:Q0xPU0VEMDAx",
       "vector_seed": 5,
       "name": "Geschlossener-Katalog Artikel",
@@ -161,8 +157,7 @@
       "features": [],
       "relationship_accessory_for": [],
       "relationship_spare_part_for": [],
-      "relationship_similar_to": [],
-      "closed_catalog": true
+      "relationship_similar_to": []
     },
     {
       "_covers": "All three eclass codes + s2class populated",
@@ -191,8 +186,7 @@
       "features": [],
       "relationship_accessory_for": [],
       "relationship_spare_part_for": [],
-      "relationship_similar_to": [],
-      "closed_catalog": false
+      "relationship_similar_to": []
     },
     {
       "_covers": "Sparse row: most optional fields empty/zero — exercises tolerant insert path",
@@ -219,8 +213,7 @@
       "features": [],
       "relationship_accessory_for": [],
       "relationship_spare_part_for": [],
-      "relationship_similar_to": [],
-      "closed_catalog": false
+      "relationship_similar_to": []
     },
     {
       "_covers": "Multiple catalog_version_ids; multiple categories at l3 (different paths)",
@@ -253,8 +246,7 @@
       "features": ["Set=10-tlg"],
       "relationship_accessory_for": [],
       "relationship_spare_part_for": [],
-      "relationship_similar_to": [],
-      "closed_catalog": false
+      "relationship_similar_to": []
     }
   ]
 }

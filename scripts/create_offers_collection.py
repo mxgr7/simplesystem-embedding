@@ -41,7 +41,6 @@ SCALAR_INDEX_FIELDS = (
     # Vendor / catalog
     "vendor_id",
     "catalog_version_ids",
-    "closed_catalog",
     # eClass / S2Class hierarchy (§4.3, §4.4)
     "eclass5_code",
     "eclass7_code",
@@ -129,7 +128,6 @@ def build_schema(client: MilvusClient):
         "relationship_similar_to", DataType.ARRAY,
         element_type=DataType.VARCHAR, max_capacity=128, max_length=256,
     )
-    schema.add_field("closed_catalog", DataType.BOOL)
     return schema
 
 

@@ -42,10 +42,9 @@ EXPECTED_FIELDS = {
     "eclass5_code", "eclass7_code", "s2class_code",
     "features",
     "relationship_accessory_for", "relationship_spare_part_for", "relationship_similar_to",
-    "closed_catalog",
 }
 EXPECTED_SCALAR_INDEXES = {
-    "vendor_id", "catalog_version_ids", "closed_catalog",
+    "vendor_id", "catalog_version_ids",
     "eclass5_code", "eclass7_code", "s2class_code",
     "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
     "delivery_time_days_max", "features",
@@ -150,8 +149,6 @@ def test_search_via_alias_works(client: MilvusClient) -> None:
     ('eclass7_code > 0',                                        "eclass7 range"),
     ('s2class_code in [1001, 5042]',                            "s2class IN"),
     ('delivery_time_days_max <= 7',                             "delivery range — maxDeliveryTime"),
-    ('closed_catalog == true',                                  "boolean equality"),
-    ('closed_catalog == false',                                 "boolean equality (negated)"),
     ('array_contains(catalog_version_ids, "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa")',
                                                                 "array membership"),
     ('array_contains_any(features, ["Werkstoff=Stahl", "Größe=M8x40"])',

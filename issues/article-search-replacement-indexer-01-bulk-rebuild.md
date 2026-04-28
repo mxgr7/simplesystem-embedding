@@ -30,7 +30,7 @@ This packet establishes the indexer surface in the repo. Today the repo has bulk
   - **`catalog_version_ids`**: as today.
   - **`category_l1..l5`**: `¦` (U+00A6) separator; if a path element itself contains `¦`, replace it with `|` (U+007C) before joining (per legacy `CategoryPath.java`).
   - **`prices`**: project the legacy nested `prices` array verbatim into JSON: `[{"price": float, "currency": "EUR", "priority": int, "sourcePriceListId": "uuid"}, ...]`. Do NOT collapse — ftsearch resolves at query time (§7).
-  - **`delivery_time_days_max`**, **`closed_catalog`**: straight projections.
+  - **`delivery_time_days_max`**: straight projection.
   - **`core_marker_enabled_sources`**, **`core_marker_disabled_sources`**: array projections.
   - **`eclass5_code`**, **`eclass7_code`**, **`s2class_code`**: integer projections.
   - **`features`**: tokenise into `name=value` strings (§7). Legacy stores features structurally (`Set<OfferFeature>{name, values}`) and never serialises through `=`, so there's no precedent. **Policy: reject + log + drop** the offending feature when a value contains `=`. The rest of the row still indexes.

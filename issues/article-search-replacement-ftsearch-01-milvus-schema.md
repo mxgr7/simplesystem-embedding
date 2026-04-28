@@ -26,10 +26,9 @@ This packet only defines and creates the schema. Population is I1; consumption i
   - `eclass5_code INT`, `eclass7_code INT`, `s2class_code INT`
   - `features ARRAY<VARCHAR>` of `name=value` tokens (separator `=`)
   - `relationship_accessory_for ARRAY<STRING>`, `relationship_spare_part_for ARRAY<STRING>`, `relationship_similar_to ARRAY<STRING>`
-  - `closed_catalog BOOL`
   - retain `name`, `manufacturerName`, `ean`, `article_number`, `catalog_version_ids`, `category_l1..l5`, `offer_embedding`
 - Widen `id` to `VARCHAR(256)`. Current cap is 64 (`scripts/milvus_import.py:83`); 256 leaves ample headroom for `{friendlyId}:{base64Url(articleNumber)}` (≥ 80 chars in practice). Milvus 2.6.15 allows up to 65535 — no hard limit hit.
-- Scalar indexes on the fields that filtering will hit on the hot path: `vendor_id`, `eclass5_code`, `eclass7_code`, `s2class_code`, `closed_catalog`, `delivery_time_days_max`. Confirm Milvus index types per field type.
+- Scalar indexes on the fields that filtering will hit on the hot path: `vendor_id`, `eclass5_code`, `eclass7_code`, `s2class_code`, `delivery_time_days_max`. Confirm Milvus index types per field type.
 - Schema-creation script under `scripts/` that creates the collection and registers a Milvus alias (default `offers`) pointing at it (`MilvusClient.alter_alias`). **Naming convention**: versioned constants `offers_v{N}` (e.g. `offers_v2`, `offers_v3`); operator picks `N = current+1` when triggering reindex (I3 takes the name as a CLI argument).
 - ftsearch (`search-api/main.py`) keeps the path-param contract (`/{collection}/_search`) — alias resolution is an operator concern, not an API one. Document this explicitly.
 - Operational notes: how to bring up a new collection, how to register the alias, what to do during a swap.

@@ -128,17 +128,32 @@ def test_eclasses_filter_s2class_when_flag_set() -> None:
     assert expr == "s2class_code in [5042, 5043]"
 
 
-def test_closed_marketplace_only() -> None:
-    assert build_milvus_expr(_req(closed_marketplace_only=True)) == "closed_catalog == true"
+def test_closed_marketplace_only_without_cv_matches_nothing() -> None:
+    """Per legacy `OfferFilterBuilder`, `closedMarketplaceOnly=true` emits a
+    `terms` query against `closedCatalogVersionIds`. An empty list matches
+    nothing in ES; we replicate via an always-false expr."""
+    assert build_milvus_expr(_req(closed_marketplace_only=True)) == 'id == ""'
 
 
-def test_closed_catalog_versions() -> None:
+def test_closed_marketplace_only_intersects_closed_cv() -> None:
     expr = build_milvus_expr(_req(
+        closed_marketplace_only=True,
         selected_article_sources=SelectedArticleSources(
             closedCatalogVersionIds=["c-1", "c-2"],
         ),
     ))
     assert expr == 'array_contains_any(catalog_version_ids, ["c-1", "c-2"])'
+
+
+def test_closed_catalog_versions_alone_is_noop() -> None:
+    """Without `closedMarketplaceOnly=True`, `closedCatalogVersionIds` is
+    metadata for the core-sortiment logic only. Legacy never intersects on
+    it standalone (`OfferFilterBuilder` switches lists by the flag)."""
+    assert build_milvus_expr(_req(
+        selected_article_sources=SelectedArticleSources(
+            closedCatalogVersionIds=["c-1", "c-2"],
+        ),
+    )) is None
 
 
 def test_relationships_compose_with_and() -> None:
@@ -155,19 +170,16 @@ def test_relationships_compose_with_and() -> None:
 
 
 def test_core_sortiment_uses_closed_catalog_version_ids() -> None:
-    # closedCatalogVersionIds drives BOTH the catalog filter AND (when
-    # coreSortimentOnly=true) the core-sortiment source set, so both
-    # filters compose AND-wise.
+    # `closedCatalogVersionIds` drives the core-sortiment source set when
+    # `coreSortimentOnly=true`; ftsearch does not impose a standalone
+    # CV intersection on it (see _closed_marketplace docstring).
     expr = build_milvus_expr(_req(
         core_sortiment_only=True,
         selected_article_sources=SelectedArticleSources(
             closedCatalogVersionIds=["c-1", "c-2"],
         ),
     ))
-    assert expr == (
-        '(array_contains_any(catalog_version_ids, ["c-1", "c-2"]))'
-        ' and (array_contains_any(core_marker_enabled_sources, ["c-1", "c-2"]))'
-    )
+    assert expr == 'array_contains_any(core_marker_enabled_sources, ["c-1", "c-2"])'
 
 
 def test_core_sortiment_with_customer_uploaded() -> None:
@@ -179,10 +191,9 @@ def test_core_sortiment_with_customer_uploaded() -> None:
         ),
     ))
     assert expr == (
-        '(array_contains_any(catalog_version_ids, ["c-1"]))'
-        ' and ((array_contains_any(core_marker_enabled_sources, ["u-1"]))'
+        '(array_contains_any(core_marker_enabled_sources, ["u-1"]))'
         ' or ((array_contains_any(core_marker_enabled_sources, ["c-1"]))'
-        ' and (not array_contains_any(core_marker_disabled_sources, ["u-1"]))))'
+        ' and (not array_contains_any(core_marker_disabled_sources, ["u-1"])))'
     )
 
 
@@ -212,11 +223,9 @@ def test_core_articles_vendors_filter() -> None:
             closedCatalogVersionIds=["c-1"],
         ),
     ))
-    # closedCatalogVersionIds also fires _closed_catalog_versions, so
-    # the vendor-specific core-sortiment composes AND-wise with it.
     assert expr == (
-        '(array_contains_any(catalog_version_ids, ["c-1"])) and '
-        '((vendor_id not in ["v-strict"]) or (array_contains_any(core_marker_enabled_sources, ["c-1"])))'
+        '(vendor_id not in ["v-strict"])'
+        ' or (array_contains_any(core_marker_enabled_sources, ["c-1"]))'
     )
 
 
