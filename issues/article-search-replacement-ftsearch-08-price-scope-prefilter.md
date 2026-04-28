@@ -1,11 +1,20 @@
 # F8 — Price-scope pre-filter columns (price-list scope + per-currency range envelope)
 
 **Category**: ftsearch (`./search-api/`) + indexer (`./indexer/`) + Milvus schema
-**Depends on**: F1 (schema), F3 (price-resolution module), I1 (projection)
+**Depends on**: F1 (schema), F3 (price-resolution module), I1 (projection), F9 (article-dedup topology — envelope columns split across the two collections)
 **Unblocks**: —
-**Refines**: F1 schema, F3 filter expr, I1 projection — all already landed; this packet adds columns and clauses without changing existing semantics.
+**Refines**: F1 schema, F3 filter expr, I1 projection.
 
-References: spec §7 (collection schema), §4.3 (filter table — `sourcePriceListIds`, `priceFilter`, top-level `currency`), §3 (currency two-roles).
+References: spec §7 (collection schema), §4.3 (filter table — `sourcePriceListIds`, `priceFilter`, top-level `currency`), §3 (currency two-roles), F9 (this packet's columns are duplicated across `articles_v{N}` and `offers_v{N}` per the F9 split — see "Column placement" below).
+
+## Column placement under F9 topology
+
+F9 splits storage into `articles_v{N}` (vector + article-level scalars) and `offers_v{N}` (per-offer scalars). F8's envelope columns split correspondingly:
+
+- **`articles_v{N}.{ccy}_price_min/max`** — per-currency envelope across *all the article's offers*. Used only by the sort-by-price browse path (no queryString) for ordered scan, not for filtering. Refreshed at bulk reindex; streaming updates owned by I2.
+- **`offers_v{N}.{ccy}_price_min/max`, `offers_v{N}.price_list_ids`, `offers_v{N}.currencies`** — per-offer scope. Path B's probe filter consults these to narrow the matching-hash set before the article-collection ANN. This is where F8's recall/latency win for narrow-scope traffic actually lands.
+
+The schema/projection/filter sections below describe the per-offer side (the Path B probe). The article-side envelope is described in F9's "Topology" section and `scripts/create_articles_collection.py`.
 
 ## Background — the gap this packet closes
 

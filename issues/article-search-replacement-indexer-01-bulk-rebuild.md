@@ -28,7 +28,7 @@ Landed in Phase A:
 **eClass hierarchy correction** (resolved): `_project_eclass` now copies the legacy `Set<Integer>` verbatim into `list[int]`, matching the new `ARRAY<INT32>` schema in F1. The previous "first element of the set" simplification silently broke parent-level recall — operators must drop and recreate `offers_v{N}` for the array column to take effect.
 
 Deferred (Phase B / C):
-  * **Phase B — production bulk pipeline**: `indexer/mongo_source.py` (direct MongoDB cursor with `(vendorId, articleNumber)` grouping — see article-aggregation gap in plan-doc cross-cutting findings), `indexer/bulk.py` (orchestrator with real TEI + resume-via-PK), `scripts/indexer_bulk.py` (CLI). Requires production-mode TEI access + MongoDB credentials.
+  * **Phase B — production bulk pipeline**: ~~`indexer/mongo_source.py` (direct MongoDB cursor with `(vendorId, articleNumber)` grouping), `indexer/bulk.py` (orchestrator with real TEI + resume-via-PK), `scripts/indexer_bulk.py` (CLI)~~. **Absorbed by F9 PR2** (`article-search-replacement-ftsearch-09-article-dedup.md`) — the article-aggregation grouping that Phase B was scoped for is the same grouping that emits F9's article-row stream. Do not ship Phase B as a separate packet; the bulk pipeline lands in F9 PR2 with two-stream emission, hash-keyed Redis TEI cache, and per-currency envelope aggregation already wired in.
   * **Phase C — legacy script audit**: move/archive superseded `scripts/milvus_*import*.py` files (5 candidates) to `scripts/legacy/`, confirm with team first.
 
 ## Scope

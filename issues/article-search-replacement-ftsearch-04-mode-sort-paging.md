@@ -22,7 +22,7 @@ Honour `searchMode`, `sort`, and `page`/`pageSize` in the new ftsearch request, 
   - Relevance (default — sort omitted): existing hybrid score, tiebreak on `articleId` ascending.
   - `articleId,asc|desc`: native PK sort via Milvus query (no vector).
   - `name,asc|desc`: over-fetch and re-sort by `name` in Python, with deterministic tiebreak on `articleId`.
-  - `price,asc|desc`: over-fetch, resolve each row's price via the F3 price-resolution module under request `currency` × `sourcePriceListIds` × priority, post-sort, paginate.
+  - `price,asc|desc`: over-fetch, resolve each row's price via the F3 price-resolution module under request `currency` × `sourcePriceListIds` × priority, post-sort, paginate. **Note**: when F9 lands, the *no-queryString* sort-by-price browse path swaps to an ordered scan over `articles_v{N}.{ccy}_price_min` (STL_SORT) — see F9 "Sort=price browse" section. F4 ships with the post-pass approach against the current single-collection topology; F9 is what enables the ordered-scan path. Sort-with-queryString stays on the post-pass approach in both topologies.
   - Multi-key sort: apply the first sort key only; always tiebreak on `articleId,asc`. Secondary keys are ignored — flagged as a deviation in the README.
 - **Relevance-pool bounding for non-relevance sorts with a query string** (per spec §2.3):
   - `RELEVANCE_POOL_MAX` (default 200): hard cap on the hybrid (dense + BM25 + RRF) candidate pool considered for non-relevance sorts.

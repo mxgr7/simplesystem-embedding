@@ -139,6 +139,11 @@ Articles outside the relevance pool will not surface even if their sort key woul
 
 Additional deviations will be added here as they are decided — particularly around fields that depend on data ftsearch doesn't carry today (price-sourced filters, eClass hierarchies). When in doubt during implementation: prefer recording a deviation here over silently degrading behavior.
 
+**F9 article-dedup topology deviations** (planned — see `article-search-replacement-ftsearch-09-article-dedup.md`):
+
+- **Path B probe ceiling — recall cliff above ~25 k matching hashes.** When a request's per-offer filter (catalog × price-list × price-range × core-marker) matches more than `PATH_B_HASH_LIMIT` (default 25 000) unique article hashes, the ftsearch dispatcher falls back to Path A (relevance-ordered ANN over the full corpus + per-offer filter as a resolve step). On selective-but-not-tight filters the resolve step may drop most ANN candidates, so the page can underfill (`< pageSize` results) and recall degrades silently. The response carries `metadata.recall_clipped: true` so the ACL and telemetry can distinguish. Limit is hardware-bounded at this level on the current Milvus 2.6 + CPU configuration (validated by an IN-clause cost benchmark — 25 k yields ~430 ms p95); a future GPU index could lift the ceiling.
+- **Sort-by-price browse staleness between bulk reindexes.** F9 ships only the bulk-reindex envelope writer for `articles_v{N}.{ccy}_price_min/max`. Until I2's streaming envelope writer lands, articles whose offers have been touched since the last bulk reindex appear at their *previous* envelope position in sort-by-price browse (no queryString). For a daily reindex cadence this affects a small sliver of catalogue at any moment.
+
 ---
 
 ## 3. The Contract the ACL MUST Implement (Verbatim)
