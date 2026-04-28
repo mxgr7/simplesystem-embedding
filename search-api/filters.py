@@ -32,8 +32,9 @@ Within multi-valued filters, semantics match legacy:
     the blocked eClass codes are filtered out. `value=true` codes are
     blocked; `value=false` codes are kept (legacy `INVERSE` mode treats
     them as exceptions). Modeled per entry as
-    `(vendor_id NOT IN [vendors]) OR NOT (eclassN_code IN [block-true]
-     AND eclassN_code NOT IN [block-false])`.
+    `(vendor_id NOT IN [vendors]) OR NOT (array_contains_any(eclassN_code,
+     [block-true]) AND NOT array_contains_any(eclassN_code, [block-false]))`
+    — `eclassN_code` is `ARRAY<INT32>` carrying the full hierarchy.
 """
 
 from __future__ import annotations
@@ -123,13 +124,16 @@ def _category_prefix(req: SearchRequest) -> str | None:
 
 
 def _eclass_codes(req: SearchRequest) -> str | None:
+    # eclass{5,7}_code / s2class_code are ARRAY<INT32> carrying the full
+    # legacy hierarchy (root → leaf). A leaf or parent-level filter matches
+    # via array_contains — same shape as the ES keyword-array `terms` query.
     parts: list[str] = []
     if req.current_eclass5_code is not None:
-        parts.append(f"eclass5_code == {int(req.current_eclass5_code)}")
+        parts.append(f"array_contains(eclass5_code, {int(req.current_eclass5_code)})")
     if req.current_eclass7_code is not None:
-        parts.append(f"eclass7_code == {int(req.current_eclass7_code)}")
+        parts.append(f"array_contains(eclass7_code, {int(req.current_eclass7_code)})")
     if req.current_s2class_code is not None:
-        parts.append(f"s2class_code == {int(req.current_s2class_code)}")
+        parts.append(f"array_contains(s2class_code, {int(req.current_s2class_code)})")
     return _and(parts)
 
 
@@ -137,7 +141,7 @@ def _eclasses_filter(req: SearchRequest) -> str | None:
     if not req.eclasses_filter:
         return None
     field = "s2class_code" if req.s2class_for_product_categories else "eclass5_code"
-    return f"{field} in {_int_array(req.eclasses_filter)}"
+    return f"array_contains_any({field}, {_int_array(req.eclasses_filter)})"
 
 
 _MATCH_NOTHING_EXPR = 'id == ""'
@@ -225,9 +229,12 @@ def _blocked_eclass_vendors(req: SearchRequest) -> str | None:
         block_false = [g.e_class_group_code for g in entry.blocked_e_class_groups if not g.value]
         if not block_true:
             continue
-        block_expr = f"{field} in {_int_array(block_true)}"
+        block_expr = f"array_contains_any({field}, {_int_array(block_true)})"
         if block_false:
-            block_expr = f"({block_expr}) and ({field} not in {_int_array(block_false)})"
+            block_expr = (
+                f"({block_expr}) and "
+                f"(not array_contains_any({field}, {_int_array(block_false)}))"
+            )
         if entry.vendor_ids:
             parts.append(
                 f"(vendor_id not in {_str_array(entry.vendor_ids)}) or (not ({block_expr}))"

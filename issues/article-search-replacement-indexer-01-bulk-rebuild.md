@@ -25,10 +25,11 @@ Landed in Phase A:
   * Tests: 9 friendly_id + 21 projection (incl. all 200 sample records project cleanly) + 7 real-data F3 integration (`test_search_filters_integration_real.py`).
   * Field-level fidelity verified against prod-ES on a representative row (`300570 Schleifband`): name, manufacturerName, ean, deliveryTime, features (3/3), categoryPaths.upToLevel{1..4}, individual prices — bit-identical.
 
+**eClass hierarchy correction** (resolved): `_project_eclass` now copies the legacy `Set<Integer>` verbatim into `list[int]`, matching the new `ARRAY<INT32>` schema in F1. The previous "first element of the set" simplification silently broke parent-level recall — operators must drop and recreate `offers_v{N}` for the array column to take effect.
+
 Deferred (Phase B / C):
   * **Phase B — production bulk pipeline**: `indexer/mongo_source.py` (direct MongoDB cursor with `(vendorId, articleNumber)` grouping — see article-aggregation gap in plan-doc cross-cutting findings), `indexer/bulk.py` (orchestrator with real TEI + resume-via-PK), `scripts/indexer_bulk.py` (CLI). Requires production-mode TEI access + MongoDB credentials.
   * **Phase C — legacy script audit**: move/archive superseded `scripts/milvus_*import*.py` files (5 candidates) to `scripts/legacy/`, confirm with team first.
-  * **Open decision**: eClass hierarchy gap (see plan-doc cross-cutting findings) — Phase A projects only the leaf code; legacy ES carries the full hierarchy. Either promote `eclass*_code` to `ARRAY<INT>` (revisits F1 schema) or accept as a §2 deviation.
 
 ## Scope
 
@@ -48,7 +49,7 @@ This packet establishes the indexer surface in the repo. Today the repo has bulk
   - **`prices`**: project the legacy nested `prices` array verbatim into JSON: `[{"price": float, "currency": "EUR", "priority": int, "sourcePriceListId": "uuid"}, ...]`. Do NOT collapse — ftsearch resolves at query time (§7).
   - **`delivery_time_days_max`**: straight projection.
   - **`core_marker_enabled_sources`**, **`core_marker_disabled_sources`**: array projections.
-  - **`eclass5_code`**, **`eclass7_code`**, **`s2class_code`**: integer projections.
+  - **`eclass5_code`**, **`eclass7_code`**, **`s2class_code`**: `ARRAY<INT>` projections — copy the legacy `eclassGroups[ECLASS_5_1|ECLASS_7_1|S2CLASS]` arrays verbatim. Each carries every level of the hierarchy (root → leaf), mirroring ES `offers.eclass51Groups` / `eclass71Groups` / `s2classGroups`. F3 filters via `array_contains[_any]` so a query at any level matches.
   - **`features`**: tokenise into `name=value` strings (§7). Legacy stores features structurally (`Set<OfferFeature>{name, values}`) and never serialises through `=`, so there's no precedent. **Policy: reject + log + drop** the offending feature when a value contains `=`. The rest of the row still indexes.
   - **`relationship_accessory_for`**, **`relationship_spare_part_for`**, **`relationship_similar_to`**: array projections.
 - **Bulk pipeline** (`indexer/bulk.py` and a CLI under `scripts/`):

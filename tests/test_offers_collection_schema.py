@@ -28,7 +28,7 @@ from pymilvus import MilvusClient
 from pymilvus.exceptions import MilvusException
 
 MILVUS_URI = "http://localhost:19530"
-COLLECTION = "offers_v2"
+COLLECTION = "offers_v3"
 ALIAS = "offers_v_alias"
 DIM = 128
 
@@ -144,10 +144,10 @@ def test_search_via_alias_works(client: MilvusClient) -> None:
 @pytest.mark.parametrize("expr,description", [
     ('vendor_id == "44444444-4444-4444-4444-444444444444"',     "vendor equality"),
     ('vendor_id in ["aaa", "bbb"]',                             "vendor IN"),
-    ('eclass5_code == 23172001',                                "eclass5 equality"),
-    ('eclass5_code in [23172001, 27182301]',                    "eclass5 IN"),
-    ('eclass7_code > 0',                                        "eclass7 range"),
-    ('s2class_code in [1001, 5042]',                            "s2class IN"),
+    ('array_contains(eclass5_code, 23172001)',                  "eclass5 hierarchy match"),
+    ('array_contains_any(eclass5_code, [23172001, 27182301])',  "eclass5 hierarchy IN"),
+    ('array_contains(eclass7_code, 23172090)',                  "eclass7 hierarchy match"),
+    ('array_contains_any(s2class_code, [1001, 5042])',          "s2class hierarchy IN"),
     ('delivery_time_days_max <= 7',                             "delivery range — maxDeliveryTime"),
     ('array_contains(catalog_version_ids, "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa")',
                                                                 "array membership"),

@@ -111,13 +111,19 @@ def test_eclass_codes_compose_with_and() -> None:
         current_eclass7_code=23172090,
         current_s2class_code=1001,
     ))
+    # eclass{5,7}_code / s2class_code are ARRAY<INT32> hierarchies; a
+    # parent or leaf code matches via array_contains.
     assert expr == (
-        "(eclass5_code == 23172001) and (eclass7_code == 23172090) and (s2class_code == 1001)"
+        "(array_contains(eclass5_code, 23172001))"
+        " and (array_contains(eclass7_code, 23172090))"
+        " and (array_contains(s2class_code, 1001))"
     )
 
 
 def test_eclasses_filter_default_eclass5() -> None:
-    assert build_milvus_expr(_req(eclasses_filter=[1001, 1002])) == "eclass5_code in [1001, 1002]"
+    assert build_milvus_expr(_req(eclasses_filter=[1001, 1002])) == (
+        "array_contains_any(eclass5_code, [1001, 1002])"
+    )
 
 
 def test_eclasses_filter_s2class_when_flag_set() -> None:
@@ -125,7 +131,7 @@ def test_eclasses_filter_s2class_when_flag_set() -> None:
         eclasses_filter=[5042, 5043],
         s2class_for_product_categories=True,
     ))
-    assert expr == "s2class_code in [5042, 5043]"
+    assert expr == "array_contains_any(s2class_code, [5042, 5043])"
 
 
 def test_closed_marketplace_only_without_cv_matches_nothing() -> None:
@@ -238,7 +244,8 @@ def test_blocked_eclass_vendors_basic() -> None:
         ),
     ]))
     assert expr == (
-        '(vendor_id not in ["v-1"]) or (not (eclass5_code in [23172001]))'
+        '(vendor_id not in ["v-1"]) or '
+        '(not (array_contains_any(eclass5_code, [23172001])))'
     )
 
 
@@ -253,10 +260,12 @@ def test_blocked_eclass_vendors_with_exception() -> None:
             ],
         ),
     ]))
-    # block-true minus block-false: blocked iff in [23170000] AND NOT in [23172001]
+    # block-true minus block-false: blocked iff hierarchy contains [23170000]
+    # AND does not contain [23172001].
     assert expr == (
         '(vendor_id not in ["v-1"]) or '
-        '(not ((eclass5_code in [23170000]) and (eclass5_code not in [23172001])))'
+        '(not ((array_contains_any(eclass5_code, [23170000]))'
+        ' and (not array_contains_any(eclass5_code, [23172001]))))'
     )
 
 
@@ -267,7 +276,7 @@ def test_blocked_eclass_vendors_no_vendors_filter_applies_globally() -> None:
             blockedEClassGroups=[BlockedEClassGroup(eClassGroupCode=5000, value=True)],
         ),
     ]))
-    assert expr == "not (s2class_code in [5000])"
+    assert expr == "not (array_contains_any(s2class_code, [5000]))"
 
 
 def test_blocked_eclass_vendors_skip_entries_with_no_block_true() -> None:

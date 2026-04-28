@@ -96,13 +96,15 @@ def test_markers_split_into_enabled_and_disabled(records: list[dict]) -> None:
     assert row["core_marker_disabled_sources"] == []
 
 
-def test_eclass_codes_pull_first_of_set(records: list[dict]) -> None:
+def test_eclass_codes_copied_as_arrays(records: list[dict]) -> None:
     """Record 0's offerParams.eclassGroups has ECLASS_5_1=[23110101] and
-    ECLASS_7_1=[23110101]; no S2CLASS."""
+    ECLASS_7_1=[23110101]; no S2CLASS. The projection copies the legacy
+    arrays verbatim — every level of the hierarchy ends up in the row so
+    parent-level filters match via array_contains."""
     row = project(records[0]).row
-    assert row["eclass5_code"] == 23110101
-    assert row["eclass7_code"] == 23110101
-    assert row["s2class_code"] == 0
+    assert row["eclass5_code"] == [23110101]
+    assert row["eclass7_code"] == [23110101]
+    assert row["s2class_code"] == []
 
 
 def test_delivery_time_projected(records: list[dict]) -> None:

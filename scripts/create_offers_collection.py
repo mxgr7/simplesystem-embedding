@@ -109,9 +109,23 @@ def build_schema(client: MilvusClient):
         "core_marker_disabled_sources", DataType.ARRAY,
         element_type=DataType.VARCHAR, max_capacity=64, max_length=64,
     )
-    schema.add_field("eclass5_code", DataType.INT32)
-    schema.add_field("eclass7_code", DataType.INT32)
-    schema.add_field("s2class_code", DataType.INT32)
+    # eClass / S2Class hierarchies — ARRAY<INT32> carrying every level of
+    # the legacy hierarchy (root → leaf), mirroring ES `offers.eclass51Groups`
+    # / `eclass71Groups` / `s2classGroups` keyword arrays. A `terms` query
+    # at any level matches via `array_contains[_any]`. Single-INT collapsed
+    # the hierarchy to one undefined-ordering scalar — silent recall bug.
+    schema.add_field(
+        "eclass5_code", DataType.ARRAY,
+        element_type=DataType.INT32, max_capacity=16,
+    )
+    schema.add_field(
+        "eclass7_code", DataType.ARRAY,
+        element_type=DataType.INT32, max_capacity=16,
+    )
+    schema.add_field(
+        "s2class_code", DataType.ARRAY,
+        element_type=DataType.INT32, max_capacity=16,
+    )
     schema.add_field(
         "features", DataType.ARRAY,
         element_type=DataType.VARCHAR, max_capacity=512, max_length=512,

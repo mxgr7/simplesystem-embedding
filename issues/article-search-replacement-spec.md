@@ -419,9 +419,12 @@ prices                        JSON — full legacy nested-prices array projected
 delivery_time_days_max        INT
 core_marker_enabled_sources   ARRAY<STRING>
 core_marker_disabled_sources  ARRAY<STRING>
-eclass5_code                  INT
-eclass7_code                  INT
-s2class_code                  INT
+eclass5_code                  ARRAY<INT> — every level of the legacy hierarchy (root → leaf), mirroring
+                                     ES `offers.eclass51Groups`. Filters use `array_contains[_any]`
+                                     so a `terms` query at any level matches (single INT collapsed
+                                     the hierarchy to one undefined-ordering scalar — silent recall bug).
+eclass7_code                  ARRAY<INT> — same shape; mirrors ES `offers.eclass71Groups`.
+s2class_code                  ARRAY<INT> — same shape; mirrors ES `offers.s2classGroups`.
 features                      ARRAY<VARCHAR> of "name=value" tokens, separator `=`.
                                      Indexer must reject (or escape) values that contain `=` so the
                                      separator stays unambiguous; chosen over JSON because Milvus

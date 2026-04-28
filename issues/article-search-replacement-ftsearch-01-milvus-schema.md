@@ -12,11 +12,13 @@ References: spec §4.8, §6, §7, §9 #4.
 
 ## Status
 
-✅ **Done** — commit `549516a` (`F1: offers_v{N} Milvus schema + alias workflow`). Subsequent correction in `d0cb6f4` (drop phantom `closed_catalog BOOL` column).
+✅ **Done** — commit `549516a` (`F1: offers_v{N} Milvus schema + alias workflow`). Subsequent corrections in `d0cb6f4` (drop phantom `closed_catalog BOOL` column) and the eClass-array fix below.
 
   * `scripts/create_offers_collection.py` — versioned collection + scalar indexes + alias swing
   * `scripts/MILVUS_ALIAS_WORKFLOW.md` — operational notes
   * `tests/test_offers_collection_schema.py` — 24 tests against a live Milvus, covering schema shape, long-PK round-trip, alias resolution, all F3-bound expr parsing
+
+**eClass hierarchy correction**: `eclass{5,7}_code` and `s2class_code` are `ARRAY<INT32>` (capacity 16) carrying every level of the legacy hierarchy. The original single-INT projection collapsed the array to one undefined-ordering scalar — a `terms` query at any level (`currentEClass5Code = <leaf>`) only matched when the leaf happened to land at index 0. Operators must drop and recreate `offers_v{N}` (pick a higher `--version`) for this change to take effect.
 
 ## Scope
 
@@ -31,7 +33,7 @@ This packet only defines and creates the schema. Population is I1; consumption i
   - `prices JSON` — full legacy nested-prices array, projected verbatim
   - `delivery_time_days_max INT`
   - `core_marker_enabled_sources ARRAY<STRING>`, `core_marker_disabled_sources ARRAY<STRING>`
-  - `eclass5_code INT`, `eclass7_code INT`, `s2class_code INT`
+  - `eclass5_code ARRAY<INT>`, `eclass7_code ARRAY<INT>`, `s2class_code ARRAY<INT>` — full legacy hierarchy (root → leaf), matching ES `offers.eclass51Groups` / `eclass71Groups` / `s2classGroups`. Filters use `array_contains[_any]`.
   - `features ARRAY<VARCHAR>` of `name=value` tokens (separator `=`)
   - `relationship_accessory_for ARRAY<STRING>`, `relationship_spare_part_for ARRAY<STRING>`, `relationship_similar_to ARRAY<STRING>`
   - retain `name`, `manufacturerName`, `ean`, `article_number`, `catalog_version_ids`, `category_l1..l5`, `offer_embedding`
@@ -59,7 +61,7 @@ This packet only defines and creates the schema. Population is I1; consumption i
 - Script run against an empty Milvus produces the expected collection with all §7 fields, expected indexes, and a registered alias.
 - A representative legacy `articleId` (≥ 80 chars) inserts and round-trips through the PK without truncation.
 - Existing `/{collection}/_search` traffic against the alias name continues to behave identically to today.
-- All scalar filter expressions that F3 will rely on (e.g. `vendor_id == "x"`, `eclass5_code in [...]`, `array_contains_any(features, [...])`) parse and execute against an empty collection without error.
+- All scalar filter expressions that F3 will rely on (e.g. `vendor_id == "x"`, `array_contains_any(eclass5_code, [...])`, `array_contains_any(features, [...])`) parse and execute against an empty collection without error.
 
 ## Open questions for this packet
 

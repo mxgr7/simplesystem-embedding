@@ -145,7 +145,13 @@ def test_top_manufacturer_narrows_correctly(
 def test_eclass5_filter_against_real_codes(
     client: TestClient, projected_rows: list[dict],
 ) -> None:
-    eclass_counts = Counter(r["eclass5_code"] for r in projected_rows if r["eclass5_code"])
+    # eclass5_code is now ARRAY<INT32> carrying the full hierarchy. Count
+    # rows whose hierarchy contains each leaf code, then assert the filter
+    # narrows to exactly that count.
+    eclass_counts: Counter[int] = Counter()
+    for r in projected_rows:
+        for code in r["eclass5_code"]:
+            eclass_counts[code] += 1
     top_code, expected_count = eclass_counts.most_common(1)[0]
 
     body = _post(client, currentEClass5Code=top_code)
@@ -158,11 +164,13 @@ def test_and_composition_strictly_narrows(
     """Vendor filter ∩ EClass5 filter ⊆ vendor filter (not equal in general)."""
     vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
     top_vendor, _ = vendor_counts.most_common(1)[0]
-    # Pick an eClass5 that some — but not all — of that vendor's rows have.
-    vendor_eclasses = Counter(
-        r["eclass5_code"] for r in projected_rows
-        if r["vendor_id"] == top_vendor and r["eclass5_code"]
-    )
+    # Pick an eClass5 code that appears in some — but not all — of that
+    # vendor's rows. Iterate over the per-row hierarchy arrays.
+    vendor_eclasses: Counter[int] = Counter()
+    for r in projected_rows:
+        if r["vendor_id"] == top_vendor:
+            for code in r["eclass5_code"]:
+                vendor_eclasses[code] += 1
     if not vendor_eclasses:
         pytest.skip("top vendor has no eClass5 codes in sample")
     target_eclass, _ = vendor_eclasses.most_common(1)[0]

@@ -19,15 +19,18 @@ Legacy parity sources:
                                    through `=` so per-spec we reject + log
                                    + drop entries whose value contains `=`
 
-Two intentional simplifications vs. legacy:
-  * `eclass{5,7}_code` / `s2class_code` take the FIRST element of the
-    legacy `Set<Integer>`. Production data has at most one element in
-    practice, but the data model permits multiple — if multi-eclass rows
-    appear we'd extend to ARRAY columns.
+One intentional simplification vs. legacy:
   * Empty/missing fields fall back to schema defaults (empty arrays,
     empty strings, zero ints) rather than failing the row. Callers can
     inspect the returned `dropped_features` list if they need to surface
     bad input.
+
+`eclass{5,7}_code` / `s2class_code` are projected as `list[int]` —
+every level of the legacy hierarchy is carried verbatim so a `terms`
+query at any level matches via `array_contains[_any]` (matches the
+ES `offers.eclass51Groups` / `eclass71Groups` / `s2classGroups`
+keyword-array shape). Collapsing to a single int loses the parent
+codes and silently breaks recall on parent-level filters.
 """
 
 from __future__ import annotations
@@ -180,11 +183,10 @@ def _project_categories(
     return {f"category_l{d}": bins[d - 1] for d in range(1, _MAX_CATEGORY_DEPTH + 1)}
 
 
-def _project_eclass(eclass_groups: dict[str, Any] | None, key: str) -> int:
+def _project_eclass(eclass_groups: dict[str, Any] | None, key: str) -> list[int]:
     if not eclass_groups:
-        return 0
-    codes = eclass_groups.get(key) or []
-    return int(codes[0]) if codes else 0
+        return []
+    return [int(c) for c in eclass_groups.get(key) or []]
 
 
 def _project_markers(

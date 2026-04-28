@@ -16,6 +16,7 @@ References: spec §4.3, §3 (currency two-roles), §7.
   * `search-api/prices.py` — `decode_minor_units`, `resolve_price`, `passes_price_filter` (currency two-roles split + ISO-4217 fraction-digit decoding)
   * `search-api/main.py` + `search-api/hybrid.py` — F3 wired through hybrid search path with BM25-leg post-intersection + price-filter over-fetch (default `PRICE_FILTER_OVERFETCH_N=10`)
   * Correction (`d0cb6f4`): dropped phantom `closed_catalog == true` filter and `_closed_catalog_versions` standalone filter; rewrote `_closed_marketplace` to intersect on `closedCatalogVersionIds` with `id == ""` match-nothing sentinel for the empty-list case (matches legacy `OfferFilterBuilder`).
+  * eClass-hierarchy correction: `_eclass_codes` / `_eclasses_filter` / `_blocked_eclass_vendors` now emit `array_contains[_any]` against the `ARRAY<INT>` hierarchy fields. Previous `==`/`in` on collapsed scalars only matched the (undefined-ordering) first element — a silent recall bug for any non-leaf or non-first-element filter.
   * Tests: 32 unit (`test_filters.py`) + 16 unit (`test_prices.py`) + 25 integration (`test_search_filters_integration.py`).
   * Two intentional simplifications vs. legacy: priceFilter picks the single highest-priority entry (no per-tier mustNot dance); `coreSortimentOnly` with no source context is a no-op rather than mass-excluding.
 
@@ -35,12 +36,12 @@ Filters are AND-composed at the top level. Within each multi-valued filter the e
   - `maxDeliveryTime` → `delivery_time_days_max <= ...`
   - `requiredFeatures` → per `{name, values:[…]}` group: `array_contains_any(features, ["name=v1", …])`; AND across groups
   - `currentCategoryPathElements` → prefix match on the appropriate `category_l*` field; encode with `¦` separator
-  - `currentEClass5Code` / `currentEClass7Code` / `currentS2ClassCode` → equality on the matching int field
-  - `eClassesFilter` → `eclass5_code in [...]` (legacy `EClassesFilterProvider` operates on the eClass5 code tree).
+  - `currentEClass5Code` / `currentEClass7Code` / `currentS2ClassCode` → `array_contains(eclassN_code, X)` against the matching `ARRAY<INT>` hierarchy field; matches whether `X` is the leaf or any parent level.
+  - `eClassesFilter` → `array_contains_any(eclass5_code, [...])` (legacy `EClassesFilterProvider` operates on the eClass5 code tree; the hierarchy array carries every level so a `terms` query at any depth matches).
   - `coreSortimentOnly` → `array_contains_any(core_marker_enabled_sources, [...])` AND NOT `array_contains_any(core_marker_disabled_sources, [...])`. The source IDs come from `selectedArticleSources` — see `CoreSortimentFilterProvider.java` for the exact field set the legacy uses.
   - `closedMarketplaceOnly` → `array_contains_any(catalog_version_ids, [closedCatalogVersionIds])`. Per legacy `OfferFilterBuilder`: when the flag is set, intersect on the closed-CV list; on an empty list legacy emits a `terms` query against `[]` which matches nothing. ftsearch does *not* impose a standalone CV intersection on `closedCatalogVersionIds` when the flag is off — that is request-side metadata only (used by `coreSortimentOnly` logic). The ACL re-adds always-intersect semantics for legacy parity.
   - `coreArticlesVendorsFilter` → vendor-id intersected with core marker; compose from the two
-  - `blockedEClassVendorsFilters` → negative expr (NOT (vendor_id in [...] AND eclassN_code in [...])) per entry
+  - `blockedEClassVendorsFilters` → negative expr (NOT (vendor_id in [...] AND `array_contains_any(eclassN_code, [...])`)) per entry; the hierarchy array means a vendor's row is blocked when *any* level of its eClass tree falls into the block list.
   - `accessoriesForArticleNumber` / `sparePartsForArticleNumber` / `similarToArticleNumber` → `array_contains(relationship_*, "<articleNumber>")`
 - **Price filter** is special: cannot be expressed as a Milvus expr because the `prices` JSON is a per-row array that needs filtering by `currency` × `sourcePriceListIds`, then min-by-priority, then range-check. Approach:
   1. Use the Milvus expr filter for everything except `priceFilter`.
