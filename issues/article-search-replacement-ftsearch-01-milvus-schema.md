@@ -37,7 +37,7 @@ This packet only defines and creates the schema. Population is I1; consumption i
   - `features ARRAY<VARCHAR>` of `name=value` tokens (separator `=`)
   - `relationship_accessory_for ARRAY<STRING>`, `relationship_spare_part_for ARRAY<STRING>`, `relationship_similar_to ARRAY<STRING>`
   - retain `name`, `manufacturerName`, `ean`, `article_number`, `catalog_version_ids`, `category_l1..l5`, `offer_embedding`
-- Widen `id` to `VARCHAR(256)`. Current cap is 64 (`scripts/milvus_import.py:83`); 256 leaves ample headroom for `{friendlyId}:{base64Url(articleNumber)}` (≥ 80 chars in practice). Milvus 2.6.15 allows up to 65535 — no hard limit hit.
+- Widen `id` to `VARCHAR(256)`. Current cap is 64 (`scripts/milvus_import.py:83`); 256 leaves ample headroom for `{friendlyId}:{base64Url(articleNumber)}` — observed 30–55 chars across a 200-doc sample of `prod-article-index-v1` (friendlyId is fixed at 22 chars; tail length follows `articleNumber`, max observed 32 chars). Milvus 2.6.15 allows up to 65535 — no hard limit hit.
 - Scalar indexes on the fields that filtering will hit on the hot path: `vendor_id`, `eclass5_code`, `eclass7_code`, `s2class_code`, `delivery_time_days_max`. Confirm Milvus index types per field type.
 - Schema-creation script under `scripts/` that creates the collection and registers a Milvus alias (default `offers`) pointing at it (`MilvusClient.alter_alias`). **Naming convention**: versioned constants `offers_v{N}` (e.g. `offers_v2`, `offers_v3`); operator picks `N = current+1` when triggering reindex (I3 takes the name as a CLI argument).
 - ftsearch (`search-api/main.py`) keeps the path-param contract (`/{collection}/_search`) — alias resolution is an operator concern, not an API one. Document this explicitly.
@@ -59,7 +59,7 @@ This packet only defines and creates the schema. Population is I1; consumption i
 ## Acceptance
 
 - Script run against an empty Milvus produces the expected collection with all §7 fields, expected indexes, and a registered alias.
-- A representative legacy `articleId` (≥ 80 chars) inserts and round-trips through the PK without truncation.
+- A representative legacy `articleId` near the observed upper bound (≥ 50 chars) inserts and round-trips through the PK without truncation.
 - Existing `/{collection}/_search` traffic against the alias name continues to behave identically to today.
 - All scalar filter expressions that F3 will rely on (e.g. `vendor_id == "x"`, `array_contains_any(eclass5_code, [...])`, `array_contains_any(features, [...])`) parse and execute against an empty collection without error.
 

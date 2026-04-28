@@ -79,7 +79,7 @@ This packet establishes the indexer surface in the repo. Today the repo has bulk
 
 - Projection unit tests pass on a representative MongoDB fixture.
 - Running the bulk pipeline against a small fixture produces a Milvus collection that F3..F5 can query correctly.
-- A representative legacy `articleId` (≥ 80 chars) lands in the PK without truncation and is queryable verbatim.
+- A representative legacy `articleId` near the observed upper bound (≥ 50 chars) lands in the PK without truncation and is queryable verbatim.
 - A row with multiple prices across currencies and price lists round-trips through the JSON `prices` field unchanged.
 - A row with feature values containing `=` is handled per the documented policy (reject + log).
 
