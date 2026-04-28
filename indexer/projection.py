@@ -36,11 +36,12 @@ codes and silently breaks recall on parent-level filters.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable
 
 from indexer.friendly_id import to_friendly_id
 
@@ -61,6 +62,47 @@ _PATH_SEPARATOR = "¦"
 _PATH_ESCAPE = "|"
 
 _MAX_CATEGORY_DEPTH = 5  # Schema has category_l1..l5.
+
+# F9 article-hash. Bumping invalidates every existing hash and forces a
+# full rebuild through the alias-swing playbook (I3) — there is no live
+# migration path. Grep-able from operational tooling.
+HASH_VERSION = "v1"
+
+# Canonical-form separators for the hash input. Both are ASCII control
+# chars (US, RS) that never appear in legitimate user-supplied text, so
+# the canonical string needs no escaping.
+_HASH_FIELD_SEP = "\x1f"
+_HASH_ELEM_SEP = "\x1e"
+
+# Catalogue currencies the per-article envelope spans (F8 + F9). Mirror
+# of the same constant in `scripts/create_articles_collection.py`; kept
+# in sync by `test_catalog_currencies_match_script` in
+# `tests/test_projection.py`.
+CATALOG_CURRENCIES = ("eur", "chf", "huf", "pln", "gbp", "czk", "cny")
+
+# Envelope sentinel for "no price in this currency on this article".
+# F9 doc specified NaN — Milvus 2.6 rejects NaN *and* ±Inf on FLOAT
+# scalars (only finite values accepted, despite the misleading "is not
+# a number or infinity" reject message). The asymmetric large-finite
+# pair below preserves the natural range-filter semantics:
+#
+#   `{ccy}_price_min <= X` is false for `+MAX_PRICE_SENTINEL` (any plausible X)
+#   `{ccy}_price_max >= Y` is false for `-MAX_PRICE_SENTINEL` (any plausible Y ≥ 0)
+#   `ORDER BY {ccy}_price_min ASC` puts sentinel rows last (F4 browse safe)
+#
+# Value chosen well above any plausible price (~3.4e38, fp32 ceiling)
+# so callers don't need a `> 0` / `< X` guard — the natural predicate
+# does the right thing.
+MAX_PRICE_SENTINEL = 3.4028234e38
+
+# Article-level fields per the F9 topology block. Used by the row
+# splitter below (offer rows = projected row minus these) and by the
+# article aggregator (these fields are invariant across the hash group).
+_ARTICLE_LEVEL_KEYS: tuple[str, ...] = (
+    "name", "manufacturerName",
+    "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
+    "eclass5_code", "eclass7_code", "s2class_code",
+)
 
 
 @dataclass
@@ -267,3 +309,132 @@ def project(record: dict[str, Any]) -> ProjectionResult:
         "relationship_similar_to": list(related.get("similarTo") or []),
     }
     return ProjectionResult(row=row, dropped_features=dropped)
+
+
+# ---------- F9 two-stream emission ---------------------------------------
+#
+# `project()` above produces a single flat row matching the legacy
+# pre-F9 single-collection schema. F9 splits that row across two
+# collections — `articles_v{N}` (vector + BM25 + article-level scalars +
+# per-currency envelope) and `offers_v{N}` (per-offer scalars + the
+# `article_hash` join key). The helpers below convert flat rows into
+# the two-stream shape:
+#
+#   compute_article_hash(row)     — sha256 of canonicalised embedded-field
+#                                   tuple, truncated to 16 bytes hex.
+#   to_offer_row(row, hash)       — strips article-level fields, attaches
+#                                   `article_hash` + the placeholder
+#                                   vector required by Milvus 2.6.
+#   aggregate_article(rows)       — folds one or more flat rows that share
+#                                   a hash into the article row, including
+#                                   text_codes (BM25 corpus) and
+#                                   `{ccy}_price_min/max` envelope columns.
+#
+# Article-side `offer_embedding` is *not* set here; the caller (test_loader
+# for tests, the bulk orchestrator with TEI-cache-by-hash for production)
+# attaches it. See F9 §"Hash function and embedded-field set" and
+# §Topology.
+
+
+def compute_article_hash(row: dict[str, Any]) -> str:
+    """Hash the canonicalised embedded-field tuple for an article row.
+
+    Inputs (per F9): name, manufacturerName, category_l1..l5,
+    eclass5_code, eclass7_code, s2class_code. Array fields are sorted to
+    canonicalise order — the projection's array order is not stable
+    across re-runs, so the hash must be order-independent. Missing
+    fields project to empty.
+
+    Output: 32-char lowercase hex (sha256 truncated to 16 bytes).
+    Collision probability at 10⁸ articles ≈ 10⁻²⁰. Halves the IN-clause
+    wire cost vs full sha256 — relevant at PATH_B_HASH_LIMIT scale."""
+    cat_blocks = []
+    for d in range(1, _MAX_CATEGORY_DEPTH + 1):
+        elems = sorted(row.get(f"category_l{d}") or [])
+        cat_blocks.append(_HASH_ELEM_SEP.join(elems))
+    eclass5 = _HASH_ELEM_SEP.join(str(c) for c in sorted(row.get("eclass5_code") or []))
+    eclass7 = _HASH_ELEM_SEP.join(str(c) for c in sorted(row.get("eclass7_code") or []))
+    s2class = _HASH_ELEM_SEP.join(str(c) for c in sorted(row.get("s2class_code") or []))
+    canonical = _HASH_FIELD_SEP.join([
+        row.get("name") or "",
+        row.get("manufacturerName") or "",
+        *cat_blocks,
+        eclass5, eclass7, s2class,
+    ])
+    digest = hashlib.sha256(canonical.encode("utf-8")).digest()
+    return digest[:16].hex()
+
+
+def to_offer_row(row: dict[str, Any], *, article_hash: str) -> dict[str, Any]:
+    """Project a flat row into the `offers_v{N}` shape: drop article-level
+    fields, attach `article_hash` (join key) and `_placeholder_vector`
+    (Milvus 2.6 requires every collection to declare at least one
+    indexed vector field — see `scripts/create_offers_collection.py`)."""
+    out = {k: v for k, v in row.items() if k not in _ARTICLE_LEVEL_KEYS}
+    out["article_hash"] = article_hash
+    out["_placeholder_vector"] = [0.0, 0.0]
+    return out
+
+
+def aggregate_article(
+    rows: list[dict[str, Any]],
+    *,
+    currencies: tuple[str, ...] = CATALOG_CURRENCIES,
+) -> dict[str, Any]:
+    """Fold a hash group of flat rows into a single `articles_v{N}` row.
+
+    Article-level fields (name, manufacturerName, categories, eclass)
+    are invariant by hash construction — read off the first row.
+    Aggregations across the group:
+
+      - `text_codes` (BM25 input): name + manufacturerName + sorted
+        distinct EANs across offers + sorted distinct article_numbers
+        across offers. Sorting is for re-run stability.
+      - `{ccy}_price_min/max`: min/max across every offer's `prices`
+        entry whose lowercased currency matches a column in `currencies`.
+        Sentinel for "no price in this currency": `+MAX_PRICE_SENTINEL`
+        on `_min`, `-MAX_PRICE_SENTINEL` on `_max`. Range predicates
+        naturally exclude (`_min <= X` is false; `_max >= Y` is false).
+        Sort `ORDER BY {ccy}_price_min ASC` puts sentinel rows last (F4
+        safe). See `MAX_PRICE_SENTINEL` for the rejected-NaN-and-Inf
+        deviation from the F9 doc.
+
+    Caller attaches `offer_embedding` (TEI in production, stub in tests)."""
+    if not rows:
+        raise ValueError("aggregate_article requires at least one row")
+    rep = rows[0]
+    article: dict[str, Any] = {
+        "article_hash": compute_article_hash(rep),
+        "name": rep.get("name") or "",
+        "manufacturerName": rep.get("manufacturerName") or "",
+    }
+    for d in range(1, _MAX_CATEGORY_DEPTH + 1):
+        article[f"category_l{d}"] = list(rep.get(f"category_l{d}") or [])
+    for f in ("eclass5_code", "eclass7_code", "s2class_code"):
+        article[f] = list(rep.get(f) or [])
+
+    eans = sorted({r["ean"] for r in rows if r.get("ean")})
+    nums = sorted({r["article_number"] for r in rows if r.get("article_number")})
+    text_pieces = [article["name"], article["manufacturerName"], *eans, *nums]
+    article["text_codes"] = " ".join(p for p in text_pieces if p)
+
+    by_ccy: dict[str, list[float]] = {c: [] for c in currencies}
+    for r in rows:
+        for p in r.get("prices") or []:
+            ccy = (p.get("currency") or "").lower()
+            if ccy in by_ccy:
+                by_ccy[ccy].append(float(p["price"]))
+    for ccy, vals in by_ccy.items():
+        article[f"{ccy}_price_min"] = min(vals) if vals else MAX_PRICE_SENTINEL
+        article[f"{ccy}_price_max"] = max(vals) if vals else -MAX_PRICE_SENTINEL
+
+    return article
+
+
+def group_by_hash(rows: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group flat projected rows by their computed article_hash. Used by
+    the bulk loader and by `aggregate_article` callers."""
+    by_hash: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_hash.setdefault(compute_article_hash(r), []).append(r)
+    return by_hash
