@@ -15,3 +15,7 @@ mlruns-smoke/
 mlflow.db
 
 logs/playground-app.log
+
+.env
+.opencode/
+.vscode/
