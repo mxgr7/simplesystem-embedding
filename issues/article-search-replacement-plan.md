@@ -21,6 +21,7 @@ Three categories, in build order:
 | F5 | Aggregations / summaries                                        | F1, F2, F3   | `article-search-replacement-ftsearch-05-aggregations.md`      |
 | F6 | German identifier tokenization + classifier hardening           | —            | `article-search-replacement-ftsearch-06-german-identifiers.md`|
 | F7 | Operational glue (Bounded consistency, tracing, retries)        | F2..F5       | `article-search-replacement-ftsearch-07-operational.md`       |
+| F8 | Price-scope pre-filter columns (price-list + per-currency envelope) | F1, F3, I1 | `article-search-replacement-ftsearch-08-price-scope-prefilter.md` |
 
 ## Category 2 — ACL (new FastAPI service in this repo)
 
@@ -48,7 +49,7 @@ Three categories, in build order:
 - **Phase 1 — unblock everything**: F1 ‖ F2 ‖ F6. Schema, contract, and the classifier work that has no dependencies on either.
 - **Phase 2 — ftsearch capability build-out**: F3 → F4 ‖ F5; I1 starts as soon as F1 lands so capability work can be exercised on populated data.
 - **Phase 3 — ACL build-out**: A1 → (A2 ‖ A3 ‖ A4); requires F2 frozen.
-- **Phase 4 — operational + reindex**: F7 ‖ A5 ‖ I2 ‖ I3.
+- **Phase 4 — operational + reindex**: F7 ‖ A5 ‖ I2 ‖ I3. F8 lands here too — it requires F1/F3/I1 frozen and pairs naturally with the next I3 alias swing.
 - **Phase 5 — acceptance**: A6 closes out against the full stack.
 
 The longest critical path is F1 → F3 → F4 → F5 → A2/A3 → A6.
