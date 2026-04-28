@@ -1,21 +1,35 @@
-"""Create a versioned `offers_v{N}` Milvus collection per spec §7 and
-register the public alias (`offers` by default) to point at it.
+"""Create a versioned `offers_v{N}` Milvus collection per F9 topology
+and register the public alias (`offers` by default) to point at it.
 
 Usage:
-    python create_offers_collection.py --version 2
+    python create_offers_collection.py --version 3
     python create_offers_collection.py --version 3 --alias offers
     python create_offers_collection.py --version 3 --no-alias
     python create_offers_collection.py --version 3 --dry-run
 
-Naming is deliberately operator-driven: pick `--version N` higher than
-the current version. ftsearch never embeds the versioned name; it talks
-to the alias (see search-api/main.py — `MilvusClient.search` accepts
-an alias for `collection_name`).
+Naming is operator-driven: pick `--version N` higher than the current
+version. ftsearch never embeds the versioned name; it talks to the alias
+(see search-api/main.py — `MilvusClient.search` accepts an alias for
+`collection_name`).
 
-Schema mirrors `issues/article-search-replacement-spec.md` §7. Scalar
-indexes cover every field that F3..F5 will filter, group, or aggregate
-on. The vector index defaults to HNSW (matches current production
-config).
+F9 split this collection's vector + BM25 + article-level scalars out
+into the new `articles_v{N}` collection (see
+`scripts/create_articles_collection.py`). What remains here is the
+per-offer scope:
+
+  - `id` PK as before (legacy `{friendlyId}:{base64Url(articleNumber)}`).
+  - `article_hash` VARCHAR(32), INVERTED — join key into `articles_v{N}`.
+  - Per-offer scalars (vendor, catalog, prices JSON, delivery, core
+    markers, relationships, ean, article_number, features). F8 adds the
+    per-offer envelope columns (`price_list_ids`, `currencies`,
+    `{ccy}_price_min/max`); those land in F8's PR.
+  - NO `offer_embedding`, NO sparse codes — the dense vector and BM25
+    index live on `articles_v{N}` keyed by hash.
+
+See `issues/article-search-replacement-ftsearch-09-article-dedup.md` for
+the topology rationale. Steady-state cutovers for `articles_v{N}` and
+`offers_v{N}` are paired — see "Paired alias swing" in
+`scripts/MILVUS_ALIAS_WORKFLOW.md`.
 """
 
 from __future__ import annotations
@@ -25,32 +39,23 @@ import sys
 
 from pymilvus import DataType, MilvusClient
 
-DIM = 128
-
-VECTOR_INDEX_DEFAULTS = {
-    "HNSW": {"params": {"M": 16, "efConstruction": 200}},
-    "IVF_FLAT": {"params": {"nlist": 4096}},
-    "FLAT": {"params": {}},
-}
-
 # Each field listed here gets an INVERTED scalar index. Picked to cover
 # every filter / group_by / aggregation path called out in spec §4.3-§4.4
 # and in F3..F5. INVERTED handles equality, IN, range, and ARRAY
 # membership uniformly on Milvus 2.6.15.
+#
+# F9: `article_hash` is the join key into `articles_v{N}`. Path B's
+# bounded-probe `query()` filters on the per-offer scope here, returns
+# the matching distinct hashes, and feeds them into the article-collection
+# ANN as `article_hash IN [...]`. INVERTED on a 32-char VARCHAR is the
+# right shape for the IN-clause workload (validated at 25k hashes ≈ 430ms
+# p95 on the hardware ceiling benchmark — see F9 PATH_B_HASH_LIMIT).
 SCALAR_INDEX_FIELDS = (
+    # F9 join key
+    "article_hash",
     # Vendor / catalog
     "vendor_id",
     "catalog_version_ids",
-    # eClass / S2Class hierarchy (§4.3, §4.4)
-    "eclass5_code",
-    "eclass7_code",
-    "s2class_code",
-    # Category hierarchy (§4.3 prefix `like` + §4.4 group_by)
-    "category_l1",
-    "category_l2",
-    "category_l3",
-    "category_l4",
-    "category_l5",
     # Numeric range (§4.3 `maxDeliveryTime`)
     "delivery_time_days_max",
     # Features (§4.3 requiredFeatures, §4.4 FEATURES summary)
@@ -74,11 +79,21 @@ def build_schema(client: MilvusClient):
     # PK: legacy composite `{friendlyId}:{base64Url(articleNumber)}`. 256
     # leaves ample headroom (observed up to ~85 chars in fixtures).
     schema.add_field("id", DataType.VARCHAR, max_length=256, is_primary=True)
-    schema.add_field("offer_embedding", DataType.FLOAT16_VECTOR, dim=DIM)
 
-    # Straight projections.
-    schema.add_field("name", DataType.VARCHAR, max_length=1024)
-    schema.add_field("manufacturerName", DataType.VARCHAR, max_length=256)
+    # Milvus 2.6 requires every collection to declare at least one vector
+    # field with an index. Path B never searches this collection — only
+    # `query()` on filter expressions — so we declare a 2-dim FLOAT
+    # placeholder + FLAT index. Storage cost: ~1.3 GB at 159M rows
+    # (negligible). The dense vector for retrieval lives on `articles_v{N}`.
+    schema.add_field("_placeholder_vector", DataType.FLOAT_VECTOR, dim=2)
+
+    # F9 join key into `articles_v{N}`. sha256 truncated to 16 bytes,
+    # hex-encoded. Path B's bounded probe queries this collection on the
+    # per-offer scope, collects distinct hashes, then constrains the
+    # article-collection ANN with `article_hash IN [...]`.
+    schema.add_field("article_hash", DataType.VARCHAR, max_length=32)
+
+    # Per-offer identifier scalars.
     schema.add_field("ean", DataType.VARCHAR, max_length=64)
     schema.add_field("article_number", DataType.VARCHAR, max_length=256)
 
@@ -91,14 +106,7 @@ def build_schema(client: MilvusClient):
         element_type=DataType.VARCHAR, max_capacity=2048, max_length=64,
     )
 
-    # Category prefix-paths joined with `¦` (`|` escape per CategoryPath.java).
-    schema.add_field("category_l1", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=256)
-    schema.add_field("category_l2", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=640)
-    schema.add_field("category_l3", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=768)
-    schema.add_field("category_l4", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=1024)
-    schema.add_field("category_l5", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=1280)
-
-    # NEW per §7.
+    # Per-offer scalars.
     schema.add_field("prices", DataType.JSON)
     schema.add_field("delivery_time_days_max", DataType.INT32)
     schema.add_field(
@@ -108,23 +116,6 @@ def build_schema(client: MilvusClient):
     schema.add_field(
         "core_marker_disabled_sources", DataType.ARRAY,
         element_type=DataType.VARCHAR, max_capacity=64, max_length=64,
-    )
-    # eClass / S2Class hierarchies — ARRAY<INT32> carrying every level of
-    # the legacy hierarchy (root → leaf), mirroring ES `offers.eclass51Groups`
-    # / `eclass71Groups` / `s2classGroups` keyword arrays. A `terms` query
-    # at any level matches via `array_contains[_any]`. Single-INT collapsed
-    # the hierarchy to one undefined-ordering scalar — silent recall bug.
-    schema.add_field(
-        "eclass5_code", DataType.ARRAY,
-        element_type=DataType.INT32, max_capacity=16,
-    )
-    schema.add_field(
-        "eclass7_code", DataType.ARRAY,
-        element_type=DataType.INT32, max_capacity=16,
-    )
-    schema.add_field(
-        "s2class_code", DataType.ARRAY,
-        element_type=DataType.INT32, max_capacity=16,
     )
     schema.add_field(
         "features", DataType.ARRAY,
@@ -145,14 +136,13 @@ def build_schema(client: MilvusClient):
     return schema
 
 
-def build_index_params(client: MilvusClient, vector_index: str):
-    cfg = VECTOR_INDEX_DEFAULTS[vector_index]
+def build_index_params(client: MilvusClient):
     params = client.prepare_index_params()
+    # Required by Milvus — see `_placeholder_vector` note in build_schema.
     params.add_index(
-        field_name="offer_embedding",
-        index_type=vector_index,
-        metric_type="COSINE",
-        **cfg,
+        field_name="_placeholder_vector",
+        index_type="FLAT",
+        metric_type="L2",
     )
     for field in SCALAR_INDEX_FIELDS:
         params.add_index(field_name=field, index_type="INVERTED", index_name=field)
@@ -182,7 +172,6 @@ def main() -> None:
     p.add_argument("--alias", default="offers", help="Public alias (default 'offers').")
     p.add_argument("--no-alias", action="store_true", help="Skip alias create/swing.")
     p.add_argument("--uri", default="http://localhost:19530", help="Milvus URI.")
-    p.add_argument("--vector-index", default="HNSW", choices=list(VECTOR_INDEX_DEFAULTS))
     p.add_argument("--dry-run", action="store_true", help="Print plan and exit.")
     args = p.parse_args()
 
@@ -190,7 +179,6 @@ def main() -> None:
     print(f"Target collection: {name}")
     print(f"Alias:             {'(skipped)' if args.no_alias else args.alias}")
     print(f"Milvus URI:        {args.uri}")
-    print(f"Vector index:      {args.vector_index}")
     print(f"Scalar indexes:    {len(SCALAR_INDEX_FIELDS)}")
     if args.dry_run:
         print("(dry-run — no Milvus calls made)")
@@ -201,7 +189,7 @@ def main() -> None:
         sys.exit(f"Refusing to recreate {name!r} (already exists). Pick a higher --version.")
 
     schema = build_schema(client)
-    index_params = build_index_params(client, args.vector_index)
+    index_params = build_index_params(client)
     client.create_collection(collection_name=name, schema=schema, index_params=index_params)
     print(f"Created collection {name!r}.")
 

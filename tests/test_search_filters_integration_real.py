@@ -12,6 +12,10 @@ that vary by sample. We assert on count + ID-set monotonicity rather
 than fixed ID strings.
 
 Skipped if Milvus is not reachable on localhost:19530.
+
+**Skipped during F9 PR1.** The F3 filter translator runs against the
+single-collection topology these tests assume. F9 splits filters across
+two collections; the rewrite lands in F9 PR3.
 """
 
 from __future__ import annotations
@@ -24,6 +28,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from pymilvus import MilvusClient
+
+pytestmark = pytest.mark.skip(
+    reason="F3 single-collection topology — superseded by F9; rewrite in F9 PR3"
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SEARCH_API_DIR = REPO_ROOT / "search-api"

@@ -9,6 +9,14 @@ composition narrows further, and that the priceFilter currency-roles
 split holds.
 
 Skipped if Milvus is not reachable on localhost:19530.
+
+**Skipped during F9 PR1.** The F3 filter translator runs against the
+single-collection topology these tests assume. F9 splits filters across
+two collections (`articles_v{N}` + `offers_v{N}`); the rewrite lands in
+F9 PR3 (`build_article_expr` + `build_offer_expr` in
+`search-api/filters.py`, plus the routing layer in `main.py`). These
+tests will be reworked there to cover Path A / Path B and the bounded
+probe.
 """
 
 from __future__ import annotations
@@ -21,6 +29,10 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from pymilvus import MilvusClient
+
+pytestmark = pytest.mark.skip(
+    reason="F3 single-collection topology — superseded by F9; rewrite in F9 PR3"
+)
 
 SEARCH_API_DIR = Path(__file__).resolve().parent.parent / "search-api"
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"

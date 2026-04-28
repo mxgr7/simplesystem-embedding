@@ -1,20 +1,21 @@
-"""Acceptance smoke for F1 (Milvus collection schema).
+"""Schema smoke for `offers_v{N}` after the F9 split.
 
-Drives the four packet acceptance criteria against a live Milvus:
+Drives the F9 PR1 acceptance criteria against a live Milvus:
 
   1. The script `scripts/create_offers_collection.py` produces a
-     collection with every §7 field, the expected indexes, and a
-     registered alias.
+     collection whose fields match the new per-offer scope (article-level
+     fields moved to `articles_v{N}`).
   2. A representative legacy `articleId` (≥ 80 chars) round-trips
      through the PK without truncation.
   3. The path-param `/{collection}/_search` contract keeps working
      against the alias name (validated at the MilvusClient layer that
-     ftsearch wraps — `has_collection` + `search` both accept aliases).
-  4. Every scalar filter expression that F3..F5 will rely on parses
-     and executes against the empty/seeded collection without error.
+     ftsearch wraps — `has_collection` + `query` both accept aliases).
+  4. Every per-offer scalar filter expression that F3..F5 will rely on
+     parses and executes against the empty/seeded collection without error.
 
-Skipped if Milvus is not reachable. Re-uses the synthetic fixture at
-`tests/fixtures/offers_schema_smoke.json`.
+Skipped if Milvus is not reachable. Re-uses
+`tests/fixtures/offers_schema_smoke.json`; article-level fields in the
+fixture are stripped before insert.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import pytest
 from pymilvus import MilvusClient
 from pymilvus.exceptions import MilvusException
@@ -30,27 +30,35 @@ from pymilvus.exceptions import MilvusException
 MILVUS_URI = "http://localhost:19530"
 COLLECTION = "offers_v3"
 ALIAS = "offers_v_alias"
-DIM = 128
 
+# Per-offer scope after the F9 split. Article-level fields (name,
+# manufacturerName, categories, eclass codes, s2class codes) live on
+# `articles_v{N}` — see `test_articles_collection_schema.py`.
 EXPECTED_FIELDS = {
-    "id", "offer_embedding",
-    "name", "manufacturerName", "ean", "article_number",
+    "id", "_placeholder_vector",
+    "article_hash",
+    "ean", "article_number",
     "vendor_id", "catalog_version_ids",
-    "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
     "prices", "delivery_time_days_max",
     "core_marker_enabled_sources", "core_marker_disabled_sources",
-    "eclass5_code", "eclass7_code", "s2class_code",
     "features",
     "relationship_accessory_for", "relationship_spare_part_for", "relationship_similar_to",
 }
 EXPECTED_SCALAR_INDEXES = {
+    "article_hash",
     "vendor_id", "catalog_version_ids",
-    "eclass5_code", "eclass7_code", "s2class_code",
-    "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
     "delivery_time_days_max", "features",
     "core_marker_enabled_sources", "core_marker_disabled_sources",
     "relationship_accessory_for", "relationship_spare_part_for", "relationship_similar_to",
     "ean", "article_number",
+}
+
+# Article-level fields present in the legacy fixture; stripped before
+# inserting into the F9 offers collection.
+ARTICLE_LEVEL_KEYS = {
+    "name", "manufacturerName",
+    "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
+    "eclass5_code", "eclass7_code", "s2class_code",
 }
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "offers_schema_smoke.json"
@@ -69,25 +77,28 @@ def fixture_rows() -> list[dict]:
     return json.loads(FIXTURE_PATH.read_text())["rows"]
 
 
-def _vector(seed: int) -> np.ndarray:
-    return np.random.default_rng(seed).standard_normal(DIM).astype(np.float16)
-
-
-def _to_milvus_row(row: dict) -> dict:
-    out = {k: v for k, v in row.items() if not k.startswith("_") and k != "vector_seed"}
-    out["offer_embedding"] = _vector(row["vector_seed"])
+def _to_offers_row(row: dict) -> dict:
+    """Strip article-level fields and metadata, add the F9 placeholder
+    vector + a synthetic article_hash. The hash function lands in F9 PR2;
+    here it's a stable placeholder derived from the PK."""
+    out = {
+        k: v for k, v in row.items()
+        if not k.startswith("_") and k != "vector_seed" and k not in ARTICLE_LEVEL_KEYS
+    }
+    out["_placeholder_vector"] = [0.0, 0.0]
+    out["article_hash"] = f"{abs(hash(row['id'])):032x}"[:32]
     return out
 
 
 # --- (1) schema shape -----------------------------------------------------
 
-def test_schema_has_all_section7_fields(client: MilvusClient) -> None:
+def test_schema_matches_per_offer_scope(client: MilvusClient) -> None:
     info = client.describe_collection(COLLECTION)
     field_names = {f["name"] for f in info["fields"]}
     missing = EXPECTED_FIELDS - field_names
     extra = field_names - EXPECTED_FIELDS
-    assert not missing, f"missing §7 fields: {sorted(missing)}"
-    assert not extra, f"unexpected fields beyond §7: {sorted(extra)}"
+    assert not missing, f"missing per-offer fields: {sorted(missing)}"
+    assert not extra, f"unexpected fields beyond per-offer scope: {sorted(extra)}"
 
 
 def test_pk_is_varchar_256(client: MilvusClient) -> None:
@@ -97,17 +108,22 @@ def test_pk_is_varchar_256(client: MilvusClient) -> None:
     assert pk["params"]["max_length"] == 256
 
 
+def test_article_hash_is_varchar_32(client: MilvusClient) -> None:
+    info = client.describe_collection(COLLECTION)
+    h = next(f for f in info["fields"] if f["name"] == "article_hash")
+    assert h["params"]["max_length"] == 32, "article_hash must be VARCHAR(32) per F9"
+
+
 def test_all_expected_scalar_indexes_present(client: MilvusClient) -> None:
     indexes = set(client.list_indexes(COLLECTION))
     missing = EXPECTED_SCALAR_INDEXES - indexes
     assert not missing, f"missing scalar indexes: {sorted(missing)}"
-    assert "offer_embedding" in indexes, "vector index missing"
+    assert "_placeholder_vector" in indexes, "placeholder vector index missing"
 
 
 def test_alias_resolves_to_collection(client: MilvusClient) -> None:
     info = client.describe_alias(alias=ALIAS)
     assert info["collection_name"] == COLLECTION
-    # And the alias is callable transparently
     assert client.has_collection(ALIAS)
 
 
@@ -117,37 +133,38 @@ def test_long_pk_round_trips(client: MilvusClient, fixture_rows: list[dict]) -> 
     long_row = next(r for r in fixture_rows if len(r["id"]) >= 80)
     assert len(long_row["id"]) >= 80, "fixture must include a ≥80-char PK"
 
-    client.upsert(collection_name=COLLECTION, data=[_to_milvus_row(long_row)])
-    fetched = client.get(collection_name=COLLECTION, ids=[long_row["id"]], output_fields=["id"])
+    client.upsert(collection_name=COLLECTION, data=[_to_offers_row(long_row)])
+    fetched = client.get(
+        collection_name=COLLECTION, ids=[long_row["id"]],
+        output_fields=["id"], consistency_level="Strong",
+    )
     assert fetched, "long-PK row not found after insert"
     assert fetched[0]["id"] == long_row["id"], "PK truncated or mangled on round-trip"
 
 
-# --- (3) /{collection}/_search contract via alias --------------------------
+# --- (3) /{collection}/_query contract via alias ---------------------------
 
-def test_search_via_alias_works(client: MilvusClient) -> None:
-    """ftsearch invokes `client.search(collection_name=collection)`. The
+def test_query_via_alias_works(client: MilvusClient) -> None:
+    """Path B's bounded probe (`query()` against offers) is the only
+    Milvus call that hits this collection in the F9 search path. The
     alias must resolve at the server with no client-side awareness."""
-    res = client.search(
+    res = client.query(
         collection_name=ALIAS,
-        data=[_vector(seed=99).tolist()],
-        anns_field="offer_embedding",
+        filter='vendor_id == "44444444-4444-4444-4444-444444444444"',
+        output_fields=["id", "article_hash"],
         limit=5,
-        search_params={"metric_type": "COSINE", "params": {"ef": 64}},
-        output_fields=["id"],
     )
-    assert isinstance(res, list) and len(res) == 1, "search via alias did not return one query group"
+    assert isinstance(res, list), "query via alias did not return a list"
 
 
-# --- (4) F3-bound filter expressions parse + execute -----------------------
+# --- (4) F3-bound per-offer filter expressions parse + execute -------------
+#
+# Article-level filters (categories, eclass, s2class) live on
+# `articles_v{N}` — see `test_articles_collection_schema.py`.
 
 @pytest.mark.parametrize("expr,description", [
     ('vendor_id == "44444444-4444-4444-4444-444444444444"',     "vendor equality"),
     ('vendor_id in ["aaa", "bbb"]',                             "vendor IN"),
-    ('array_contains(eclass5_code, 23172001)',                  "eclass5 hierarchy match"),
-    ('array_contains_any(eclass5_code, [23172001, 27182301])',  "eclass5 hierarchy IN"),
-    ('array_contains(eclass7_code, 23172090)',                  "eclass7 hierarchy match"),
-    ('array_contains_any(s2class_code, [1001, 5042])',          "s2class hierarchy IN"),
     ('delivery_time_days_max <= 7',                             "delivery range — maxDeliveryTime"),
     ('array_contains(catalog_version_ids, "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa")',
                                                                 "array membership"),
@@ -161,13 +178,14 @@ def test_search_via_alias_works(client: MilvusClient) -> None:
     ('array_contains(relationship_spare_part_for, "BASE-MODEL-A")',
                                                                 "sparePartsForArticleNumber"),
     ('array_contains(relationship_similar_to, "SIMILAR-X")',    "similarToArticleNumber"),
-    ('array_contains(category_l2, "Werkzeug¦Hand|Maschine")',   "category prefix at depth (currentCategoryPathElements)"),
     ('prices["currency"] == "EUR"',                             "JSON path (smoke; real query path resolves at request time)"),
     ('ean == "4006381000019"',                                  "ean equality"),
     ('article_number == "INDUSTRIAL-PART-9999/SUB-VARIANT-LONG-ZZZ-OPTION"',
                                                                 "article_number equality"),
+    ('article_hash == "abc123"',                                "article_hash equality (Path B join key)"),
+    ('article_hash in ["abc", "def", "ghi"]',                   "article_hash IN (Path A resolve step)"),
 ])
-def test_f3_filter_expressions_parse_and_execute(client: MilvusClient, expr: str, description: str) -> None:
+def test_f3_per_offer_filter_expressions_parse_and_execute(client: MilvusClient, expr: str, description: str) -> None:
     """Each expr must parse and execute against the (potentially empty)
     collection. We don't assert hit counts — F3 will assert semantics."""
     try:
