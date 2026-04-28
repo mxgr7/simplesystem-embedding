@@ -1,0 +1,36 @@
+path: ../../data/queries_offers_labeled.parquet
+positive_label: Exact
+column_mapping:
+  query_id: query_id
+  offer_id: offer_id_b64
+  query_term: query_term
+  name: name
+  manufacturer_name: manufacturer_name
+  manufacturer_article_number: manufacturer_article_number
+  manufacturer_article_type: manufacturer_article_type
+  article_number: article_number
+  ean: ean
+  category_paths: category_paths
+  description: description
+  label: label
+batch_size: 32
+num_workers: 8
+pin_memory: true
+max_pair_length: 384
+val_fraction: 0.05
+clean_html: true
+limit_rows: null
+column_rename: null
+
+query_template: |-
+  {{ query_term }}
+
+offer_template: |-
+  Artikel: {{ name }}
+  {% if ean %} EAN: {{ ean }}{% endif %}
+  {% if article_number %} Artikelnummer: {{ article_number }}{% endif %}
+  {% if manufacturer_article_number %} Herstellernummer: {{ manufacturer_article_number }}{% endif %}
+  {% if category_text %} Kategorie: {{ category_text }}{% endif %}
+  {% if manufacturer_article_type %} Artikeltyp: {{ manufacturer_article_type }}{% endif %}
+  {% if manufacturer_name %} Marke: {{ manufacturer_name }}{% endif %}
+  {% if clean_description %} Beschreibung: {{ clean_description }}{% endif %}

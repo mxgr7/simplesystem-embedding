@@ -1,0 +1,16 @@
+defaults:
+  - model: cross_encoder
+  - data: cross_encoder
+  - trainer: cross_encoder
+  - optimizer: adamw
+  - logger: mlflow
+  - _self_
+
+seed: 42
+log_level: WARNING
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
