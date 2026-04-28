@@ -52,3 +52,10 @@ Three categories, in build order:
 - **Phase 5 — acceptance**: A6 closes out against the full stack.
 
 The longest critical path is F1 → F3 → F4 → F5 → A2/A3 → A6.
+
+---
+
+## Cross-cutting findings (added during execution)
+
+- **I3 first-cutover dependency** — Milvus disallows an alias whose name matches an existing collection, so the legacy `offers` collection (159M rows) must be renamed or dropped before the `offers` alias can be created. Steady-state swings (v{N} → v{N+1}) are unaffected. Procedure documented in `scripts/MILVUS_ALIAS_WORKFLOW.md`; I3 should fold this into its cutover playbook.
+- **Shared fixtures live under `tests/fixtures/`** — `offers_schema_smoke.json` (8 hand-crafted Milvus-shape rows covering every §7 field + edge cases) and `mongo_sample/sample_200.json` (200 real `prod.offers` docs joined to matching `pricings` + `coreArticleMarkers`). F3..F5 and I1 should reuse these rather than re-source.

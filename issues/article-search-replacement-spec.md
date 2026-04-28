@@ -448,7 +448,7 @@ These show ACL → ftsearch translations. The mechanics inside ftsearch (which M
 
 **B.** Identifier-style query `"4006381333931"` → same request shape (`searchArticlesBy: STANDARD`). ftsearch's classifier flags it as a numeric identifier and biases fusion toward the BM25 codes leg. No caller-side mode change needed.
 
-**C.** `currentCategoryPathElements=["Werkzeug","Akkubohrer"]` → ACL forwards as a structured field. ftsearch builds Milvus expr `category_l2 like "Werkzeug¦Akkubohrer%"` after the collection-schema migration.
+**C.** `currentCategoryPathElements=["Werkzeug","Akkubohrer"]` → ACL forwards as a structured field. ftsearch builds Milvus expr `array_contains(category_l2, "Werkzeug¦Akkubohrer")` after the collection-schema migration. (`category_l{N}` stores the joined prefix at depth N as ARRAY<VARCHAR>; Milvus 2.6 rejects `LIKE` on array fields, and exact element-membership is the right operator anyway since the depth disambiguates which `category_l{N}` to filter on.)
 
 **D.** Sort `name,asc`, page 5 of pageSize 50 → ACL forwards `sort=name,asc`, `page=5`, `pageSize=50`. ftsearch over-fetches (`k=500`), looks up names from its metadata source, sorts, and returns slice `[200:250]`.
 
