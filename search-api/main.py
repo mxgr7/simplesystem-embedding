@@ -33,6 +33,18 @@ Environment variables:
                             saturation throughput sits well below the cap
                             so this only fires during true overload.
                             Default 64. Set to 0 to disable.
+  USE_DEDUP_TOPOLOGY        F9 feature flag. ``1`` routes /{collection}/_search
+                            via the dedup-topology dispatcher (`routing.py`);
+                            unset/``0`` keeps the legacy single-collection
+                            path. Default off.
+  MILVUS_ARTICLES_COLLECTION
+                            F9: name (or alias) of the article-side collection
+                            for the dedup path. Default "articles".
+  PATH_B_HASH_LIMIT         F9: bounded-probe ceiling for Path B. Above this,
+                            Path B falls back to Path A with `recallClipped`.
+                            Default 16383 — Milvus 2.6's `proxy.maxResultWindow`
+                            quota caps `(offset+limit)` at 16384 on `query()`.
+                            Raise the Milvus quota + restart to push higher.
 """
 
 from __future__ import annotations
@@ -64,6 +76,7 @@ from models import (
     parse_sort_params,
 )
 from prices import passes_price_filter
+from routing import DEFAULT_PATH_B_HASH_LIMIT, dispatch_dedup
 
 BASE_DIR = Path(__file__).resolve().parent
 OPENAPI_YAML_PATH = BASE_DIR / "openapi.yaml"
@@ -85,6 +98,7 @@ _PUBLIC_PATHS = frozenset({
 _DEFAULT_ID_FIELD = "id"
 _DEFAULT_CODES_COLLECTION = "offers_codes"
 _DEFAULT_MAX_CONCURRENCY = 64
+_DEFAULT_ARTICLES_COLLECTION = "articles"
 
 
 class _ConcurrencyGate:
@@ -167,6 +181,18 @@ async def lifespan(app: FastAPI):
     app.state.api_key = os.environ.get("API_KEY", "")
     app.state.gate = _ConcurrencyGate(
         int(os.environ.get("MAX_CONCURRENT_SEARCHES", _DEFAULT_MAX_CONCURRENCY))
+    )
+    # F9 dedup-topology routing: when on, /{collection}/_search dispatches
+    # via routing.dispatch_dedup against the article + offer collections
+    # below. When off, the legacy single-collection path is unchanged.
+    app.state.use_dedup_topology = _flag(
+        os.environ.get("USE_DEDUP_TOPOLOGY"), default=False,
+    )
+    app.state.articles_collection = os.environ.get(
+        "MILVUS_ARTICLES_COLLECTION", _DEFAULT_ARTICLES_COLLECTION,
+    )
+    app.state.path_b_hash_limit = int(
+        os.environ.get("PATH_B_HASH_LIMIT", DEFAULT_PATH_B_HASH_LIMIT)
     )
     try:
         yield
@@ -399,6 +425,65 @@ def _hydrate_prices(
     return {str(r.get(id_field, "")): r.get("prices") or [] for r in rows}
 
 
+async def _search_dedup(
+    body: SearchRequest,
+    request: Request,
+    collection: str,
+    *,
+    page: int,
+    page_size: int,
+    overfetch_n: int,
+) -> SearchResponse:
+    """F9 dispatch: route the request through `routing.dispatch_dedup`,
+    convert the result to the `SearchResponse` envelope. The legacy
+    single-collection path stays untouched."""
+    client: MilvusClient = request.app.state.milvus
+    articles_collection: str = request.app.state.articles_collection
+    offers_collection: str = collection  # URL placeholder is the offer alias
+    path_b_hash_limit: int = request.app.state.path_b_hash_limit
+
+    if not client.has_collection(articles_collection):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Milvus articles collection {articles_collection!r} does not exist",
+        )
+    if not client.has_collection(offers_collection):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Milvus offers collection {offers_collection!r} does not exist",
+        )
+
+    query_text = (body.query or "").strip()
+
+    async def embed_fn(_text: str) -> list[float]:
+        rendered = f"{request.app.state.query_prefix}{query_text}"
+        vectors = await request.app.state.embed.embed([rendered])
+        return vectors[0] if vectors else []
+
+    result = await dispatch_dedup(
+        body, page_size=page_size, overfetch_n=overfetch_n,
+        client=client, embed=embed_fn,
+        articles_collection=articles_collection,
+        offers_collection=offers_collection,
+        path_b_hash_limit=path_b_hash_limit,
+    )
+
+    page_hits = result.hits[:page_size]
+    articles = [Article(articleId=h.id, score=h.score) for h in page_hits]
+    return SearchResponse(
+        articles=articles,
+        summaries=Summaries(),
+        metadata=Metadata(
+            page=page,
+            pageSize=page_size,
+            pageCount=0,
+            term=body.query,
+            hitCount=len(articles),
+            recallClipped=result.recall_clipped,
+        ),
+    )
+
+
 @app.post("/{collection}/_search", response_model=SearchResponse, response_model_by_alias=True)
 async def search(
     body: SearchRequest,
@@ -424,13 +509,23 @@ async def search(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    overfetch_n = int(os.environ.get("PRICE_FILTER_OVERFETCH_N", _DEFAULT_PRICE_FILTER_OVERFETCH_N))
+
+    # F9 dedup-topology dispatch (flag-gated). The URL's `collection`
+    # is the offers-side alias under dedup mode; the article-side comes
+    # from `MILVUS_ARTICLES_COLLECTION`. Legacy path below is unchanged.
+    if request.app.state.use_dedup_topology:
+        return await _search_dedup(
+            body, request, collection,
+            page=page, page_size=page_size, overfetch_n=overfetch_n,
+        )
+
     expr = build_milvus_expr(body)
 
     dense_client: MilvusClient = request.app.state.milvus
     codes_client: MilvusClient = request.app.state.codes_milvus
     codes_collection: str = request.app.state.codes_collection
     id_field: str = request.app.state.id_fields.get(collection, _DEFAULT_ID_FIELD)
-    overfetch_n = int(os.environ.get("PRICE_FILTER_OVERFETCH_N", _DEFAULT_PRICE_FILTER_OVERFETCH_N))
     price_active = _price_filter_active(body)
 
     # Effective k for the retrieval phase. Over-fetch when the price

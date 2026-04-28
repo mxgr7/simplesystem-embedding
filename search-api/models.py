@@ -233,6 +233,13 @@ class Metadata(_Strict):
     page_count: int = Field(alias="pageCount", ge=0)
     term: str | None = None
     hit_count: int = Field(alias="hitCount", ge=0)
+    # F9 routing: set when Path B's bounded probe overflows
+    # `PATH_B_HASH_LIMIT` and the request falls back to Path A — the
+    # response page may be short of `pageSize` because the article-ANN
+    # top-k doesn't fully overlap the filter-matching set. Callers can
+    # surface a "results may be incomplete" notice or widen the filter.
+    # Defaults to false / omitted on the wire when not set.
+    recall_clipped: bool = Field(default=False, alias="recallClipped")
 
 
 class SearchResponse(_Strict):

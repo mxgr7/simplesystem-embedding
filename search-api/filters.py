@@ -35,6 +35,26 @@ Within multi-valued filters, semantics match legacy:
     `(vendor_id NOT IN [vendors]) OR NOT (array_contains_any(eclassN_code,
      [block-true]) AND NOT array_contains_any(eclassN_code, [block-false]))`
     — `eclassN_code` is `ARRAY<INT32>` carrying the full hierarchy.
+
+F9 — two-collection topology
+----------------------------
+
+`build_milvus_expr` (legacy single-collection) is preserved for the
+`USE_DEDUP_TOPOLOGY=false` path. For the dedup path, callers compose
+two scope-specific expressions:
+
+  - `build_article_expr` — atoms whose fields live on `articles_v{N}`
+    (categories, eclass hierarchies, manufacturer, eClasses-filter).
+    Plus the global (no `vendor_ids`) entries of
+    `blocked_eclass_vendors_filters`.
+  - `build_offer_expr` — atoms whose fields live on `offers_v{N}`
+    (vendor, articleIds, delivery, features, closed marketplace,
+    relationships, core sortiment, core-articles vendors).
+
+Per-vendor entries of `blocked_eclass_vendors_filters` (the variant
+correlating vendor_id on offers with eclass on articles) are
+split-incompatible — they need a Python post-pass at the routing
+layer (see `routing.py`).
 """
 
 from __future__ import annotations
@@ -219,7 +239,20 @@ _ECLASS_FIELD = {
 }
 
 
-def _blocked_eclass_vendors(req: SearchRequest) -> str | None:
+def _blocked_eclass_vendors(req: SearchRequest, *, mode: str = "all") -> str | None:
+    """Translate `blocked_eclass_vendors_filters` to a Milvus expr.
+
+    `mode` controls which entries are emitted:
+
+      - `"all"` (legacy single-collection): every entry, including
+        per-vendor restrictions. Mixes `vendor_id` (offer-level) and
+        `eclassN_code` (article-level post-F9) — fine on the legacy
+        single-collection schema where both fields are co-located.
+      - `"article_global"` (F9 dedup, article side): only entries with
+        no `vendor_ids` restriction (those that exclude the eclass
+        codes globally). Per-vendor entries are owned by routing.py's
+        Python post-pass.
+    """
     if not req.blocked_eclass_vendors_filters:
         return None
     parts: list[str] = []
@@ -228,6 +261,10 @@ def _blocked_eclass_vendors(req: SearchRequest) -> str | None:
         block_true = [g.e_class_group_code for g in entry.blocked_e_class_groups if g.value]
         block_false = [g.e_class_group_code for g in entry.blocked_e_class_groups if not g.value]
         if not block_true:
+            continue
+        if mode == "article_global" and entry.vendor_ids:
+            # Per-vendor restriction → routing.py applies in Python after
+            # joining offers and article eclass.
             continue
         block_expr = f"array_contains_any({field}, {_int_array(block_true)})"
         if block_false:
@@ -244,11 +281,24 @@ def _blocked_eclass_vendors(req: SearchRequest) -> str | None:
     return _and(parts)
 
 
-# ---------- top-level entry point ----------------------------------------
+def has_per_vendor_blocked_eclass(req: SearchRequest) -> bool:
+    """Whether any `blocked_eclass_vendors_filters` entry restricts by
+    vendor (and so requires the routing.py Python post-pass under the
+    F9 dedup topology)."""
+    return any(
+        entry.vendor_ids and any(g.value for g in entry.blocked_e_class_groups)
+        for entry in req.blocked_eclass_vendors_filters
+    )
+
+
+# ---------- top-level entry points ---------------------------------------
 
 def build_milvus_expr(req: SearchRequest) -> str | None:
     """Return the AND-composed Milvus expression, or None if no scalar
     filters apply. `priceFilter` is excluded by design (post-Milvus pass).
+
+    Single-collection topology (`USE_DEDUP_TOPOLOGY=false`). The F9
+    dedup path uses `build_article_expr` + `build_offer_expr` instead.
     """
     return _and([
         _vendor_ids(req),
@@ -263,5 +313,48 @@ def build_milvus_expr(req: SearchRequest) -> str | None:
         _relationships(req),
         _core_sortiment(req),
         _core_articles_vendors(req),
-        _blocked_eclass_vendors(req),
+        _blocked_eclass_vendors(req, mode="all"),
+    ])
+
+
+def build_article_expr(req: SearchRequest) -> str | None:
+    """Article-side scalar expression for the F9 dedup topology.
+
+    Composes only atoms whose fields live on `articles_v{N}`:
+    manufacturer, category prefix, eclass hierarchies, eClasses-filter,
+    plus the global (no `vendor_ids`) entries of
+    `blocked_eclass_vendors_filters`.
+    """
+    return _and([
+        _manufacturers(req),
+        _category_prefix(req),
+        _eclass_codes(req),
+        _eclasses_filter(req),
+        _blocked_eclass_vendors(req, mode="article_global"),
+    ])
+
+
+def build_offer_expr(req: SearchRequest) -> str | None:
+    """Offer-side scalar expression for the F9 dedup topology.
+
+    Composes only atoms whose fields live on `offers_v{N}`: vendor,
+    legacy articleIds (offer PK), delivery, features, closed
+    marketplace, relationships, core sortiment, core-articles vendors.
+
+    NB: `articleIdsFilter` stays on the offer side (filters by legacy
+    `id`, the offer PK) — preserves the spec semantic that the user
+    asks for *specific offers*, not "any offer of these articles".
+    Per-vendor `blocked_eclass_vendors_filters` entries are not
+    expressible here (they correlate offer-vendor with article-eclass);
+    routing.py applies them as a Python post-pass.
+    """
+    return _and([
+        _vendor_ids(req),
+        _article_ids(req),
+        _delivery_time(req),
+        _required_features(req),
+        _closed_marketplace(req),
+        _relationships(req),
+        _core_sortiment(req),
+        _core_articles_vendors(req),
     ])

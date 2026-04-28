@@ -70,12 +70,20 @@ BM25_ANALYZER_PARAMS = {
 
 # Article-level scalars that get an INVERTED index. Picked from the F9
 # topology block — only fields that filter at article scope (categories,
-# eclass hierarchies). Everything per-offer (vendor, catalog, price scope,
-# core marker, relationships, ean, article_number, features, delivery)
-# lives on `offers_v{N}` and is indexed there. `name` /
-# `manufacturerName` are stored but not indexed — they're retrieval /
-# response fields, not filters.
+# eclass hierarchies, manufacturer). Everything per-offer (vendor,
+# catalog, price scope, core marker, relationships, ean, article_number,
+# features, delivery) lives on `offers_v{N}` and is indexed there.
+# `name` is stored but not indexed (retrieval/display field, BM25
+# corpus is in `text_codes`).
+#
+# `manufacturerName` is INVERTED so the F9 dedup path's article-side
+# `manufacturers_filter` can push down without a full collection scan.
+# Existing `articles_v1` was created without this index (PR1) — to pick
+# it up, build articles_v2 via `scripts/create_articles_collection.py
+# --version 2` and swing the alias (paired with the corresponding
+# offers_v{N+1}; see `scripts/MILVUS_ALIAS_WORKFLOW.md`).
 SCALAR_INDEX_FIELDS = (
+    "manufacturerName",
     "category_l1",
     "category_l2",
     "category_l3",

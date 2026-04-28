@@ -15,7 +15,13 @@ import pytest
 SEARCH_API_DIR = Path(__file__).resolve().parent.parent / "search-api"
 sys.path.insert(0, str(SEARCH_API_DIR))
 
-from filters import build_milvus_expr, encode_category_path  # noqa: E402
+from filters import (  # noqa: E402
+    build_article_expr,
+    build_milvus_expr,
+    build_offer_expr,
+    encode_category_path,
+    has_per_vendor_blocked_eclass,
+)
 from models import (  # noqa: E402
     BlockedEClassGroup,
     BlockedEClassVendorsFilter,
@@ -313,3 +319,226 @@ def test_encode_category_path_no_separator_in_elements() -> None:
 
 def test_encode_category_path_escapes_separator_in_element() -> None:
     assert encode_category_path(["Hand¦Maschine", "Akku"]) == "Hand|Maschine¦Akku"
+
+
+# ---------- F9 split: build_article_expr / build_offer_expr --------------
+#
+# Article-side fields live on `articles_v{N}`: name, manufacturerName,
+# category_l1..l5, eclass{5,7}_code, s2class_code. Everything else is
+# offer-side.
+
+def test_split_no_filters_emits_none_on_both_sides() -> None:
+    req = _req()
+    assert build_article_expr(req) is None
+    assert build_offer_expr(req) is None
+
+
+def test_split_vendor_is_offer_side() -> None:
+    req = _req(vendor_ids_filter=["v1"])
+    assert build_article_expr(req) is None
+    assert build_offer_expr(req) == 'vendor_id in ["v1"]'
+
+
+def test_split_article_ids_is_offer_side() -> None:
+    """`articleIdsFilter` is the legacy offer PK — stays on offers_v{N}.
+    Spec semantic ("user asks for these specific offers") is preserved
+    without a hash-resolution round-trip."""
+    req = _req(article_ids_filter=["a:1", "b:2"])
+    assert build_article_expr(req) is None
+    assert build_offer_expr(req) == 'id in ["a:1", "b:2"]'
+
+
+def test_split_manufacturer_is_article_side() -> None:
+    req = _req(manufacturers_filter=["Bosch"])
+    assert build_article_expr(req) == 'manufacturerName in ["Bosch"]'
+    assert build_offer_expr(req) is None
+
+
+def test_split_category_is_article_side() -> None:
+    req = _req(current_category_path_elements=["Werkzeug", "Akku"])
+    assert build_article_expr(req) == 'array_contains(category_l2, "Werkzeug¦Akku")'
+    assert build_offer_expr(req) is None
+
+
+def test_split_eclass_codes_are_article_side() -> None:
+    req = _req(current_eclass5_code=23172001, current_eclass7_code=23172090)
+    article = build_article_expr(req)
+    assert article is not None
+    assert "eclass5_code" in article
+    assert "eclass7_code" in article
+    assert build_offer_expr(req) is None
+
+
+def test_split_eclasses_filter_is_article_side() -> None:
+    req = _req(eclasses_filter=[1001, 1002])
+    assert build_article_expr(req) == "array_contains_any(eclass5_code, [1001, 1002])"
+    assert build_offer_expr(req) is None
+
+
+def test_split_eclasses_filter_with_s2class_flag_is_article_side() -> None:
+    req = _req(eclasses_filter=[5042], s2class_for_product_categories=True)
+    assert build_article_expr(req) == "array_contains_any(s2class_code, [5042])"
+    assert build_offer_expr(req) is None
+
+
+def test_split_required_features_is_offer_side() -> None:
+    req = _req(required_features=[FeatureFilter(name="Spannung", values=["18V"])])
+    assert build_article_expr(req) is None
+    assert build_offer_expr(req) == 'array_contains_any(features, ["Spannung=18V"])'
+
+
+def test_split_delivery_time_is_offer_side() -> None:
+    req = _req(max_delivery_time=5)
+    assert build_article_expr(req) is None
+    assert build_offer_expr(req) == "delivery_time_days_max <= 5"
+
+
+def test_split_closed_marketplace_is_offer_side() -> None:
+    req = _req(
+        closed_marketplace_only=True,
+        selected_article_sources=SelectedArticleSources(
+            closedCatalogVersionIds=["c-1"],
+        ),
+    )
+    assert build_article_expr(req) is None
+    assert build_offer_expr(req) == 'array_contains_any(catalog_version_ids, ["c-1"])'
+
+
+def test_split_relationships_are_offer_side() -> None:
+    req = _req(
+        accessories_for_article_number="ACC-001",
+        spare_parts_for_article_number="BASE-A",
+    )
+    assert build_article_expr(req) is None
+    offer = build_offer_expr(req)
+    assert offer is not None
+    assert "relationship_accessory_for" in offer
+    assert "relationship_spare_part_for" in offer
+
+
+def test_split_core_sortiment_is_offer_side() -> None:
+    req = _req(
+        core_sortiment_only=True,
+        selected_article_sources=SelectedArticleSources(
+            closedCatalogVersionIds=["c-1"],
+        ),
+    )
+    assert build_article_expr(req) is None
+    assert build_offer_expr(req) == 'array_contains_any(core_marker_enabled_sources, ["c-1"])'
+
+
+def test_split_core_articles_vendors_is_offer_side() -> None:
+    req = _req(
+        core_articles_vendors_filter=["v-strict"],
+        selected_article_sources=SelectedArticleSources(
+            closedCatalogVersionIds=["c-1"],
+        ),
+    )
+    assert build_article_expr(req) is None
+    offer = build_offer_expr(req)
+    assert offer is not None
+    assert "vendor_id not in" in offer
+    assert "core_marker_enabled_sources" in offer
+
+
+def test_split_blocked_eclass_global_is_article_side() -> None:
+    """No `vendorIds` → applies to every article, eclass-only. Lands on
+    the article side as `not array_contains_any(...)` with no vendor
+    correlation."""
+    req = _req(blocked_eclass_vendors_filters=[
+        BlockedEClassVendorsFilter(
+            eClassVersion=EClassVersion.S2CLASS,
+            blockedEClassGroups=[BlockedEClassGroup(eClassGroupCode=5000, value=True)],
+        ),
+    ])
+    assert build_article_expr(req) == "not (array_contains_any(s2class_code, [5000]))"
+    assert build_offer_expr(req) is None
+
+
+def test_split_blocked_eclass_per_vendor_drops_from_expr() -> None:
+    """Per-vendor entries correlate offer.vendor with article.eclass —
+    not expressible as a single Milvus expr post-F9. Splitter omits;
+    routing.py applies as a Python post-pass after the join."""
+    req = _req(blocked_eclass_vendors_filters=[
+        BlockedEClassVendorsFilter(
+            vendorIds=["v-1"],
+            eClassVersion=EClassVersion.ECLASS_5_1,
+            blockedEClassGroups=[BlockedEClassGroup(eClassGroupCode=23172001, value=True)],
+        ),
+    ])
+    assert build_article_expr(req) is None
+    assert build_offer_expr(req) is None
+    assert has_per_vendor_blocked_eclass(req) is True
+
+
+def test_split_blocked_eclass_global_and_per_vendor_separate() -> None:
+    """Global entry pushes down on article side; per-vendor entry stays
+    in the SearchRequest for the routing post-pass."""
+    req = _req(blocked_eclass_vendors_filters=[
+        BlockedEClassVendorsFilter(
+            eClassVersion=EClassVersion.ECLASS_5_1,
+            blockedEClassGroups=[BlockedEClassGroup(eClassGroupCode=1000, value=True)],
+        ),
+        BlockedEClassVendorsFilter(
+            vendorIds=["v-1"],
+            eClassVersion=EClassVersion.ECLASS_5_1,
+            blockedEClassGroups=[BlockedEClassGroup(eClassGroupCode=2000, value=True)],
+        ),
+    ])
+    article = build_article_expr(req)
+    assert article is not None
+    assert "1000" in article
+    assert "2000" not in article  # per-vendor entry omitted
+    assert has_per_vendor_blocked_eclass(req) is True
+
+
+def test_split_composes_atoms_with_and_per_side() -> None:
+    """Cross-scope request: vendor (offer) + manufacturer (article) +
+    eclass (article) → composed independently on each side."""
+    req = _req(
+        vendor_ids_filter=["v1"],
+        manufacturers_filter=["Bosch"],
+        current_eclass5_code=23172001,
+    )
+    article = build_article_expr(req)
+    offer = build_offer_expr(req)
+    assert article == (
+        '(manufacturerName in ["Bosch"])'
+        ' and (array_contains(eclass5_code, 23172001))'
+    )
+    assert offer == 'vendor_id in ["v1"]'
+
+
+def test_split_legacy_build_milvus_expr_unchanged() -> None:
+    """`build_milvus_expr` (legacy single-collection path) preserves the
+    full AND-composition across both scopes — used when
+    `USE_DEDUP_TOPOLOGY=false`."""
+    req = _req(
+        vendor_ids_filter=["v1"],
+        manufacturers_filter=["Bosch"],
+    )
+    expr = build_milvus_expr(req)
+    assert expr == '(vendor_id in ["v1"]) and (manufacturerName in ["Bosch"])'
+
+
+def test_has_per_vendor_blocked_eclass_false_when_global() -> None:
+    req = _req(blocked_eclass_vendors_filters=[
+        BlockedEClassVendorsFilter(
+            eClassVersion=EClassVersion.ECLASS_5_1,
+            blockedEClassGroups=[BlockedEClassGroup(eClassGroupCode=1, value=True)],
+        ),
+    ])
+    assert has_per_vendor_blocked_eclass(req) is False
+
+
+def test_has_per_vendor_blocked_eclass_false_when_only_block_false() -> None:
+    """Entry with vendorIds but no `value=true` codes is functionally a
+    no-op — `_blocked_eclass_vendors` skips it. Detection mirrors that."""
+    req = _req(blocked_eclass_vendors_filters=[
+        BlockedEClassVendorsFilter(
+            vendorIds=["v-1"],
+            eClassVersion=EClassVersion.ECLASS_5_1,
+            blockedEClassGroups=[BlockedEClassGroup(eClassGroupCode=1, value=False)],
+        ),
+    ])
+    assert has_per_vendor_blocked_eclass(req) is False
