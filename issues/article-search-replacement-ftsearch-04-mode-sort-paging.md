@@ -24,6 +24,13 @@ Honour `searchMode`, `sort`, and `page`/`pageSize` in the new ftsearch request, 
   - `name,asc|desc`: over-fetch and re-sort by `name` in Python, with deterministic tiebreak on `articleId`.
   - `price,asc|desc`: over-fetch, resolve each row's price via the F3 price-resolution module under request `currency` × `sourcePriceListIds` × priority, post-sort, paginate.
   - Multi-key sort: apply the first sort key only; always tiebreak on `articleId,asc`. Secondary keys are ignored — flagged as a deviation in the README.
+- **Relevance-pool bounding for non-relevance sorts with a query string** (per spec §2.3):
+  - `RELEVANCE_POOL_MAX` (default 200): hard cap on the hybrid (dense + BM25 + RRF) candidate pool considered for non-relevance sorts.
+  - `RELEVANCE_SCORE_FLOOR` (default 0.20): drop candidates whose fused RRF score is below `floor × top_score`. Relative threshold so it adapts per-query without manual tuning.
+  - Both bounds apply whenever the request carries a `queryString` AND `sort` is `name,*`, `price,*`, or `articleId,*`. Relevance-default sort is unaffected.
+  - Strict-identifier classifier path: candidate pool is naturally tiny so the cap is moot, but the same code applies the bound for consistency.
+  - Browse traffic (no `queryString`) goes through the offers-side filter+sort path with no ANN; bounds do not apply and the full filtered set participates in the sort.
+  - F3's per-offer-filter over-fetch (`PRICE_FILTER_OVERFETCH_N`) still applies *within* the relevance pool to cover starvation from per-offer rejections.
 - **Pagination**: `page` (1-indexed), `pageSize` (default 10, max 500). For non-relevance sorts, over-fetch must cover at least `page × pageSize` rows; cap the total k to a configurable safety bound and document the bound.
 - **Accurate `hitCount`**: Milvus top-K search returns no total. Implement via a separate `count(*)`-style pass — Milvus `query` with the same filter expr and `output_fields=[id]` plus a hard upper bound — OR over-fetch up to that bound and count. **Safety cap: `max(10_000, pageSize × 20)`**, override via `HITCOUNT_CAP` env. When clipped, set a `hitCountClipped: true` marker in metadata so callers can tell.
 - Response wiring:
@@ -57,4 +64,4 @@ Honour `searchMode`, `sort`, and `page`/`pageSize` in the new ftsearch request, 
 
 ## Open questions for this packet
 
-(none — multi-key sort policy and hit-count cap both locked above.)
+- **Default tuning for `RELEVANCE_POOL_MAX` and `RELEVANCE_SCORE_FLOOR`** — initial values 200 and 0.20 are educated guesses. Validate against legacy result distributions on representative `sort=price + queryString` traffic before locking; both stay env-tunable in production regardless. Multi-key sort policy and hit-count cap remain locked above.

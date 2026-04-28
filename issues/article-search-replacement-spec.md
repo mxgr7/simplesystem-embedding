@@ -117,7 +117,25 @@ The ACL validates against its OpenAPI; ftsearch validates again as defense-in-de
 
 **Functional consequences.** The diagnostic download exists but no longer contains useful information. No code path breaks.
 
-### 2.3 Future deviations
+### 2.3 `sort=price` (and other non-relevance sorts) bounded by relevance pool — (M)
+
+**OpenAPI delta.** None. `sort=price,asc|desc`, `sort=name,asc|desc`, `sort=articleId,asc|desc` stay in the schema verbatim.
+
+**Runtime behavior.** When the request carries a `queryString` AND a non-relevance `sort`, the result set is ordered within a bounded relevance pool, not across the full lexical-match set:
+
+1. Hybrid retrieval (dense + BM25 + RRF) produces a ranked candidate list capped at `RELEVANCE_POOL_MAX` (default 200).
+2. Candidates whose fused RRF score is below `RELEVANCE_SCORE_FLOOR × top_score` (default `RELEVANCE_SCORE_FLOOR = 0.20`) are dropped.
+3. The surviving pool is filtered (F3 expr), then re-sorted by the requested key (price/name/articleId), then paginated.
+
+Articles outside the relevance pool will not surface even if their sort key would otherwise place them earlier on the page. The bound applies **only** when a query string is present; browse traffic (no `queryString`) bypasses ANN entirely and sorts across the full filtered set, matching legacy semantics exactly.
+
+**Why a bounded pool instead of a full match set.** Legacy ES `sort=price` over a `bool` query orders the entire lexical match set — there is a clear cutoff (token overlap defines membership). ANN gives every article a similarity score; without a rank or score cutoff, an unbounded pool would let weakly-relevant cheap items reach the top of price-sorted results. The two knobs make the relevance cliff explicit and tunable rather than implicit in the over-fetch factor.
+
+**Functional consequences.** A user searching `"Bohrmaschine"` with `sort=price,asc` sees the cheapest of the top-`RELEVANCE_POOL_MAX` Bohrmaschinen, not the cheapest article in the catalog that happens to match the term weakly. For typical traffic the difference is invisible; for queries with very long relevance tails, late-rank-but-cheap items are excluded by design.
+
+**Configuration.** Both knobs are ftsearch env vars (`RELEVANCE_POOL_MAX`, `RELEVANCE_SCORE_FLOOR`) so production can tune them based on telemetry: if pages return `< pageSize` after filters, raise the cap; if weakly-relevant cheap items appear in the top-N, tighten the floor.
+
+### 2.4 Future deviations
 
 Additional deviations will be added here as they are decided — particularly around fields that depend on data ftsearch doesn't carry today (price-sourced filters, eClass hierarchies). When in doubt during implementation: prefer recording a deviation here over silently degrading behavior.
 
@@ -260,6 +278,8 @@ The ACL passes `sort` query params to ftsearch unchanged. ftsearch owns the impl
 
 For sorts ftsearch implements via re-sort, it must over-fetch from Milvus (e.g. `k = pageSize × pages_to_cover`) and paginate after sorting. The ACL never sees this — it just receives the already-paginated page from ftsearch.
 
+When the request carries a `queryString` and a non-relevance `sort`, the candidate pool is bounded by the relevance-pool cap and floor (§2.3); over-fetch happens *within* that pool, not against the full ANN tail. Without a `queryString`, no ANN runs and the full filtered set participates in the sort.
+
 ### 4.3 Filtering — every filter must work
 
 The ACL forwards filters as structured fields on the ftsearch request. ftsearch translates them into Milvus expressions and any auxiliary lookups.
@@ -379,6 +399,8 @@ What ftsearch offers today vs. what's needed for parity. Unless noted, the gap i
 
 **MongoDB is the source of truth.** At query time, ftsearch reads from Milvus only — no external lookups, no joins, no MongoDB calls on the hot path. The ACL is stateless and consumes only ftsearch. All parity-critical data is denormalized into Milvus collection scalars by an indexing pipeline.
 
+**Internal storage split (F9).** Within ftsearch, Milvus storage is split into two collections per the article-level dedup topology: `articles_v{N}` (deduplicated by embedded-field hash, holds the vector, BM25 sparse-codes, article-level scalars, and per-currency price envelope) and `offers_v{N}` (per-offer scalars with an `article_hash` join key, no vectors). The split is invisible to the ACL and to the wire contract — the §7 schema below is the *logical* union; canonical per-collection breakdown lives in `article-search-replacement-ftsearch-09-article-dedup.md`.
+
 **Indexing pipeline:**
 - **Incremental updates** — A Kafka topic publishes change notifications carrying record IDs. The indexer consumes these IDs, fetches the current record from MongoDB, projects the parity-critical fields, and upserts the corresponding Milvus row.
 - **Bulk (re)import** — A full rebuild reads all relevant records from MongoDB and writes them into a fresh Milvus collection (used for first-time hydration, schema migrations, and zero-downtime reindex per §4.8).
@@ -396,7 +418,9 @@ What ftsearch offers today vs. what's needed for parity. Unless noted, the gap i
 
 ## 7. Required New Milvus Collection Schema
 
-Per §6, every query-time lookup must be served from Milvus. Expand the dense `offers` collection so the indexer can project all parity-critical fields into row-local scalars:
+Per §6, every query-time lookup must be served from Milvus. Expand the dense `offers` collection so the indexer can project all parity-critical fields into row-local scalars.
+
+The field list below is the *logical* union of what the search service must have access to; storage-internally it is split between `articles_v{N}` (article-level fields + the vector + BM25 codes + per-currency price envelope) and `offers_v{N}` (per-offer scalars + `article_hash` join key) per F9. The wire contract is unaffected.
 
 ```text
 id                            STRING (legacy composite `{friendlyId}:{base64Url(articleNumber)}` — projected by the indexer; wire value matches legacy)
