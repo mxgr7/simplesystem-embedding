@@ -2,7 +2,11 @@
 
 This is an experiment to have the LLM do its own research on the cross-encoder fine-tuning project in this repo (`src/cross_encoder_train/`).
 
-The model is a HuggingFace `AutoModel` encoder (default `deepset/gelectra-base`) with a `[CLS]`-pooled linear head over 4 relevance classes (`Irrelevant`, `Complement`, `Substitute`, `Exact`). Validation logs both classification metrics (accuracy / per-class F1 / macro-F1) and ranking metrics (ndcg@k, MRR of Exact). The **success metric is `val/cls/micro_f1`** (higher is better) — for single-label multi-class this equals accuracy, and matches the Micro-F1 metric used in Wu et al. (2022) Task 2 on the Amazon ESCI dataset, which has the same 4-label scheme.
+The model is a HuggingFace `AutoModel` encoder (default `deepset/gelectra-base`) with a `[CLS]`-pooled linear head over 4 relevance classes (`Irrelevant`, `Complement`, `Substitute`, `Exact`). Validation logs both classification metrics (accuracy / per-class F1 / macro-F1) and ranking metrics (ndcg@k, MRR of Exact).
+
+**Success metrics are `val/cls/micro_f1` AND `val/cls/macro_f1`** (higher is better on both). Micro-F1 (= accuracy in the single-label multi-class case) is the primary metric — it matches Wu et al. (2022) Task 2 on Amazon ESCI, which uses the same 4-label scheme. Macro-F1 is co-equal: it's there because the dataset is 80% `Exact`, and a model can buy +0.01 micro-F1 by squeezing the majority class while doing nothing useful for `Substitute` / `Complement`. Tracking macro-F1 forces minority-class quality.
+
+**Keep/discard rule with two metrics**: a run is `keep` if **at least one of (micro_f1, macro_f1) strictly improves and the other does not regress beyond the noise floor (~0.002)**. If one metric improves and the other regresses meaningfully, it's `discard`. If both improve, obviously `keep`. The Lightning `ModelCheckpoint` still selects on `val/cls/micro_f1` (mechanical — one number must win) but the keep decision in `results.tsv` looks at both.
 
 ## Setup
 
@@ -59,9 +63,13 @@ LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH \
 - Change the dataset path to a different parquet, or change the `column_mapping` keys, or alter how validation queries are selected (`val_fraction`, the query-id-based split in `data.py`). You can change `seed` but realize it perturbs the val split.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 
-**The goal is simple: get the highest `val/cls/micro_f1`** on this dataset. Since the time budget is fixed, don't worry about training time — every run is bounded by `trainer.max_time`. The only constraint is that the code runs without crashing and finishes within the budget.
+**The goal is simple: push both `val/cls/micro_f1` and `val/cls/macro_f1` higher** on this dataset. Since the time budget is fixed, don't worry about training time — every run is bounded by `trainer.max_time`. The only constraint is that the code runs without crashing and finishes within the budget.
 
-**Headroom note**: The baseline (single epoch, default config) reaches `val/cls/micro_f1 ≈ 0.853`. There's real headroom here — Wu et al. (2022) reached 0.831 on Amazon ESCI Task 2 (a related but harder multilingual benchmark) using ensembles of large transformers, and our dataset is German-only with stronger keyword overlap (offer text contains EAN / article number / manufacturer fields), so a single well-tuned model could plausibly clear 0.88. Treat improvements <0.002 with skepticism — replicate with a different seed before committing as a `keep`. Watch the per-class F1s too: baseline has F1(exact)=0.93 but F1(substitute)=0.44, so most of the residual error is in the minority classes — gains will probably come from rebalancing, not from squeezing more out of `Exact`.
+**Headroom note**: Baseline (single epoch, default config) is `micro_f1 ≈ 0.853, macro_f1 ≈ 0.654`. Per-class F1: exact 0.93, complement 0.65, irrelevant 0.60, substitute 0.44.
+
+- **Micro-F1 has tight headroom.** The trivial "always Exact" baseline gets micro_f1 ≈ 0.825 on this val split, so we're only 2.8 points above the dumbest possible model. Expect total micro-F1 headroom around +0.05 (target ~0.90). For reference Wu et al. (2022) reached 0.831 on Amazon ESCI Task 2 with ensembles of large transformers — but that's a harder dataset (multilingual, only 44% Exact), so we should plausibly beat them with a single well-tuned model.
+- **Macro-F1 has much more headroom.** Substitute and Complement are where the real gains live: F1(substitute)=0.44 today. Lifting macro to 0.75+ is plausible and unlocks product value that micro-F1 hides.
+- Treat improvements <0.002 on either metric with skepticism — replicate with a different seed before committing as a `keep`.
 
 **VRAM** is a soft constraint. Baseline uses ~7.5 GB on the H100 with `bf16-mixed` and batch 32 — there's lots of headroom. Some increase is acceptable for meaningful gains, but it should not blow up dramatically. If you need more compute, prefer larger models or larger `max_pair_length` over absurdly large batch sizes that won't generalize.
 
@@ -109,26 +117,28 @@ If `grep` output is empty or the run obviously crashed, run `tail -n 80 run.log`
 
 When an experiment is done, log it to `results.tsv` (or `results-cross-encoder.tsv` if you're sharing the checkout with embedding-train autoresearch — see Setup step 6).
 
-The TSV has a header row and 5 columns:
+The TSV has a header row and 6 columns:
 
 ```
-commit	val_micro_f1	memory_gb	status	description
+commit	val_micro_f1	val_macro_f1	memory_gb	status	description
 ```
 
 1. git commit hash (short, 7 chars)
 2. `val/cls/micro_f1` achieved (e.g. `0.853000`) — use `0.000000` for crashes
-3. peak VRAM in GB, `.1f` (e.g. `7.5`) — use `0.0` for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short description of what this experiment tried
+3. `val/cls/macro_f1` achieved (e.g. `0.654000`) — use `0.000000` for crashes
+4. peak VRAM in GB, `.1f` (e.g. `7.5`) — use `0.0` for crashes
+5. status: `keep`, `discard`, or `crash`
+6. short description of what this experiment tried
 
 Example:
 
 ```
-commit	val_micro_f1	memory_gb	status	description
-a1b2c3d	0.853000	7.5	keep	baseline (gelectra-base, bf16-mixed, batch 32, 20-min budget)
-b2c3d4e	0.861400	7.6	keep	raise LR to 3e-5 and warmup_ratio 0.1
-c3d4e5f	0.849700	7.5	discard	switch loss to focal gamma=2
-d4e5f6g	0.000000	0.0	crash	gelectra-large with batch 32 and gradient_checkpointing=false (OOM)
+commit	val_micro_f1	val_macro_f1	memory_gb	status	description
+a1b2c3d	0.853000	0.654000	7.5	keep	baseline (gelectra-base, bf16-mixed, batch 32, 20-min budget)
+b2c3d4e	0.861400	0.671200	7.6	keep	raise LR to 3e-5 and warmup_ratio 0.1
+c3d4e5f	0.857200	0.638100	7.5	discard	+0.004 micro but -0.016 macro: minority classes regressed
+e5f6g7h	0.851000	0.689000	7.5	keep	+0.035 macro at -0.002 micro (within noise): focal loss gamma=2
+d4e5f6g	0.000000	0.000000	0.0	crash	gelectra-large with batch 32 and gradient_checkpointing=false (OOM)
 ```
 
 ## The experiment loop
@@ -149,8 +159,8 @@ LOOP FOREVER:
 6. If the grep output is empty / the MLflow run is missing, the run crashed. Read `tail -n 80 run.log` and attempt a fix. If you can't, skip it.
 7. Record the row in `results.tsv` (NOTE: do not commit your changes to `results.tsv`, that's up to the human to review & commit).
 8. Add and/or update any notable insights in `NOTES.md` (also do not commit your changes to `NOTES.md`).
-9. If `val/cls/micro_f1` improved (higher), "advance" the branch — keep the commit.
-10. If it's equal or worse, `git reset --hard` back to where you started.
+9. Apply the keep/discard rule (see "Success metrics" in the intro): if at least one of `val/cls/micro_f1` and `val/cls/macro_f1` strictly improves and the other is within the noise floor (±0.002), "advance" the branch — keep the commit.
+10. Otherwise, `git reset --hard` back to where you started.
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. You're advancing the branch so you can iterate. You can rewind further if you feel stuck, but do this very sparingly.
 
