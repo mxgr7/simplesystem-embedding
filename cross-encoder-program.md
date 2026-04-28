@@ -1,8 +1,8 @@
 # autoresearch (cross-encoder edition)
 
-This is an experiment to have the LLM do its own research on the cross-encoder fine-tuning project in this repo (`src/cross_encoder_train/`). It mirrors the embedding-train autoresearch program (`program.md`), but adapted to the pair-classification / pair-ranking setup.
+This is an experiment to have the LLM do its own research on the cross-encoder fine-tuning project in this repo (`src/cross_encoder_train/`).
 
-The model is a HuggingFace `AutoModel` encoder (default `deepset/gelectra-base`) with a `[CLS]`-pooled linear head over 4 relevance classes (`Irrelevant`, `Complement`, `Substitute`, `Exact`). Validation derives a per-pair score from the softmax probabilities and the `GAIN_VECTOR`, then computes catalog-style ranking metrics on it. The success metric is `val/rank/ndcg_at_5` (higher is better).
+The model is a HuggingFace `AutoModel` encoder (default `deepset/gelectra-base`) with a `[CLS]`-pooled linear head over 4 relevance classes (`Irrelevant`, `Complement`, `Substitute`, `Exact`). Validation logs both classification metrics (accuracy / per-class F1 / macro-F1) and ranking metrics (ndcg@k, MRR of Exact). The **success metric is `val/cls/micro_f1`** (higher is better) — for single-label multi-class this equals accuracy, and matches the Micro-F1 metric used in Wu et al. (2022) Task 2 on the Amazon ESCI dataset, which has the same 4-label scheme.
 
 ## Setup
 
@@ -49,18 +49,19 @@ LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH \
 - Edit `src/cross_encoder_train/train.py`, `model.py`, `data.py` — model architecture, pooling (try mean/max/attention pool instead of `[CLS]`), loss (focal loss, ordinal regression head, multi-task auxiliary heads), batching, training loop, augmentations.
 - Edit `src/embedding_train/rendering.py` if you want to change how query/offer text is built (e.g. add HTML stripping, different category-path rendering, special tokens) — but remember it's shared with embedding-train.
 - Try different base encoders: e.g. `deepset/gelectra-large`, `xlm-roberta-base`, `microsoft/mdeberta-v3-base`, German-specific models. Keep VRAM reasonable (see below).
-- Change how the per-pair ranking score is derived from logits inside `validation_step` (e.g. logit of the `Exact` class, temperature-scaled softmax, learned scoring layer). The score function is fair game; what gets done with the score downstream is not.
+- Change how the per-pair ranking score is derived from logits inside `validation_step` — but note this only affects the secondary ranking metrics, not the success metric (`val/cls/micro_f1`), which depends solely on `argmax`-based predictions.
+- **Explore the data.** Open the labeled parquet, slice it, look at label distributions per query, look at character/token length distributions, sample concrete (query, offer, label) rows, look for duplicates, suspicious labels, locale-specific quirks, etc. This kind of exploration is **encouraged** — every well-grounded experiment idea starts with knowing what's actually in the data. Exploration time does **not** count towards the per-run training budget. Persist anything notable (distributions, surprising findings, hypotheses worth testing) in `data-insights.md` at the project root, so future iterations can build on prior observations instead of rediscovering them.
 
 **What you CANNOT do:**
 - Modify `src/cross_encoder_train/metrics.py`, `src/cross_encoder_train/labels.py`, or `src/embedding_train/metrics.py`. These define the ground-truth metric and the label/gain mapping.
 - Change `LABEL_ORDER`, `GAIN_VECTOR`, `NUM_CLASSES`, or remap raw labels.
-- Change `trainer.monitor_metric` (must stay `val/rank/ndcg_at_5`) or `trainer.monitor_mode` (must stay `max`).
+- Change `trainer.monitor_metric` (must stay `val/cls/micro_f1`) or `trainer.monitor_mode` (must stay `max`).
 - Change the dataset path to a different parquet, or change the `column_mapping` keys, or alter how validation queries are selected (`val_fraction`, the query-id-based split in `data.py`). You can change `seed` but realize it perturbs the val split.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 
-**The goal is simple: get the highest `val/rank/ndcg_at_5`** on this dataset. Since the time budget is fixed, don't worry about training time — every run is bounded by `trainer.max_time`. The only constraint is that the code runs without crashing and finishes within the budget.
+**The goal is simple: get the highest `val/cls/micro_f1`** on this dataset. Since the time budget is fixed, don't worry about training time — every run is bounded by `trainer.max_time`. The only constraint is that the code runs without crashing and finishes within the budget.
 
-**Headroom note**: The baseline (single epoch, default config) reaches `val/rank/ndcg_at_5 ≈ 0.978`, so there's not much ceiling left and the noise floor is unknown. Treat improvements <0.002 with skepticism — replicate with a different seed before committing as a `keep`. Big swings are more likely to come from architectural changes (different base model, different loss, different prompt template) than from LR/optimizer micro-tuning.
+**Headroom note**: The baseline (single epoch, default config) reaches `val/cls/micro_f1 ≈ 0.853`. There's real headroom here — Wu et al. (2022) reached 0.831 on Amazon ESCI Task 2 (a related but harder multilingual benchmark) using ensembles of large transformers, and our dataset is German-only with stronger keyword overlap (offer text contains EAN / article number / manufacturer fields), so a single well-tuned model could plausibly clear 0.88. Treat improvements <0.002 with skepticism — replicate with a different seed before committing as a `keep`. Watch the per-class F1s too: baseline has F1(exact)=0.93 but F1(substitute)=0.44, so most of the residual error is in the minority classes — gains will probably come from rebalancing, not from squeezing more out of `Exact`.
 
 **VRAM** is a soft constraint. Baseline uses ~7.5 GB on the H100 with `bf16-mixed` and batch 32 — there's lots of headroom. Some increase is acceptable for meaningful gains, but it should not blow up dramatically. If you need more compute, prefer larger models or larger `max_pair_length` over absurdly large batch sizes that won't generalize.
 
@@ -86,7 +87,7 @@ Training logs to MLflow at the URI in `configs/logger/mlflow.yaml` (`http://127.
 After a run finishes, pull the final metric:
 
 ```bash
-grep -E "val/rank/ndcg_at_5|val/loss|peak" run.log | tail -20
+grep -E "val/cls/micro_f1|val/cls/macro_f1|val/loss|peak" run.log | tail -20
 ```
 
 Or via the MLflow REST API:
@@ -111,11 +112,11 @@ When an experiment is done, log it to `results.tsv` (or `results-cross-encoder.t
 The TSV has a header row and 5 columns:
 
 ```
-commit	val_ndcg_at_5	memory_gb	status	description
+commit	val_micro_f1	memory_gb	status	description
 ```
 
 1. git commit hash (short, 7 chars)
-2. `val/rank/ndcg_at_5` achieved (e.g. `0.978100`) — use `0.000000` for crashes
+2. `val/cls/micro_f1` achieved (e.g. `0.853000`) — use `0.000000` for crashes
 3. peak VRAM in GB, `.1f` (e.g. `7.5`) — use `0.0` for crashes
 4. status: `keep`, `discard`, or `crash`
 5. short description of what this experiment tried
@@ -123,10 +124,10 @@ commit	val_ndcg_at_5	memory_gb	status	description
 Example:
 
 ```
-commit	val_ndcg_at_5	memory_gb	status	description
-a1b2c3d	0.977900	7.5	keep	baseline (gelectra-base, bf16-mixed, batch 32, 20-min budget)
-b2c3d4e	0.979100	7.6	keep	raise LR to 3e-5 and warmup_ratio 0.1
-c3d4e5f	0.976200	7.5	discard	switch loss to focal gamma=2
+commit	val_micro_f1	memory_gb	status	description
+a1b2c3d	0.853000	7.5	keep	baseline (gelectra-base, bf16-mixed, batch 32, 20-min budget)
+b2c3d4e	0.861400	7.6	keep	raise LR to 3e-5 and warmup_ratio 0.1
+c3d4e5f	0.849700	7.5	discard	switch loss to focal gamma=2
 d4e5f6g	0.000000	0.0	crash	gelectra-large with batch 32 and gradient_checkpointing=false (OOM)
 ```
 
@@ -148,7 +149,7 @@ LOOP FOREVER:
 6. If the grep output is empty / the MLflow run is missing, the run crashed. Read `tail -n 80 run.log` and attempt a fix. If you can't, skip it.
 7. Record the row in `results.tsv` (NOTE: do not commit your changes to `results.tsv`, that's up to the human to review & commit).
 8. Add and/or update any notable insights in `NOTES.md` (also do not commit your changes to `NOTES.md`).
-9. If `val/rank/ndcg_at_5` improved (higher), "advance" the branch — keep the commit.
+9. If `val/cls/micro_f1` improved (higher), "advance" the branch — keep the commit.
 10. If it's equal or worse, `git reset --hard` back to where you started.
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. You're advancing the branch so you can iterate. You can rewind further if you feel stuck, but do this very sparingly.

@@ -15,8 +15,10 @@ def compute_classification_metrics(prediction_ids, target_ids):
     total = sum(sum(row) for row in confusion)
     correct = sum(confusion[i][i] for i in range(NUM_CLASSES))
 
+    accuracy = (correct / total) if total else 0.0
     metrics = {
-        "accuracy": (correct / total) if total else 0.0,
+        "accuracy": accuracy,
+        "micro_f1": accuracy,
         "evaluated_pairs": float(total),
     }
 

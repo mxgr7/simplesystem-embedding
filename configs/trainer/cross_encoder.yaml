@@ -12,6 +12,6 @@ val_check_interval: 1.0
 checkpoint_dir: checkpoints
 enable_checkpointing: true
 resume_from_checkpoint: null
-monitor_metric: val/rank/ndcg_at_5
+monitor_metric: val/cls/micro_f1
 monitor_mode: max
 validate_before_training: false
