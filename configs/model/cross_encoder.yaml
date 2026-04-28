@@ -1,4 +1,4 @@
-model_name: deepset/gelectra-base
+model_name: deepset/gelectra-large
 head_dropout: 0.1
 label_smoothing: 0.0
 use_class_weights: false
