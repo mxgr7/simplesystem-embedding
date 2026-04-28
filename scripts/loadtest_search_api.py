@@ -308,7 +308,10 @@ def main() -> int:
         headers["Authorization"] = f"ApiKey {api_key}"
 
     base = args.url.rstrip("/")
-    path = f"/{args.collection}/_search"
+    # The canonical /{collection}/_search route is now the F2 stub (returns
+    # empty until F3..F5 land); _search_v0 still serves the legacy hybrid
+    # behaviour the loadtest measures.
+    path = f"/{args.collection}/_search_v0"
     qs_parts: list[str] = []
     if args.mode:
         qs_parts.append(f"mode={args.mode}")

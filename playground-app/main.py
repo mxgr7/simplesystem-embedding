@@ -286,7 +286,7 @@ async def search(
 
     url = (
         f"{request.app.state.search_api_url}/"
-        f"{request.app.state.dense_collection}/_search"
+        f"{request.app.state.dense_collection}/_search_v0"
     )
     payload = {"query": q, "category": None, "index": "playground"}
 

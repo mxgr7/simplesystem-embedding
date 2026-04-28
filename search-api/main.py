@@ -52,6 +52,14 @@ from pymilvus import MilvusClient
 
 from embed_client import EmbedClient
 from hybrid import Hit, Mode, SearchParams, run_search
+from models import (
+    Metadata,
+    SearchMode,
+    SearchRequest,
+    SearchResponse,
+    Summaries,
+    parse_sort_params,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 OPENAPI_YAML_PATH = BASE_DIR / "openapi.yaml"
@@ -122,7 +130,14 @@ def _parse_id_fields(raw: str) -> dict[str, str]:
     return out
 
 
-class SearchRequest(BaseModel):
+class LegacySearchRequest(BaseModel):
+    """Original search-api body served at /{collection}/_search_v0.
+
+    Kept alive as a deprecated alias so the playground app, the loadtest
+    runner, and `scripts/validate_hybrid.py` keep producing real hits
+    while F3..F5 fill in the new `/{collection}/_search` semantics. To
+    be removed once the new contract is fully behaviour-complete.
+    """
     query: str
     category: str | None = Field(default=None)
     index: str
@@ -237,9 +252,9 @@ def _flag(raw: str | None, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-@app.post("/{collection}/_search")
-async def search(
-    body: SearchRequest,
+@app.post("/{collection}/_search_v0", deprecated=True)
+async def search_v0(
+    body: LegacySearchRequest,
     request: Request,
     collection: str = PathParam(..., min_length=1, max_length=255),
     mode: str | None = Query(default=None),
@@ -337,3 +352,34 @@ async def search(
     if _flag(debug, default=False):
         response["_debug"] = debug_info
     return response
+
+
+@app.post("/{collection}/_search", response_model=SearchResponse, response_model_by_alias=True)
+async def search(
+    body: SearchRequest,
+    collection: str = PathParam(..., min_length=1, max_length=255),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=0, le=500, alias="pageSize"),
+    sort: list[str] = Query(default_factory=list),
+) -> SearchResponse:
+    """F2 stub. Validates the new contract and returns an empty envelope.
+
+    F3 wires in scalar filtering, F4 fills in mode/sort/paging + accurate
+    `hitCount`, and F5 populates `summaries`. The route accepts an alias
+    for `collection` (alias resolution happens server-side in Milvus).
+    """
+    try:
+        parse_sort_params(sort)  # validate; result not yet consumed by stub.
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SearchResponse(
+        articles=[],
+        summaries=Summaries(),
+        metadata=Metadata(
+            page=page,
+            pageSize=page_size,
+            pageCount=0,
+            term=body.query,
+            hitCount=0,
+        ),
+    )

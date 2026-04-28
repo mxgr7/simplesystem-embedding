@@ -71,7 +71,7 @@ def search(
     client: httpx.Client, base: str, headers: dict, collection: str,
     q: str, **params,
 ) -> dict:
-    url = f"{base}/{collection}/_search"
+    url = f"{base}/{collection}/_search_v0"
     body = {"query": q, "category": None, "index": "validate"}
     pq = {"debug": "1", **{k: str(v) for k, v in params.items()}}
     r = client.post(url, params=pq, json=body, headers=headers)
@@ -352,7 +352,7 @@ def main() -> None:
     results: dict = {}
     with httpx.Client(timeout=60.0) as client:
         # Sanity ping.
-        url = f"{args.base}/{args.collection}/_search"
+        url = f"{args.base}/{args.collection}/_search_v0"
         try:
             client.post(url, params={"mode": "vector", "k": "1"},
                         json={"query": "test", "category": None, "index": "ping"},

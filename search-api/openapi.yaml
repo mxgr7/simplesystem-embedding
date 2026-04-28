@@ -1,15 +1,21 @@
 openapi: 3.1.0
 info:
   title: search-api
-  version: "0"
+  version: "1"
   description: |
-    Thin JSON wrapper around a TEI-compatible embedder, a Milvus dense
-    collection, and a Milvus BM25 codes collection. Exposes a single
-    Elasticsearch-shaped search endpoint and a Prometheus scrape endpoint.
+    Search service backing the legacy `article-features` API via the ACL
+    layer. Two routes share `POST /{collection}/_search*`:
 
-    All search behaviour is parametrised by query string. Request bodies
-    only carry the user query and an opaque `index` label echoed back into
-    each hit.
+      * `/{collection}/_search`     — F2+ contract: rich body carrying
+        filters, currency, summaries, and pagination. Behaviour is being
+        filled in across F3..F5; today it validates and returns an empty
+        envelope.
+      * `/{collection}/_search_v0`  — legacy ES-shaped contract preserved
+        for the playground and dev-loop tooling. Deprecated; will be
+        removed once the new contract is behaviour-complete.
+
+    `collection` accepts a Milvus alias (e.g. `offers`); resolution to the
+    versioned collection happens server-side.
 
 servers:
   - url: http://localhost:8000
@@ -22,7 +28,125 @@ security:
 paths:
   /{collection}/_search:
     post:
-      summary: Run a search against a Milvus dense collection (+ BM25 codes companion).
+      summary: Search (F2 contract — currently a stub).
+      operationId: search
+      description: |
+        New contract per `issues/article-search-replacement-spec.md` §3
+        and `issues/article-search-replacement-ftsearch-02-http-contract.md`.
+
+        **F2 status**: validates the request shape and returns an empty
+        envelope (`articles: []`, `metadata.hitCount: 0`, all summaries
+        empty/null). F3 wires in scalar filtering; F4 fills in mode/sort/
+        paging + accurate `hitCount`; F5 populates `summaries`.
+
+        Pagination and sort are query-string parameters, not body fields.
+        `pageSize` is capped at 500 server-side (legacy parity).
+      parameters:
+        - $ref: "#/components/parameters/Collection"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Sort"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SearchRequest"
+            examples:
+              hitsOnly:
+                summary: Free-text search, hits only
+                value:
+                  searchMode: HITS_ONLY
+                  query: "Bohrmaschine"
+                  selectedArticleSources:
+                    closedCatalogVersionIds: []
+                    catalogVersionIdsOrderedByPreference: ["aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"]
+                    sourcePriceListIds: ["bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb"]
+                    customerUploadedCoreArticleListSourceIds: []
+                  currency: "EUR"
+                  maxDeliveryTime: 5
+                  coreSortimentOnly: false
+                  closedMarketplaceOnly: false
+              both:
+                summary: Hits + summaries (faceted search)
+                value:
+                  searchMode: BOTH
+                  query: "Akkubohrer"
+                  selectedArticleSources:
+                    closedCatalogVersionIds: []
+                    catalogVersionIdsOrderedByPreference: ["aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"]
+                    sourcePriceListIds: ["bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb"]
+                    customerUploadedCoreArticleListSourceIds: []
+                  currency: "EUR"
+                  maxDeliveryTime: 0
+                  coreSortimentOnly: false
+                  closedMarketplaceOnly: false
+                  currentCategoryPathElements: ["Werkzeug", "Akku"]
+                  requiredFeatures:
+                    - name: "Spannung"
+                      values: ["18V", "36V"]
+                  priceFilter:
+                    min: 0
+                    max: 50000
+                    currencyCode: "EUR"
+                  summaries: ["VENDORS", "MANUFACTURERS", "FEATURES", "PRICES", "CATEGORIES"]
+              summariesOnly:
+                summary: Aggregations over the full filtered set, no articles
+                value:
+                  searchMode: SUMMARIES_ONLY
+                  selectedArticleSources:
+                    closedCatalogVersionIds: []
+                    catalogVersionIdsOrderedByPreference: ["aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"]
+                    sourcePriceListIds: []
+                    customerUploadedCoreArticleListSourceIds: []
+                  currency: "EUR"
+                  maxDeliveryTime: 0
+                  coreSortimentOnly: false
+                  closedMarketplaceOnly: false
+                  summaries: ["VENDORS"]
+      responses:
+        "200":
+          description: Search executed (may have zero hits / empty summaries).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SearchResponse"
+              examples:
+                empty:
+                  summary: F2 stub response
+                  value:
+                    articles: []
+                    summaries:
+                      vendorSummaries: []
+                      manufacturerSummaries: []
+                      featureSummaries: []
+                      pricesSummary: []
+                      categoriesSummary: null
+                      eClass5Categories: null
+                      eClass7Categories: null
+                      s2ClassCategories: null
+                      eClassesAggregations: []
+                    metadata:
+                      page: 1
+                      pageSize: 10
+                      pageCount: 0
+                      term: "Bohrmaschine"
+                      hitCount: 0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Request body or query parameter failed Pydantic/FastAPI validation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+        "503":
+          $ref: "#/components/responses/Throttled"
+
+  /{collection}/_search_v0:
+    post:
+      deprecated: true
+      summary: Legacy ES-shaped search (deprecated — use `/{collection}/_search`).
       description: |
         `collection` names the dense collection (e.g. `offers`). The
         BM25 codes companion collection (e.g. `offers_codes`) is
@@ -54,7 +178,7 @@ paths:
 
         The server applies a hard in-process cap (`MAX_CONCURRENT_SEARCHES`,
         default 64). Excess requests get `503` with `Retry-After: 1`.
-      operationId: search
+      operationId: searchV0
       parameters:
         - $ref: "#/components/parameters/Collection"
         - $ref: "#/components/parameters/Mode"
@@ -71,7 +195,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SearchRequest"
+              $ref: "#/components/schemas/SearchRequestV0"
             examples:
               simple:
                 summary: A vanilla product-search query
@@ -89,7 +213,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SearchResponse"
+                $ref: "#/components/schemas/SearchResponseV0"
               examples:
                 hits:
                   summary: Two hits from the RRF-fused hybrid path
@@ -329,6 +453,68 @@ components:
       schema:
         $ref: "#/components/schemas/BoolFlag"
 
+    Page:
+      name: page
+      in: query
+      description: 1-indexed page number.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+
+    PageSize:
+      name: pageSize
+      in: query
+      description: Page size; capped server-side at 500 (legacy parity).
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 500
+        default: 10
+
+    Sort:
+      name: sort
+      in: query
+      description: |
+        Repeatable sort clause of the form `<field>,<asc|desc>`.
+        Supported fields: `name`, `price`, `articleId`.
+      schema:
+        type: array
+        items:
+          type: string
+          example: "name,asc"
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key (only when `API_KEY` is configured server-side).
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          example: 'ApiKey realm="search-api"'
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            detail: "invalid or missing api key"
+
+    Throttled:
+      description: |
+        Server is at its in-process concurrency limit. Clients should
+        back off and retry.
+      headers:
+        Retry-After:
+          schema:
+            type: string
+          example: "1"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            detail: "search-api at concurrency limit"
+
   schemas:
     Mode:
       type: string
@@ -347,7 +533,7 @@ components:
       type: string
       example: "1"
 
-    SearchRequest:
+    SearchRequestV0:
       type: object
       required: [query, index]
       properties:
@@ -373,19 +559,19 @@ components:
             Kept on the contract for forward compatibility.
           default: null
 
-    SearchResponse:
+    SearchResponseV0:
       type: object
       required: [hits]
       properties:
         hits:
           type: array
           items:
-            $ref: "#/components/schemas/Hit"
+            $ref: "#/components/schemas/HitV0"
         _debug:
-          $ref: "#/components/schemas/Debug"
+          $ref: "#/components/schemas/DebugV0"
           description: Present only when `?debug=1`.
 
-    Hit:
+    HitV0:
       type: object
       required: [_index, _id, _score, _source_leg]
       description: |
@@ -416,7 +602,7 @@ components:
           enum: [dense, bm25, rrf]
           description: Which retrieval leg produced the hit.
 
-    Debug:
+    DebugV0:
       type: object
       description: Per-request diagnostics. Shape is informational and may evolve.
       properties:
@@ -469,6 +655,384 @@ components:
               nullable: true
             enable_fallback:
               type: boolean
+
+    # ── F2 contract schemas ───────────────────────────────────────────
+
+    SearchMode:
+      type: string
+      enum: [HITS_ONLY, SUMMARIES_ONLY, BOTH]
+
+    SummaryKind:
+      type: string
+      enum:
+        - CATEGORIES
+        - ECLASS5
+        - ECLASS7
+        - S2CLASS
+        - VENDORS
+        - MANUFACTURERS
+        - FEATURES
+        - PRICES
+        - PLATFORM_CATEGORIES
+        - ECLASS5SET
+
+    EClassVersion:
+      type: string
+      enum: [ECLASS_5_1, ECLASS_7_1, S2CLASS]
+
+    SelectedArticleSources:
+      type: object
+      additionalProperties: false
+      description: |
+        Catalog scoping. Customer-article-number variants from legacy are
+        dropped (the `CUSTOMER_ARTICLE_NUMBER` mode is gone — §2.1); the
+        ACL must reject any non-empty values for those rather than
+        forward them.
+      properties:
+        closedCatalogVersionIds:
+          type: array
+          items: { type: string }
+        catalogVersionIdsOrderedByPreference:
+          type: array
+          items: { type: string }
+        sourcePriceListIds:
+          type: array
+          items: { type: string }
+        customerUploadedCoreArticleListSourceIds:
+          type: array
+          items: { type: string }
+
+    FeatureFilter:
+      type: object
+      additionalProperties: false
+      required: [name, values]
+      properties:
+        name: { type: string }
+        values:
+          type: array
+          items: { type: string }
+
+    PriceFilter:
+      type: object
+      additionalProperties: false
+      required: [currencyCode]
+      description: |
+        `min`/`max` are integer minor units (e.g. EUR cents); `currencyCode`
+        decodes the bounds via the currency's default fraction digits and
+        is **not** used to match `prices.currency`. Top-level `currency`
+        on the request governs price matching.
+      properties:
+        min: { type: integer, nullable: true }
+        max: { type: integer, nullable: true }
+        currencyCode:
+          type: string
+          pattern: "^[A-Z]{3}$"
+
+    BlockedEClassGroup:
+      type: object
+      additionalProperties: false
+      required: [eClassGroupCode, value]
+      properties:
+        eClassGroupCode: { type: integer }
+        value: { type: boolean }
+
+    BlockedEClassVendorsFilter:
+      type: object
+      additionalProperties: false
+      required: [eClassVersion]
+      properties:
+        vendorIds:
+          type: array
+          items: { type: string }
+        eClassVersion:
+          $ref: "#/components/schemas/EClassVersion"
+        blockedEClassGroups:
+          type: array
+          items:
+            $ref: "#/components/schemas/BlockedEClassGroup"
+
+    EClassesAggregation:
+      type: object
+      additionalProperties: false
+      required: [id]
+      properties:
+        id: { type: string }
+        eClasses:
+          type: array
+          items: { type: integer }
+
+    SearchRequest:
+      type: object
+      additionalProperties: false
+      required: [searchMode, selectedArticleSources, currency]
+      description: |
+        ftsearch search request. Two intentional deltas vs. legacy §3:
+          * `searchArticlesBy` removed — only `STANDARD` is supported and
+            the ACL rejects other values upstream (§2.1).
+          * `explain` removed — the ACL stubs `"N/A"` per §2.2.
+      properties:
+        query:
+          type: string
+          nullable: true
+        searchMode:
+          $ref: "#/components/schemas/SearchMode"
+        selectedArticleSources:
+          $ref: "#/components/schemas/SelectedArticleSources"
+        articleIdsFilter:
+          type: array
+          items: { type: string }
+        vendorIdsFilter:
+          type: array
+          items: { type: string }
+        manufacturersFilter:
+          type: array
+          items: { type: string }
+        maxDeliveryTime:
+          type: integer
+          minimum: 0
+          default: 0
+        requiredFeatures:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeatureFilter"
+        priceFilter:
+          $ref: "#/components/schemas/PriceFilter"
+          nullable: true
+        accessoriesForArticleNumber:
+          type: string
+          nullable: true
+        sparePartsForArticleNumber:
+          type: string
+          nullable: true
+        similarToArticleNumber:
+          type: string
+          nullable: true
+        currentCategoryPathElements:
+          type: array
+          items: { type: string }
+        currentEClass5Code:
+          type: integer
+          nullable: true
+        currentEClass7Code:
+          type: integer
+          nullable: true
+        currentS2ClassCode:
+          type: integer
+          nullable: true
+        coreSortimentOnly:
+          type: boolean
+          default: false
+        closedMarketplaceOnly:
+          type: boolean
+          default: false
+        summaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/SummaryKind"
+        coreArticlesVendorsFilter:
+          type: array
+          items: { type: string }
+        blockedEClassVendorsFilters:
+          type: array
+          items:
+            $ref: "#/components/schemas/BlockedEClassVendorsFilter"
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+        eClassesFilter:
+          type: array
+          items: { type: integer }
+        eClassesAggregations:
+          type: array
+          items:
+            $ref: "#/components/schemas/EClassesAggregation"
+        s2ClassForProductCategories:
+          type: boolean
+          default: false
+
+    Article:
+      type: object
+      additionalProperties: false
+      required: [articleId]
+      properties:
+        articleId: { type: string }
+        score:
+          type: number
+          format: double
+          nullable: true
+
+    VendorSummary:
+      type: object
+      additionalProperties: false
+      required: [vendorId, count]
+      properties:
+        vendorId: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    NameCount:
+      type: object
+      additionalProperties: false
+      required: [name, count]
+      properties:
+        name: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    FeatureValueCount:
+      type: object
+      additionalProperties: false
+      required: [value, count]
+      properties:
+        value: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    FeatureSummary:
+      type: object
+      additionalProperties: false
+      required: [name, count]
+      properties:
+        name: { type: string }
+        count: { type: integer, minimum: 0 }
+        values:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeatureValueCount"
+
+    PricesSummary:
+      type: object
+      additionalProperties: false
+      required: [currencyCode]
+      properties:
+        min: { type: number, format: double, default: 0.0 }
+        max: { type: number, format: double, default: 0.0 }
+        currencyCode:
+          type: string
+          pattern: "^[A-Z]{3}$"
+
+    CategoryBucket:
+      type: object
+      additionalProperties: false
+      required: [count]
+      properties:
+        categoryPathElements:
+          type: array
+          items: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    CategoriesSummary:
+      type: object
+      additionalProperties: false
+      properties:
+        currentCategoryPathElements:
+          type: array
+          items: { type: string }
+        sameLevel:
+          type: array
+          items:
+            $ref: "#/components/schemas/CategoryBucket"
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/CategoryBucket"
+
+    EClassBucket:
+      type: object
+      additionalProperties: false
+      required: [group, count]
+      properties:
+        group: { type: integer }
+        count: { type: integer, minimum: 0 }
+
+    EClassCategories:
+      type: object
+      additionalProperties: false
+      properties:
+        selectedEClassGroup:
+          type: integer
+          nullable: true
+        sameLevel:
+          type: array
+          items:
+            $ref: "#/components/schemas/EClassBucket"
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/EClassBucket"
+
+    EClassesAggregationCount:
+      type: object
+      additionalProperties: false
+      required: [id, count]
+      properties:
+        id: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    Summaries:
+      type: object
+      additionalProperties: false
+      description: |
+        For `HITS_ONLY` mode, the envelope is emitted with all sub-fields
+        empty/null (legacy parity). F5 fills these per the request's
+        `summaries` list.
+      properties:
+        vendorSummaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/VendorSummary"
+        manufacturerSummaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/NameCount"
+        featureSummaries:
+          type: array
+          items:
+            $ref: "#/components/schemas/FeatureSummary"
+        pricesSummary:
+          type: array
+          items:
+            $ref: "#/components/schemas/PricesSummary"
+        categoriesSummary:
+          $ref: "#/components/schemas/CategoriesSummary"
+          nullable: true
+        eClass5Categories:
+          $ref: "#/components/schemas/EClassCategories"
+          nullable: true
+        eClass7Categories:
+          $ref: "#/components/schemas/EClassCategories"
+          nullable: true
+        s2ClassCategories:
+          $ref: "#/components/schemas/EClassCategories"
+          nullable: true
+        eClassesAggregations:
+          type: array
+          items:
+            $ref: "#/components/schemas/EClassesAggregationCount"
+
+    Metadata:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, pageCount, hitCount]
+      properties:
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 0, maximum: 500 }
+        pageCount: { type: integer, minimum: 0 }
+        term:
+          type: string
+          nullable: true
+        hitCount: { type: integer, minimum: 0 }
+
+    SearchResponse:
+      type: object
+      additionalProperties: false
+      required: [articles, summaries, metadata]
+      properties:
+        articles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Article"
+        summaries:
+          $ref: "#/components/schemas/Summaries"
+        metadata:
+          $ref: "#/components/schemas/Metadata"
 
     Error:
       type: object
