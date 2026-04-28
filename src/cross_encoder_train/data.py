@@ -1,6 +1,7 @@
 import random
 import sys
 from collections import Counter
+from functools import partial
 from typing import cast
 
 import pandas as pd
@@ -12,6 +13,33 @@ from transformers import AutoTokenizer
 from embedding_train.rendering import RowTextRenderer
 
 from cross_encoder_train.labels import LABEL_TO_ID, NUM_CLASSES, encode_label
+
+
+def collate_pairs(batch, tokenizer, max_pair_length):
+    query_texts = [item["query_text"] for item in batch]
+    offer_texts = [item["offer_text"] for item in batch]
+
+    encoded = tokenizer(
+        query_texts,
+        offer_texts,
+        padding=True,
+        truncation="only_second",
+        max_length=int(max_pair_length),
+        return_tensors="pt",
+        return_token_type_ids=True,
+    )
+
+    return {
+        "inputs": dict(encoded),
+        "labels": torch.tensor(
+            [item["label_id"] for item in batch], dtype=torch.long
+        ),
+        "query_ids": [item["query_id"] for item in batch],
+        "offer_ids": [item["offer_id"] for item in batch],
+        "raw_labels": [item["raw_label"] for item in batch],
+        "query_texts": query_texts,
+        "offer_texts": offer_texts,
+    }
 
 
 class PairDataset(Dataset):
@@ -68,6 +96,13 @@ class CrossEncoderDataModule(LightningDataModule):
         )
         print("Loaded dataset:", self.dataset_stats, file=sys.stderr)
 
+    def _build_collate_fn(self):
+        return partial(
+            collate_pairs,
+            tokenizer=self.tokenizer,
+            max_pair_length=int(self.cfg.data.max_pair_length),
+        )
+
     def train_dataloader(self):
         return DataLoader(
             cast(Dataset, self.train_dataset),
@@ -75,7 +110,7 @@ class CrossEncoderDataModule(LightningDataModule):
             shuffle=True,
             num_workers=int(self.cfg.data.num_workers),
             pin_memory=bool(self.cfg.data.pin_memory),
-            collate_fn=self.collate_fn,
+            collate_fn=self._build_collate_fn(),
         )
 
     def val_dataloader(self):
@@ -85,34 +120,8 @@ class CrossEncoderDataModule(LightningDataModule):
             shuffle=False,
             num_workers=int(self.cfg.data.num_workers),
             pin_memory=bool(self.cfg.data.pin_memory),
-            collate_fn=self.collate_fn,
+            collate_fn=self._build_collate_fn(),
         )
-
-    def collate_fn(self, batch):
-        query_texts = [item["query_text"] for item in batch]
-        offer_texts = [item["offer_text"] for item in batch]
-
-        encoded = self.tokenizer(
-            query_texts,
-            offer_texts,
-            padding=True,
-            truncation="only_second",
-            max_length=int(self.cfg.data.max_pair_length),
-            return_tensors="pt",
-            return_token_type_ids=True,
-        )
-
-        return {
-            "inputs": dict(encoded),
-            "labels": torch.tensor(
-                [item["label_id"] for item in batch], dtype=torch.long
-            ),
-            "query_ids": [item["query_id"] for item in batch],
-            "offer_ids": [item["offer_id"] for item in batch],
-            "raw_labels": [item["raw_label"] for item in batch],
-            "query_texts": query_texts,
-            "offer_texts": offer_texts,
-        }
 
     def _prepare_records(self):
         frame = pd.read_parquet(self.cfg.data.path)
