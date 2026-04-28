@@ -14,6 +14,22 @@ References: spec §6, §7, §9 #4.
 
 **TEI embedder** (existing): service defined in `playground-app/compose.yaml` — image `ghcr.io/huggingface/text-embeddings-inference:cpu-1.8`, model mounted at `/model` from `${TEI_MODEL_DIR:-/data/tei-models/useful-cub-58-st}`, mean pooling, port 8080. For heavy reimport runs, a dedicated GPU instance will be provisioned; the indexer must accept an alternative `EMBED_URL` env at runtime to point at it.
 
+## Status
+
+🟡 **Phase A done** — commit `81db037` (`I1 Phase A: projection module + thin test loader`).
+
+Landed in Phase A:
+  * `indexer/friendly_id.py` — port of `com.devskiller.friendly_id` 1.1.0; UUID ↔ 22-char base62. Verified against the canonical README vector (`c3587ec5-...3da5` ↔ `5wbwf6yUxVBcr48AMbz9cb`).
+  * `indexer/projection.py` — `project(record) → ProjectionResult` mapping a joined `(offer, pricings, markers)` Mongo record to a Milvus row matching every §7 column except `offer_embedding`.
+  * `indexer/test_loader.py` — loads pre-projected rows into Milvus with deterministic SHA-256-seeded fp16 stub vectors.
+  * Tests: 9 friendly_id + 21 projection (incl. all 200 sample records project cleanly) + 7 real-data F3 integration (`test_search_filters_integration_real.py`).
+  * Field-level fidelity verified against prod-ES on a representative row (`300570 Schleifband`): name, manufacturerName, ean, deliveryTime, features (3/3), categoryPaths.upToLevel{1..4}, individual prices — bit-identical.
+
+Deferred (Phase B / C):
+  * **Phase B — production bulk pipeline**: `indexer/mongo_source.py` (direct MongoDB cursor with `(vendorId, articleNumber)` grouping — see article-aggregation gap in plan-doc cross-cutting findings), `indexer/bulk.py` (orchestrator with real TEI + resume-via-PK), `scripts/indexer_bulk.py` (CLI). Requires production-mode TEI access + MongoDB credentials.
+  * **Phase C — legacy script audit**: move/archive superseded `scripts/milvus_*import*.py` files (5 candidates) to `scripts/legacy/`, confirm with team first.
+  * **Open decision**: eClass hierarchy gap (see plan-doc cross-cutting findings) — Phase A projects only the leaf code; legacy ES carries the full hierarchy. Either promote `eclass*_code` to `ARRAY<INT>` (revisits F1 schema) or accept as a §2 deviation.
+
 ## Scope
 
 Project every parity-critical field from MongoDB into the new Milvus collection schema (F1), and run a full reimport that hydrates the collection from scratch. The projection module is the canonical mapper used by both this packet and I2 (incremental Kafka).

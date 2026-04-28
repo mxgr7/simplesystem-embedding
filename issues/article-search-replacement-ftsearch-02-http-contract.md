@@ -6,6 +6,15 @@
 
 References: spec §1, §3, §4 (defines the new internal contract that the ACL will call).
 
+## Status
+
+✅ **Done** — commit `fbcd80c` (`F2: ftsearch HTTP contract — Pydantic DTOs + OpenAPI + stub handler`).
+
+  * `search-api/models.py` — Pydantic V2 DTOs (`SearchRequest`, `SearchResponse`, sub-models) with `extra='forbid'`, alias-based field naming, `populate_by_name=True`
+  * `search-api/openapi.yaml` — hand-authored spec, validates via `openapi-spec-validator`
+  * `search-api/main.py` — stub handler at `POST /{collection}/_search` plus `_search_v0` legacy alias
+  * `tests/test_search_api_contract.py` — 12 tests covering full-shape validation, validation errors, pageSize cap, sort parsing, OpenAPI round-trip, v0 alias
+
 ## Scope
 
 Define and document the new ftsearch search contract. Today `/{collection}/_search` accepts `{query, index}` only; we need a richer request that can carry filters, sort, pagination, summaries, and currency context, and a response that carries the data the ACL needs to assemble the legacy envelope (articles, summaries blocks, accurate hit count).

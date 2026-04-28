@@ -10,6 +10,14 @@ References: spec §4.8, §6, §7, §9 #4.
 
 **Milvus deployment**: `milvusdb/milvus:v2.6.15` (see `/home/mgerer/milvus/docker-compose.yml`). VARCHAR up to 65535, JSON path expressions in `expr`, `group_by_field` for search, `MilvusClient.alter_alias` — all available on this version.
 
+## Status
+
+✅ **Done** — commit `549516a` (`F1: offers_v{N} Milvus schema + alias workflow`). Subsequent correction in `d0cb6f4` (drop phantom `closed_catalog BOOL` column).
+
+  * `scripts/create_offers_collection.py` — versioned collection + scalar indexes + alias swing
+  * `scripts/MILVUS_ALIAS_WORKFLOW.md` — operational notes
+  * `tests/test_offers_collection_schema.py` — 24 tests against a live Milvus, covering schema shape, long-PK round-trip, alias resolution, all F3-bound expr parsing
+
 ## Scope
 
 Bring the dense `offers` Milvus collection schema up to parity-readiness: add every scalar field §7 calls out, widen the primary key to carry the legacy `articleId` composite, and stand up the alias-based deployment plumbing required by §4.8.

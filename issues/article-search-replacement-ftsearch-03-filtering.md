@@ -8,6 +8,17 @@ References: spec §4.3, §3 (currency two-roles), §7.
 
 **Legacy reference** (next-gen): per-filter providers in `article/search/query/src/main/java/com/simplesystem/nextgen/article/search/query/infrastructure/search/filter/` — read `VendorFilterProvider`, `CategoryFilterProvider`, `EClassFilterProvider`, `EClassesFilterProvider`, `CoreSortimentFilterProvider`, `ArticleIdFilterProvider`, `ManufacturerFilterProvider`, `DeliveryTimeFilterProvider`, `FeaturesFilterProvider` for the legacy semantics. Price resolution: `PriceFilterProvider.java:56-68` (priority by `PricingType.priority`, currency match, range filter; nested with `priceListFilter` from context).
 
+## Status
+
+✅ **Done** — commits `ad3a361` (initial) + `d0cb6f4` (correction).
+
+  * `search-api/filters.py` — translator with 13 filter atoms; AND-composed top-level expression
+  * `search-api/prices.py` — `decode_minor_units`, `resolve_price`, `passes_price_filter` (currency two-roles split + ISO-4217 fraction-digit decoding)
+  * `search-api/main.py` + `search-api/hybrid.py` — F3 wired through hybrid search path with BM25-leg post-intersection + price-filter over-fetch (default `PRICE_FILTER_OVERFETCH_N=10`)
+  * Correction (`d0cb6f4`): dropped phantom `closed_catalog == true` filter and `_closed_catalog_versions` standalone filter; rewrote `_closed_marketplace` to intersect on `closedCatalogVersionIds` with `id == ""` match-nothing sentinel for the empty-list case (matches legacy `OfferFilterBuilder`).
+  * Tests: 32 unit (`test_filters.py`) + 16 unit (`test_prices.py`) + 25 integration (`test_search_filters_integration.py`).
+  * Two intentional simplifications vs. legacy: priceFilter picks the single highest-priority entry (no per-tier mustNot dance); `coreSortimentOnly` with no source context is a no-op rather than mass-excluding.
+
 ## Scope
 
 Translate every filter on the new ftsearch request into Milvus expressions (or post-Milvus filtering, where Milvus expr cannot express the predicate) so that hits returned by the search reflect every parity-critical filter. Build the price-resolution module that F4 (sort-by-price) and F5 (PRICES aggregation) will reuse.
