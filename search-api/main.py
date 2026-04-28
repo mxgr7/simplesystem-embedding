@@ -37,6 +37,7 @@ Environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -51,8 +52,10 @@ from pydantic import BaseModel, Field
 from pymilvus import MilvusClient
 
 from embed_client import EmbedClient
+from filters import build_milvus_expr
 from hybrid import Hit, Mode, SearchParams, run_search
 from models import (
+    Article,
     Metadata,
     SearchMode,
     SearchRequest,
@@ -60,6 +63,7 @@ from models import (
     Summaries,
     parse_sort_params,
 )
+from prices import passes_price_filter
 
 BASE_DIR = Path(__file__).resolve().parent
 OPENAPI_YAML_PATH = BASE_DIR / "openapi.yaml"
@@ -354,32 +358,148 @@ async def search_v0(
     return response
 
 
+_DEFAULT_PRICE_FILTER_OVERFETCH_N = 10
+
+
+def _price_filter_active(body: SearchRequest) -> bool:
+    pf = body.price_filter
+    return pf is not None and (pf.min is not None or pf.max is not None)
+
+
+def _filter_only_browse(
+    client: MilvusClient, collection: str, *, expr: str, limit: int, id_field: str,
+) -> list[Hit]:
+    """No query string → run a Milvus `query()` against the scalar filter.
+
+    Mirrors the legacy "browse a category without a search term" path.
+    Without an `expr` (no filters either) we return nothing — there is
+    no defensible default ordering.
+    """
+    rows = client.query(
+        collection_name=collection,
+        filter=expr,
+        output_fields=[id_field],
+        limit=limit,
+    )
+    return [Hit(id=str(r.get(id_field, "")), score=0.0, source="filter") for r in rows]
+
+
+def _hydrate_prices(
+    client: MilvusClient, collection: str, ids: list[str], id_field: str,
+) -> dict[str, list]:
+    if not ids:
+        return {}
+    quoted = ", ".join(f'"{i}"' for i in ids)
+    rows = client.query(
+        collection_name=collection,
+        filter=f"{id_field} in [{quoted}]",
+        output_fields=[id_field, "prices"],
+        limit=len(ids),
+    )
+    return {str(r.get(id_field, "")): r.get("prices") or [] for r in rows}
+
+
 @app.post("/{collection}/_search", response_model=SearchResponse, response_model_by_alias=True)
 async def search(
     body: SearchRequest,
+    request: Request,
     collection: str = PathParam(..., min_length=1, max_length=255),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=0, le=500, alias="pageSize"),
     sort: list[str] = Query(default_factory=list),
 ) -> SearchResponse:
-    """F2 stub. Validates the new contract and returns an empty envelope.
+    """F3 — scalar filtering + price-resolution post-pass.
 
-    F3 wires in scalar filtering, F4 fills in mode/sort/paging + accurate
-    `hitCount`, and F5 populates `summaries`. The route accepts an alias
-    for `collection` (alias resolution happens server-side in Milvus).
+    Filters listed in spec §4.3 are AND-composed into a Milvus expr that
+    the dense leg pushes down and the BM25 leg intersects against. The
+    `priceFilter` is applied in Python after over-fetching by a factor
+    of `PRICE_FILTER_OVERFETCH_N` (default 10).
+
+    Pagination, sort, accurate `hitCount`, and `summaries` are F4/F5.
+    Until then the response carries `hitCount = len(articles)` (page
+    slice only) and empty summaries.
     """
     try:
-        parse_sort_params(sort)  # validate; result not yet consumed by stub.
+        parse_sort_params(sort)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    expr = build_milvus_expr(body)
+
+    dense_client: MilvusClient = request.app.state.milvus
+    codes_client: MilvusClient = request.app.state.codes_milvus
+    codes_collection: str = request.app.state.codes_collection
+    id_field: str = request.app.state.id_fields.get(collection, _DEFAULT_ID_FIELD)
+    overfetch_n = int(os.environ.get("PRICE_FILTER_OVERFETCH_N", _DEFAULT_PRICE_FILTER_OVERFETCH_N))
+    price_active = _price_filter_active(body)
+
+    # Effective k for the retrieval phase. Over-fetch when the price
+    # filter is active so that drop-outs in the post-pass don't starve
+    # the page.
+    effective_k = page_size * overfetch_n if price_active and page_size > 0 else max(page_size, 1)
+
+    query_text = (body.query or "").strip()
+    if not query_text:
+        if not expr:
+            hits: list[Hit] = []
+        else:
+            hits = await asyncio.to_thread(
+                _filter_only_browse, dense_client, collection,
+                expr=expr, limit=effective_k, id_field=id_field,
+            )
+    else:
+        params = SearchParams(
+            mode=Mode.HYBRID_CLASSIFIED,
+            k=effective_k,
+            dense_limit=max(effective_k, 200),
+        )
+
+        async def embed_fn(text: str) -> list[float]:
+            rendered = f"{request.app.state.query_prefix}{query_text}"
+            vectors = await request.app.state.embed.embed([rendered])
+            return vectors[0] if vectors else []
+
+        hits, _debug = await run_search(
+            query_text,
+            params,
+            dense_client=dense_client,
+            codes_client=codes_client,
+            embed=embed_fn,
+            dense_collection=collection,
+            codes_collection=codes_collection,
+            dense_id_field=id_field,
+            filter_expr=expr,
+        )
+
+    if price_active and hits:
+        prices_by_id = await asyncio.to_thread(
+            _hydrate_prices, dense_client, collection, [h.id for h in hits], id_field,
+        )
+        sas = body.selected_article_sources
+        pf = body.price_filter
+        kept: list[Hit] = []
+        for h in hits:
+            if passes_price_filter(
+                prices_by_id.get(h.id),
+                request_currency=body.currency,
+                source_price_list_ids=sas.source_price_list_ids,
+                bound_currency_code=pf.currency_code,
+                min_minor=pf.min,
+                max_minor=pf.max,
+            ):
+                kept.append(h)
+        hits = kept
+
+    hits = hits[:page_size]
+    articles = [Article(articleId=h.id, score=h.score) for h in hits]
     return SearchResponse(
-        articles=[],
+        articles=articles,
         summaries=Summaries(),
         metadata=Metadata(
             page=page,
             pageSize=page_size,
             pageCount=0,
             term=body.query,
-            hitCount=0,
+            hitCount=len(articles),
         ),
     )

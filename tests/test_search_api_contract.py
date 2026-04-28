@@ -84,25 +84,33 @@ def full_request_body() -> dict:
     }
 
 
-# ---------- F2 stub returns 200 + valid empty envelope --------------------
+# ---------- contract validation (no Milvus / embed required) -------------
+#
+# Tests that exercise actual search behaviour live in
+# `test_search_filters_integration.py` (F3.5). Contract tests use
+# bodies that either don't trigger search at all (empty query + no
+# scalar filters) or assert pure validation/route behaviour.
 
-def test_full_shape_request_returns_empty_envelope(client: TestClient, full_request_body: dict) -> None:
-    r = client.post("/offers_v_alias/_search?page=2&pageSize=25", json=full_request_body)
+def test_full_shape_request_validates(client: TestClient, full_request_body: dict) -> None:
+    """Full-shape body parses + routes, even if downstream search would
+    require Milvus. The request used here drops `query` so the handler
+    skips the embed/Milvus path and short-circuits to an empty result."""
+    body = {**full_request_body}
+    body["query"] = None
+    body["currentCategoryPathElements"] = []  # also avoid scalar filter → no Milvus query
+    body["selectedArticleSources"] = {**body["selectedArticleSources"], "closedCatalogVersionIds": []}
+    body["requiredFeatures"] = []
+    body["currentEClass5Code"] = None
+    body["eClassesFilter"] = []
+    body["blockedEClassVendorsFilters"] = []
+    del body["priceFilter"]
+    r = client.post("/offers_v_alias/_search?page=2&pageSize=25", json=body)
     assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["articles"] == []
-    assert body["metadata"] == {
-        "page": 2,
-        "pageSize": 25,
-        "pageCount": 0,
-        "term": "Bohrmaschine",
-        "hitCount": 0,
-    }
-    s = body["summaries"]
-    for arr_key in ("vendorSummaries", "manufacturerSummaries", "featureSummaries", "pricesSummary", "eClassesAggregations"):
-        assert s[arr_key] == [], f"{arr_key} should be empty in stub"
-    for null_key in ("categoriesSummary", "eClass5Categories", "eClass7Categories", "s2ClassCategories"):
-        assert s[null_key] is None, f"{null_key} should be null in stub"
+    out = r.json()
+    assert out["articles"] == []
+    assert out["metadata"]["page"] == 2
+    assert out["metadata"]["pageSize"] == 25
+    assert out["metadata"]["term"] is None
 
 
 def test_minimal_request_works(client: TestClient) -> None:

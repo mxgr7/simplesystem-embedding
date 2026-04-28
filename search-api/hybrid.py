@@ -135,6 +135,7 @@ def _dense_search(
     num_candidates: int | None,
     id_field: str,
     vector_field: str = "offer_embedding",
+    filter_expr: str | None = None,
 ) -> list[tuple[str, float]]:
     # Collection stores fp16 vectors; matching the query precision flushes
     # subnormals to 0 instead of tripping Milvus's underflow validator.
@@ -142,14 +143,17 @@ def _dense_search(
     params: dict = {}
     if num_candidates is not None and num_candidates > 0:
         params["ef"] = num_candidates
-    res = client.search(
-        collection_name=collection,
-        data=[query],
-        anns_field=vector_field,
-        limit=limit,
-        search_params={"metric_type": "COSINE", "params": params},
-        output_fields=[id_field],
-    )
+    kwargs: dict = {
+        "collection_name": collection,
+        "data": [query],
+        "anns_field": vector_field,
+        "limit": limit,
+        "search_params": {"metric_type": "COSINE", "params": params},
+        "output_fields": [id_field],
+    }
+    if filter_expr:
+        kwargs["filter"] = filter_expr
+    res = client.search(**kwargs)
     raw = res[0] if res else []
     out: list[tuple[str, float]] = []
     for h in raw:
@@ -190,6 +194,36 @@ def _bm25_search(
     # contribution) is non-deterministic across calls.
     out.sort(key=lambda r: (-r[1], r[0]))
     return out
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Filter intersection (F3 — BM25 leg can't push scalar filters)
+# ──────────────────────────────────────────────────────────────────────
+
+def _intersect_with_filter(
+    client: MilvusClient,
+    collection: str,
+    candidates: list[tuple[str, float]],
+    *,
+    filter_expr: str,
+    id_field: str,
+) -> list[tuple[str, float]]:
+    """Keep only candidates whose `id_field` survives `filter_expr` on the
+    dense collection. Preserves input order (BM25 score ranking).
+    """
+    if not candidates:
+        return []
+    ids = [hid for hid, _ in candidates]
+    quoted = ", ".join(f'"{i}"' for i in ids)
+    expr = f"({id_field} in [{quoted}]) and ({filter_expr})"
+    rows = client.query(
+        collection_name=collection,
+        filter=expr,
+        output_fields=[id_field],
+        limit=len(ids),
+    )
+    surviving: set[str] = {str(r.get(id_field, "")) for r in rows}
+    return [c for c in candidates if c[0] in surviving]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -246,7 +280,17 @@ async def run_search(
     dense_collection: str = "offers",
     codes_collection: str = "offers_codes",
     dense_id_field: str = "id",
+    filter_expr: str | None = None,
 ) -> tuple[list[Hit], dict]:
+    """Run the configured retrieval mode.
+
+    `filter_expr` (F3) is a Milvus scalar expression. The dense leg
+    pushes it down to Milvus directly. The BM25 leg cannot — the codes
+    collection has no scalar fields — so its candidates are intersected
+    against a `query()` on the dense collection that re-applies the same
+    expression. Net effect: every hit returned by `run_search` is
+    constrained by the expression regardless of leg.
+    """
     q = q.strip()
     timings = _LegTimings()
     if not q:
@@ -264,6 +308,7 @@ async def run_search(
             vec=vec, limit=params.dense_limit,
             num_candidates=params.num_candidates,
             id_field=dense_id_field,
+            filter_expr=filter_expr,
         )
         timings.dense_ms = (time.perf_counter() - t1) * 1000
         timings.dense_hits = len(out)
@@ -275,6 +320,12 @@ async def run_search(
             _bm25_search, codes_client, codes_collection,
             text=q.lower(), limit=limit,
         )
+        if filter_expr and out:
+            out = await asyncio.to_thread(
+                _intersect_with_filter,
+                dense_client, dense_collection, out,
+                filter_expr=filter_expr, id_field=dense_id_field,
+            )
         timings.codes_ms = (time.perf_counter() - t0) * 1000
         timings.codes_hits = len(out)
         return out
