@@ -16,7 +16,7 @@ column_mapping:
 batch_size: 32
 num_workers: 8
 pin_memory: true
-max_pair_length: 384
+max_pair_length: 512
 val_fraction: 0.05
 clean_html: true
 limit_rows: null
