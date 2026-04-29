@@ -20,8 +20,9 @@ logs/playground-app.log
 .opencode/
 .vscode/
 
-# DuckDB ↔ Python parity diff dumps (from tests/test_duckdb_projection_parity.py).
+# DuckDB ↔ Python parity diff dumps.
 tests/.parity_diff*.json
+tests/.aggregate_parity_diff*.json
 
 # Heavy local-only fixture; rebuild from S3 cache via scripts/dump_s3_sample.py.
 tests/fixtures/mongo_sample/sample_10k.json
