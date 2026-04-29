@@ -1,0 +1,30 @@
+commit	val_micro_f1	val_macro_f1	memory_gb	status	description
+3570c02	0.879697	0.686029	7.5	keep	baseline (gelectra-base bf16-mixed bs=32 lr=1e-5 wd=0.01 cwarmup=0.33 lsmooth=0 cw=on max_pair=384) — 5 val ckpts in 20min, MLflow run righteous-carp-160
+f78e554	0.870232	0.675018	7.5	discard	lr 1e-5 -> 2e-5 — -0.010 micro, -0.011 macro (both regress, well above noise); MLflow flawless-grouse-924
+a1f0bd9	0.908773	0.714268	7.5	keep	use_class_weights=false — +0.029 micro AND +0.028 macro both at same step 18152; class weights net-harmful at bs=32; MLflow unequaled-stoat-205
+db3b4da	0.907809	0.708036	7.5	discard	label_smoothing 0.0 -> 0.1 — micro within noise (-0.001), macro regressed beyond noise (-0.006); MLflow incongruous-colt-767
+7e8b30c	0.903171	0.702539	12.5	discard	bs 32 -> 64 (cw=off) — saw 1.2M examples vs 0.91M but -0.006 micro -0.012 macro; bs=32 noise benefits this setup; MLflow invincible-skink-711
+0b0a561	0.908282	0.720438	7.5	keep	lr 1e-5 -> 2e-5 (cw=off) — macro peak +0.006, micro within noise (-0.0005); macro still climbing at last val (step 28480); MLflow hilarious-fawn-663
+9e06907	0.905442	0.707158	7.5	discard	lr 2e-5 -> 3e-5 — peak -0.003 micro -0.013 macro AND catastrophic collapse at last val (micro 0.826 macro 0.226); MLflow popular-loon-989
+afca86f	0.909702	0.717987	7.5	discard	head_dropout 0.1 -> 0.2 — micro +0.001 (within noise), macro -0.002 (just beyond noise); net wash; MLflow bouncy-rook-817
+ed7a17c	0.905821	0.707427	10.1	discard	max_pair 384 -> 512 — only 4 vals in 20min vs 5; -0.003 micro -0.013 macro; data-driven hypothesis right but compute cost wins; MLflow casual-mole-207
+7837228	0.915097	0.729849	18.4	keep	gelectra-base -> gelectra-large — +0.007 micro AND +0.009 macro; Substitute f1 0.52->0.57 (+5.4pt); 11672 steps (~1.9 epochs); macro still climbing; MLflow powerful-kit-32
+299aba0	0.825745	0.226139	18.7	discard	lr 2e-5 -> 3e-5 (gelectra-large) — instant collapse to always-Exact (micro=0.826=trivial baseline, macro=0.226=1/4 of Exact f1); lr=3e-5 universally too aggressive; MLflow fortunate-shad-692
+47ca58f	0.915665	0.736611	23.3	keep	max_pair 384 -> 512 (gelectra-large) — micro within noise (+0.001), macro +0.007; peak at step 6050 (epoch 1); only 2 vals in 20min; MLflow big-asp-863
+0e8893c	0.919262	0.751221	23.3	keep	lr 2e-5 -> 1.5e-5 (gelectra-large max_pair=512) — micro +0.004 AND macro +0.015; crosses 0.75 macro target; all 4 per-class F1 lifted; MLflow useful-lamb-886
+438c39a	0.921344	0.746281	23.3	discard	lr 1.5e-5 -> 1e-5 — micro +0.002 (right at noise), macro -0.005 (above noise); model still climbing at last val (under-trained at lower lr in this budget); MLflow enthused-perch-402
+892e6ad	0.915949	0.747148	23.3	discard	cosine + max_epochs=3 (15% lr at step 9798) — -0.003 micro -0.004 macro; cosine reduced ep2 overfit but lowered ep1 peak; MLflow caring-newt-252
+ff9ad81	0.916044	0.746304	23.3	discard	weight_decay 0.01 -> 0.05 — -0.003 micro -0.005 macro; same pattern as cosine: regularization slows ep1 peak more than it suppresses ep2 overfit; MLflow victorious-bear-840
+c2b7f41	0.918126	0.739276	23.6	discard	skip 'EAN: 00000000' placeholder in template — micro within noise (-0.001), macro -0.012; data hypothesis strong but no measurable gain; MLflow stately-shoat-931
+c3400bf	0.920398	0.757533	23.3	keep	focal_loss gamma=2.0 — micro within noise (+0.001), macro +0.006; Substitute F1 latest 0.55->0.59 (+0.04); MLflow valuable-finch-654
+4757a08	0.916801	0.749489	23.3	discard	focal_gamma 2.0 -> 3.0 — -0.004 micro -0.008 macro; Substitute F1 dropped 0.59->0.55 despite stronger focus; gamma=2 is the sweet spot; MLflow clumsy-snake-759
+5289b6e	0.918978	0.743931	23.8	discard	val_check_interval 1.0 -> 0.5 — micro within noise (-0.001), macro -0.014; finer val found step 9075 with higher micro but past macro peak; ModelCheckpoint best-by-micro saved a worse-macro step; MLflow handsome-hawk-800
+5ace515	0.909702	0.710987	17.0	discard	gelectra-large -> mdeberta-v3-base — -0.011 micro, -0.047 macro; Substitute f1 0.59->0.49; smaller capacity (278M vs 335M) outweighs tokenizer win; MLflow masked-stoat-379
+fee21db	0.000000	0.000000	0.0	crash	gelectra-large -> mdeberta-v3-large — model doesn't exist on HF (only mdeberta-v3-base published)
+1c6839b	0.911216	0.721195	27.5	discard	gelectra-large -> xlm-roberta-large — -0.009 micro -0.036 macro; tokenizer hypothesis busted on this data; gelectra's German pretraining > tokenizer benefit; MLflow serious-calf-461
+92daea2	0.919262	0.747994	23.3	discard	lr 1.5e-5 -> 2e-5 (with focal=2) — micro within noise (-0.001), macro -0.010; lr=1.5e-5 still optimal under focal; MLflow luxuriant-kit-378 (also resumed for 40min more — peak macro 0.7480 at step 9827, declined after; lr=1.5e-5 truly better)
+77c46b8	0.911027	0.722266	23.8	discard	space_digits=true (preprocess all digits to single tokens) — -0.009 micro -0.035 macro; pretrained gelectra can't adapt to single-digit tokens in budget; MLflow 24-space-digits
+d2e028e	0.915949	0.725603	23.6	discard	add 3 lexical features (substring/digit-jaccard/char-3gram) to head — -0.005 micro -0.032 macro; raw [0,1] features disrupt [CLS] integration; substring=0 dominates Substitute (where query is rarely in offer name); MLflow 25-lexical-features
+3e448f4	0.920208	0.753181	?	discard	lex features projected through Linear(3,16)+GELU — only 1 val (process killed silently mid-run); ep1 micro within noise, macro -0.004; close but not beating keep; MLflow 26-lex-features-projected (KILLED)
+53ebe1f	0.917937	0.736413	18.7	discard	max_pair 512 -> 384 (with focal=2) — -0.003 micro -0.021 macro; L=512 still right under focal at this lr; MLflow 27-maxpair384-focal2
+b9af919	0.912679	0.726907	?	discard	warmup_ratio 0.33 -> 0.5 — only 1 val (process killed silently); ep1 micro -0.008 macro -0.031; longer warmup undertrains ep1; MLflow 28-warmup05 (KILLED)
