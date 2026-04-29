@@ -118,6 +118,15 @@ class DispatchResult:
     hit_count: int = 0
     hit_count_clipped: bool = False
     summaries: Summaries | None = None
+    # Which dispatch path the request took. One of:
+    #   "path_a"                      — offer_expr None; vector-first.
+    #   "path_b"                      — bounded probe → article ANN.
+    #   "path_b_overflow_fallback"    — probe exceeded PATH_B_HASH_LIMIT
+    #                                    → fell back to Path A.
+    #   "filter_only_browse"          — no query string + no offer_expr
+    #                                    → filter-only Milvus query().
+    # Surfaced for the F7 RED metrics (`metrics.record_search`).
+    route: str = "path_a"
 
 
 @dataclass(slots=True)
@@ -301,6 +310,12 @@ async def dispatch_dedup(
             hitcount_cap=hitcount_cap,
         )
 
+    # Map internal `_Timings.path` into the public route label.
+    route_map = {
+        "A": "path_a",
+        "A_fallback": "path_b_overflow_fallback",
+        "B": "path_b",
+    }
     return DispatchResult(
         hits=hits,
         debug=_debug(timings),
@@ -308,6 +323,7 @@ async def dispatch_dedup(
         hit_count=hit_count,
         hit_count_clipped=hit_count_clipped,
         summaries=summaries,
+        route=route_map.get(timings.path, "path_a"),
     )
 
 
@@ -997,6 +1013,11 @@ async def _dispatch_summaries_only(
             hitcount_cap=hitcount_cap,
         )
 
+    summaries_only_route_map = {
+        "A": "path_a",
+        "A_fallback": "path_b_overflow_fallback",
+        "B": "path_b",
+    }
     return DispatchResult(
         hits=[],
         debug=_debug(timings),
@@ -1004,6 +1025,7 @@ async def _dispatch_summaries_only(
         hit_count=hit_count,
         hit_count_clipped=hit_count_clipped,
         summaries=summaries,
+        route=summaries_only_route_map.get(timings.path, "path_a"),
     )
 
 

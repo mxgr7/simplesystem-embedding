@@ -62,6 +62,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -75,6 +76,7 @@ from pymilvus import MilvusClient
 
 from embed_client import EmbedClient
 from filters import build_milvus_expr
+from metrics import record_search, record_search_error
 from milvus_helpers import BoundedMilvusClient
 from hybrid import Hit, Mode, SearchParams, run_search
 from models import (
@@ -495,18 +497,41 @@ async def _search_dedup(
 
     sort_plan = parse_sort_plan(sort_clauses)
 
-    result = await dispatch_dedup(
-        body,
-        page=page, page_size=page_size, overfetch_n=overfetch_n,
-        sort_plan=sort_plan,
-        client=client, embed=embed_fn,
-        articles_collection=articles_collection,
-        offers_collection=offers_collection,
-        path_b_hash_limit=path_b_hash_limit,
-        relevance_pool_max=request.app.state.relevance_pool_max,
-        relevance_score_floor=request.app.state.relevance_score_floor,
-        hitcount_cap=request.app.state.hitcount_cap,
-    )
+    # F7 RED metrics: time the dispatch + record per-request labels.
+    # On exception, record an error counter with the same sort+route
+    # context so dashboards can see a 5xx spike broken out the same way
+    # as the success path.
+    started = time.perf_counter()
+    try:
+        result = await dispatch_dedup(
+            body,
+            page=page, page_size=page_size, overfetch_n=overfetch_n,
+            sort_plan=sort_plan,
+            client=client, embed=embed_fn,
+            articles_collection=articles_collection,
+            offers_collection=offers_collection,
+            path_b_hash_limit=path_b_hash_limit,
+            relevance_pool_max=request.app.state.relevance_pool_max,
+            relevance_score_floor=request.app.state.relevance_score_floor,
+            hitcount_cap=request.app.state.hitcount_cap,
+        )
+    except HTTPException as exc:
+        # Pre-dispatch validation errors (404 missing collection, 400
+        # malformed sort) — record under the route best guess
+        # (offer_expr-based, derived from the body). Without a
+        # successful dispatch we don't know the actual route, so we
+        # tag with the rough dispatch shape.
+        record_search_error(
+            sort_clauses=sort_clauses,
+            route="unknown",
+            error_kind=f"status_{exc.status_code // 100}xx",
+        )
+        raise
+    except Exception:
+        record_search_error(
+            sort_clauses=sort_clauses, route="unknown", error_kind="exception",
+        )
+        raise
 
     # SUMMARIES_ONLY: empty articles[] but real hitCount + summaries.
     # HITS_ONLY: empty summaries.
@@ -521,6 +546,21 @@ async def _search_dedup(
     page_count = (
         (result.hit_count + page_size - 1) // page_size
         if page_size > 0 and result.hit_count > 0 else 0
+    )
+
+    record_search(
+        sort_clauses=sort_clauses,
+        route=result.route,
+        has_summaries=bool(result.summaries and (
+            getattr(result.summaries, "vendors", None)
+            or getattr(result.summaries, "manufacturers", None)
+            or getattr(result.summaries, "categories", None)
+            or getattr(result.summaries, "eclass5", None)
+            or getattr(result.summaries, "eclass5Set", None)
+        )),
+        duration_s=time.perf_counter() - started,
+        recall_clipped=result.recall_clipped,
+        hit_count_clipped=result.hit_count_clipped,
     )
 
     return SearchResponse(
