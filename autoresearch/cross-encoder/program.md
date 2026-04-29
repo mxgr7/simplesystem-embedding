@@ -32,12 +32,10 @@ To set up a new experiment, work with the user to:
      uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
    ```
    Should print `True NVIDIA H100 80GB HBM3`.
-6. **Initialize results.tsv**: create `results.tsv` (project root) with just the header row (if it doesn't exist yet). The baseline will be recorded after the first run. **Note**: the embedding-train autoresearch uses the same filename. **Convention when the checkout is shared with embedding-train autoresearch** (which is the case in this repo as of 2026-04-28): use the cross-encoder-suffixed names for all three persistent artifacts so nothing collides with the embedding-train versions:
-   - `results-cross-encoder.tsv` (instead of `results.tsv`)
-   - `NOTES-cross-encoder.md` (instead of `NOTES.md`)
-   - `data-insights-cross-encoder.md` (instead of `data-insights.md`)
-
-   Use these names throughout the rest of this document whenever it says `results.tsv`, `NOTES.md`, or `data-insights.md`.
+6. **Initialize results.tsv**: create `results.tsv` in this directory (`autoresearch/cross-encoder/`) with just the header row (if it doesn't exist yet). The baseline will be recorded after the first run. The three persistent autoresearch artifacts for this program live alongside this `program.md`:
+   - `results.tsv` — per-run log
+   - `NOTES.md` — accumulated insights
+   - `data-insights.md` — data exploration findings
 7. **Confirm and go**: confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
@@ -120,7 +118,7 @@ If `grep` output is empty or the run obviously crashed, run `tail -n 80 run.log`
 
 ## Logging results
 
-When an experiment is done, log it to `results.tsv` (or `results-cross-encoder.tsv` if you're sharing the checkout with embedding-train autoresearch — see Setup step 6).
+When an experiment is done, log it to `results.tsv` (in this directory — see Setup step 6).
 
 The TSV has a header row and 6 columns:
 

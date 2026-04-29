@@ -18,7 +18,7 @@ To set up a new experiment, work with the user to:
    - `src/embedding_train/data.py` — datamodule, hard/semi-hard negative wiring.
    - `src/embedding_train/eval.py` and `metrics.py` — **read-only**: this is the evaluation harness and must not be modified.
 4. **Verify data exists**: confirm the labeled parquet referenced by `configs/data/default.yaml` is readable, and that the MLflow server at the URI in `configs/logger/mlflow.yaml` is reachable (`curl -s <uri>` or use the `mlflow` skill). If either is missing, stop and tell the human.
-5. **Initialize results.tsv**: create `results.tsv` with just the header row (if it doesn't exist yet). The baseline will be recorded after the first run.
+5. **Initialize results.tsv**: create `results.tsv` in this directory (`autoresearch/embedding/`) with just the header row (if it doesn't exist yet). The baseline will be recorded after the first run.
 6. **Confirm and go**: confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
