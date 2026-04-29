@@ -518,6 +518,14 @@ def run_bulk_indexer(
             checkpoint=checkpoint,    # type: ignore[arg-type]
         )
 
+    # Flush so `get_collection_stats` reflects the bulk-loaded rows
+    # immediately. Without this, operators running scripts/swing_aliases.py
+    # right after the indexer hit row_count=0 (sealed-segment count
+    # only) and the swing's row-count validation rejects the target.
+    log.info("Flushing both collections so post-run stats reflect new rows…")
+    milvus.flush(articles_collection)
+    milvus.flush(offers_collection)
+
     stats.total_seconds = time.time() - wall_t0
     log.info(
         "Bulk run complete: articles=%d (%.0fs) offers=%d (%.0fs) duckdb=%.0fs total=%.0fs",

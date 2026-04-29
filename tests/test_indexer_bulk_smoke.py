@@ -94,6 +94,11 @@ class _RecordingMilvus:
         self.upserts[collection_name].extend(data)
         return {"insert_count": len(data), "ids": [r.get("article_hash") or r.get("id") for r in data]}
 
+    def flush(self, collection_name: str) -> None:
+        """No-op for the fake — real `MilvusClient.flush` seals
+        growing segments so `get_collection_stats` returns current
+        row counts. Tests don't read stats."""
+
 
 class _DeterministicTEI:
     """Stand-in for `TEICache._tei_embed`. Deterministic 128-d fp32
