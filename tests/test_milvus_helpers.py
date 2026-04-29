@@ -1,12 +1,12 @@
 """Unit tests for `search-api/milvus_helpers.py`.
 
-Validates the `BoundedMilvusClient` wrapper:
-  - Pins consistency_level='Bounded' on search/query/get when caller
-    didn't pass one.
-  - Caller-supplied consistency_level wins (escape hatch for the rare
-    `Strong`-required case).
-  - Pass-through forwards every other method to the underlying client
-    unmodified.
+Coverage:
+  - `BoundedMilvusClient` pins consistency_level + timeout on
+    search/query/get; caller-supplied values win.
+  - Pass-through forwards every other method to the underlying client.
+  - `retry` exponential backoff: succeeds, retries on transient,
+    raises on permanent error, exhausts attempts, exhausts total
+    budget, ignores caller-passed timeout/consistency.
 """
 
 from __future__ import annotations
@@ -15,10 +15,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "search-api"))
 
-from milvus_helpers import DEFAULT_CONSISTENCY_LEVEL, BoundedMilvusClient  # noqa: E402
+from milvus_helpers import (  # noqa: E402
+    DEFAULT_CONSISTENCY_LEVEL,
+    DEFAULT_PER_CALL_TIMEOUT_S,
+    BoundedMilvusClient,
+    RetryPolicy,
+    retry,
+)
 
 
 class _RecordingClient:
@@ -106,3 +114,155 @@ def test_underlying_client_attribute_access() -> None:
     raw.custom_attr = "hello"  # type: ignore[attr-defined]
     client = BoundedMilvusClient(raw)
     assert client.custom_attr == "hello"
+
+
+# ---- timeout pinning ----------------------------------------------------
+
+def test_search_pins_default_timeout_when_unspecified() -> None:
+    raw = _RecordingClient()
+    client = BoundedMilvusClient(raw, retry_policy=None)
+    client.search(collection_name="c", data=[[1.0]])
+    assert raw.calls[0][1]["timeout"] == DEFAULT_PER_CALL_TIMEOUT_S
+
+
+def test_caller_supplied_timeout_wins() -> None:
+    """A long-running operator query (e.g. a one-off audit) overrides
+    the default by passing `timeout=N`."""
+    raw = _RecordingClient()
+    client = BoundedMilvusClient(raw, retry_policy=None)
+    client.query(collection_name="c", filter='id == "x"', timeout=60.0)
+    assert raw.calls[0][1]["timeout"] == 60.0
+
+
+def test_timeout_disabled_when_constructor_passes_none() -> None:
+    raw = _RecordingClient()
+    client = BoundedMilvusClient(raw, timeout_s=None, retry_policy=None)
+    client.query(collection_name="c", filter='id == "x"')
+    assert "timeout" not in raw.calls[0][1]
+
+
+# ---- retry semantics ----------------------------------------------------
+
+class _TransientError(RuntimeError):
+    """Stand-in for a transient gRPC failure from Milvus."""
+
+
+def _no_sleep_policy(**overrides: Any) -> RetryPolicy:
+    base = {"initial_backoff_s": 0.0, "max_single_backoff_s": 0.0,
+            "total_budget_s": 1.0, "multiplier": 1.5, "max_attempts": 3}
+    base.update(overrides)
+    return RetryPolicy(**base)
+
+
+def test_retry_succeeds_on_first_attempt() -> None:
+    calls = {"n": 0}
+    def fn():
+        calls["n"] += 1
+        return 42
+    assert retry(fn, policy=_no_sleep_policy(), label="t") == 42
+    assert calls["n"] == 1
+
+
+def test_retry_recovers_after_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _TransientError("connection reset")
+        return "ok"
+    monkeypatch.setattr("milvus_helpers.time.sleep", lambda _: None)
+    assert retry(fn, policy=_no_sleep_policy(max_attempts=4), label="t") == "ok"
+    assert calls["n"] == 3
+
+
+def test_retry_raises_immediately_on_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    def fn():
+        calls["n"] += 1
+        raise RuntimeError("schema validation failed")
+    monkeypatch.setattr("milvus_helpers.time.sleep", lambda _: None)
+    with pytest.raises(RuntimeError, match="schema"):
+        retry(fn, policy=_no_sleep_policy(max_attempts=10), label="t")
+    assert calls["n"] == 1
+
+
+def test_retry_exhausts_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    def fn():
+        calls["n"] += 1
+        raise _TransientError(f"unavailable {calls['n']}")
+    monkeypatch.setattr("milvus_helpers.time.sleep", lambda _: None)
+    with pytest.raises(_TransientError):
+        retry(fn, policy=_no_sleep_policy(max_attempts=4), label="t")
+    assert calls["n"] == 4
+
+
+def test_retry_total_budget_caps_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even with attempts=10, a tight `total_budget_s` should make us
+    raise sooner — the sum of cumulative backoffs is checked. Use a
+    fake monotonic clock that advances by the slept duration so the
+    budget check sees realistic elapsed time without actually sleeping."""
+    calls = {"n": 0}
+    sleeps: list[float] = []
+    clock = [0.0]
+
+    def fn():
+        calls["n"] += 1
+        raise _TransientError("transient")
+
+    def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        clock[0] += s
+
+    monkeypatch.setattr("milvus_helpers.time.sleep", fake_sleep)
+    monkeypatch.setattr("milvus_helpers.time.monotonic", lambda: clock[0])
+
+    # Each backoff = 1.0s. With total_budget_s=2.5, after attempt 3
+    # the cumulative would be ~3.0s which exceeds budget — raise.
+    policy = RetryPolicy(
+        max_attempts=10,
+        initial_backoff_s=1.0,
+        multiplier=1.0,  # constant 1.0 per attempt
+        max_single_backoff_s=1.0,
+        total_budget_s=2.5,
+    )
+    with pytest.raises(_TransientError):
+        retry(fn, policy=policy, label="t")
+    # 1st attempt: fail, sleep 1s (clock=1)
+    # 2nd attempt: fail, sleep 1s (clock=2)
+    # 3rd attempt: fail, would-sleep 1s but elapsed(2) + wait(1) > budget(2.5) → raise
+    assert calls["n"] == 3
+    assert sleeps == [1.0, 1.0]
+
+
+def test_bounded_client_retries_on_transient(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: BoundedMilvusClient.search retries when the
+    underlying client raises transient, then succeeds."""
+    calls = {"n": 0}
+
+    class _RetryingClient:
+        def search(self, **kwargs: Any) -> str:
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise _TransientError("transient")
+            return "ok"
+
+    monkeypatch.setattr("milvus_helpers.time.sleep", lambda _: None)
+    client = BoundedMilvusClient(
+        _RetryingClient(),  # type: ignore[arg-type]
+        retry_policy=_no_sleep_policy(),
+    )
+    assert client.search(collection_name="c", data=[[1.0]]) == "ok"
+    assert calls["n"] == 2
+
+
+def test_bounded_client_no_retry_when_policy_none() -> None:
+    """`retry_policy=None` short-circuits — first failure raises
+    immediately. Useful for tests + nested-retry callers."""
+    class _FailingClient:
+        def search(self, **kwargs: Any) -> str:
+            raise _TransientError("transient")
+
+    client = BoundedMilvusClient(_FailingClient(), retry_policy=None)  # type: ignore[arg-type]
+    with pytest.raises(_TransientError):
+        client.search(collection_name="c", data=[[1.0]])
