@@ -22,6 +22,69 @@ clean_html: true
 limit_rows: null
 column_rename: null
 
+features:
+  enabled: false
+  slot_order: [ean, article, shape, spec, brand]
+  normalize:
+    leading_zeros: keep
+    multivalue_separators: ",;|"
+  ean:
+    enabled: true
+    offer_field: ean
+    validate: gtin
+    on_offer_invalid: none
+  article:
+    enabled: true
+    offer_fields: [article_number, manufacturer_article_number]
+    min_token_len: 4
+    on_offer_invalid: none
+  shape:
+    enabled: true
+    offer_fields: [article_number, manufacturer_article_number]
+    min_token_len: 4
+    on_offer_invalid: none
+  spec:
+    enabled: false
+    offer_fields: [name, description]
+    rules:
+      - thread_m
+      - g_thread
+      - dimensions
+      - fraction
+      - decimal_de
+      - mm
+      - cm
+      - micrometre
+      - cross_sect
+      - inch_zoll
+      - voltage
+      - ampere
+      - ah
+      - watt
+      - hz
+      - volume_l
+      - mass_kg
+      - pressure
+      - din
+      - iso
+      - en_norm
+      - strength_cls
+      - stainless
+      - ral_color
+      - ip_rating
+      - cat_rating
+      - dn_nw_pn
+      - pg_gland
+      - awg
+      - lumen_lux
+    on_offer_invalid: none
+  brand:
+    enabled: false
+    offer_field: manufacturer_name
+    dictionary_path: artifacts/brand_dictionary.txt
+    min_query_token_len: 3
+    on_offer_invalid: none
+
 query_template: |-
   {{ query_term }}
 

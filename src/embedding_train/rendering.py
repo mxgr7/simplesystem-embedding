@@ -45,8 +45,9 @@ class RowTextRenderer:
         self.offer_template = build_template(data_cfg.offer_template)
         self.column_rename = dict(data_cfg.get("column_rename", None) or {})
 
-    def build_training_record(self, row):
-        context = self.build_context(row)
+    def build_training_record(self, row, context=None):
+        if context is None:
+            context = self.build_context(row)
         query_text = self.render_query_text(row, context=context)
         offer_text = self.render_offer_text(row, context=context)
 

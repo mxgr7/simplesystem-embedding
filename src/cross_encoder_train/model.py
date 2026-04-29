@@ -11,6 +11,7 @@ from embedding_train.metrics import (
     compute_ranking_metrics,
 )
 
+from cross_encoder_train.features import feature_token_names
 from cross_encoder_train.labels import GAIN_VECTOR, NUM_CLASSES
 from cross_encoder_train.metrics import compute_classification_metrics
 
@@ -75,6 +76,13 @@ class CrossEncoderModule(L.LightningModule):
         self.encoder = AutoModel.from_pretrained(
             cfg.model.model_name, dtype=self.model_dtype
         )
+        features_cfg = cfg.data.get("features", None) if hasattr(
+            cfg.data, "get"
+        ) else getattr(cfg.data, "features", None)
+        extra_token_count = len(feature_token_names(features_cfg))
+        if extra_token_count > 0:
+            new_size = self.encoder.config.vocab_size + extra_token_count
+            self.encoder.resize_token_embeddings(new_size)
         hidden_size = int(self.encoder.config.hidden_size)
         self.dropout = torch.nn.Dropout(float(cfg.model.head_dropout))
         self.classifier = torch.nn.Linear(

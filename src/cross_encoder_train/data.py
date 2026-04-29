@@ -12,6 +12,7 @@ from transformers import AutoTokenizer
 
 from embedding_train.rendering import RowTextRenderer
 
+from cross_encoder_train.features import FeatureExtractor, feature_token_names
 from cross_encoder_train.labels import LABEL_TO_ID, NUM_CLASSES, encode_label
 
 
@@ -61,6 +62,17 @@ class CrossEncoderDataModule(LightningDataModule):
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg.model.model_name, use_fast=True
         )
+        self.features_cfg = cfg.data.get("features", None) if hasattr(
+            cfg.data, "get"
+        ) else getattr(cfg.data, "features", None)
+        self.feature_extractor = None
+        self.added_token_count = 0
+        feature_tokens = feature_token_names(self.features_cfg)
+        if feature_tokens:
+            self.added_token_count = self.tokenizer.add_special_tokens(
+                {"additional_special_tokens": list(feature_tokens)}
+            )
+            self.feature_extractor = FeatureExtractor(self.features_cfg)
         self.train_dataset = None
         self.val_dataset = None
         self.dataset_stats = {}
@@ -139,7 +151,8 @@ class CrossEncoderDataModule(LightningDataModule):
 
         for values in frame.itertuples(index=False, name=None):
             row = dict(zip(columns, values))
-            base_record = self.row_renderer.build_training_record(row)
+            context = self.row_renderer.build_context(row)
+            base_record = self.row_renderer.build_training_record(row, context=context)
             if base_record is None:
                 skipped_rows += 1
                 continue
@@ -149,11 +162,17 @@ class CrossEncoderDataModule(LightningDataModule):
                 skipped_unknown_label += 1
                 continue
 
+            query_text = base_record["query_text"]
+            if self.feature_extractor is not None:
+                feature_tokens = self.feature_extractor.extract(context)
+                if feature_tokens:
+                    query_text = " ".join(feature_tokens) + " " + query_text
+
             records.append(
                 {
                     "query_id": base_record["query_id"],
                     "offer_id": base_record["offer_id"],
-                    "query_text": base_record["query_text"],
+                    "query_text": query_text,
                     "offer_text": base_record["offer_text"],
                     "raw_label": raw_label,
                     "label_id": encode_label(raw_label),
@@ -264,4 +283,7 @@ class CrossEncoderDataModule(LightningDataModule):
             stats[f"val_{label.lower()}_rows"] = int(val_class_counts.get(label, 0))
         for index, weight in enumerate(self.class_weights):
             stats[f"class_weight_{index}"] = float(weight)
+        if self.feature_extractor is not None:
+            stats["features/added_tokens"] = int(self.added_token_count)
+            stats.update(self.feature_extractor.stats_dict())
         return stats
