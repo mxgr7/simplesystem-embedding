@@ -58,6 +58,13 @@ def main():
     extra = len(feat_tokens)
     new_size = pre_vocab + extra
     encoder.resize_token_embeddings(new_size, mean_resizing=False)
+    with torch.no_grad():
+        emb = encoder.embeddings.word_embeddings.weight
+        existing = emb[: emb.size(0) - extra]
+        target_norm = existing.norm(dim=1).mean()
+        new_rows = emb[-extra:]
+        cur_norm = new_rows.norm(dim=1, keepdim=True).clamp_min(1e-9)
+        new_rows.mul_(target_norm / cur_norm)
     post_emb = encoder.embeddings.word_embeddings
     post_shape = tuple(post_emb.weight.shape)
     print(
