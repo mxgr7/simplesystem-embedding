@@ -2,6 +2,14 @@
 
 Minimal Hydra + PyTorch Lightning project for fine-tuning a text embedding model on labeled query-offer pairs.
 
+> **Article-search-replacement project** (parallel to the training
+> baseline below): the F-, I-, and A-series packets that replace
+> next-gen's legacy Elasticsearch-backed `/article-features/search`
+> with a Milvus-backed FastAPI stack live in `./search-api/`,
+> `./acl/`, and `./indexer/`. See
+> [ARTICLE_SEARCH_REPLACEMENT_STATUS.md](./ARTICLE_SEARCH_REPLACEMENT_STATUS.md)
+> for the bird's-eye view + an end-to-end operating recipe.
+
 ## Stack
 
 - `uv` for environment and dependency management
