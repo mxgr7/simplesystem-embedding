@@ -172,22 +172,54 @@ def collections_loaded(milvus_client: MilvusClient, projected_rows):
             milvus_client.drop_collection(name)
 
 
+def _load_module_from_file(module_name: str, path: Path):
+    """Load a module from a specific file path, bypassing sys.path
+    resolution. Both `acl/main.py` and `search-api/main.py` are
+    named `main`, so a plain `import main` collides — sys.modules
+    caches the first one loaded and returns it for every subsequent
+    import. Path-based loading gives us distinct module objects."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 @pytest.fixture(scope="module")
 def search_api_test_client(collections_loaded):
     """Boot search-api with the dedup topology pointing at our
     fixture pair, wrapped in a TestClient so its FastAPI lifespan
-    actually fires (sets up app.state.milvus, app.state.gate, etc.)."""
+    actually fires (sets up app.state.milvus, app.state.gate, etc.).
+
+    Uses module-scoped MonkeyPatch so env mutations are reverted on
+    teardown — without this, the next file's test_search_dedup_integration
+    fixture inherits MILVUS_ARTICLES_COLLECTION=articles_v4_a6 and
+    points at the wrong collection."""
+    from _pytest.monkeypatch import MonkeyPatch
     from fastapi.testclient import TestClient
-    os.environ["USE_DEDUP_TOPOLOGY"] = "1"
-    os.environ["MILVUS_ARTICLES_COLLECTION"] = ARTICLES
-    os.environ["EMBED_URL"] = "http://embed.invalid"
-    os.environ["MILVUS_URI"] = MILVUS_URI
-    os.environ["API_KEY"] = ""
+    mp = MonkeyPatch()
+    mp.setenv("USE_DEDUP_TOPOLOGY", "1")
+    mp.setenv("MILVUS_ARTICLES_COLLECTION", ARTICLES)
+    mp.setenv("EMBED_URL", "http://embed.invalid")
+    mp.setenv("MILVUS_URI", MILVUS_URI)
+    mp.setenv("API_KEY", "")
+    # Load search-api's main.py under a unique module name so it
+    # doesn't collide with acl/main.py (both are named `main`).
     sys.path.insert(0, str(REPO_ROOT / "search-api"))
-    import main as search_api_main  # noqa: PLC0415
-    importlib.reload(search_api_main)
-    with TestClient(search_api_main.app) as client:
-        yield client
+    search_api_main = _load_module_from_file(
+        "search_api_main_for_e2e",
+        REPO_ROOT / "search-api/main.py",
+    )
+    try:
+        with TestClient(search_api_main.app) as client:
+            yield client
+    finally:
+        mp.undo()
+        # Restore the cached `main` to the ACL's main if any test
+        # downstream does `import main`.
+        sys.modules.pop("search_api_main_for_e2e", None)
 
 
 @pytest.fixture
@@ -197,21 +229,24 @@ def acl_client(search_api_test_client) -> Iterator:
 
     httpx 0.28's ASGITransport doesn't fire lifespan itself — but the
     search-api's lifespan was already triggered by the
-    `search_api_test_client` TestClient context manager (sets
-    `app.state.milvus`, `app.state.gate`, etc.). Since `app.state` is
-    shared across requests on the same app instance, our forwarded
-    calls see the populated state."""
+    `search_api_test_client` TestClient context manager. Since
+    `app.state` is shared across requests on the same app instance,
+    forwarded calls see the populated state."""
     from fastapi.testclient import TestClient
-    sys.path.insert(0, str(REPO_ROOT / "acl"))
-    import main as acl_main  # noqa: PLC0415
-    importlib.reload(acl_main)
-    with TestClient(acl_main.app, raise_server_exceptions=False) as c:
-        c.app.state.ftsearch._client = httpx.AsyncClient(  # type: ignore[attr-defined]
-            transport=httpx.ASGITransport(app=search_api_test_client.app),
-            base_url="http://search-api-stub",
-        )
-        c.app.state.ftsearch._default_collection = OFFERS  # type: ignore[attr-defined]
-        yield c
+    acl_main = _load_module_from_file(
+        "acl_main_for_e2e",
+        REPO_ROOT / "acl/main.py",
+    )
+    try:
+        with TestClient(acl_main.app, raise_server_exceptions=False) as c:
+            c.app.state.ftsearch._client = httpx.AsyncClient(  # type: ignore[attr-defined]
+                transport=httpx.ASGITransport(app=search_api_test_client.app),
+                base_url="http://search-api-stub",
+            )
+            c.app.state.ftsearch._default_collection = OFFERS  # type: ignore[attr-defined]
+            yield c
+    finally:
+        sys.modules.pop("acl_main_for_e2e", None)
 
 
 # ---- helpers ------------------------------------------------------------
