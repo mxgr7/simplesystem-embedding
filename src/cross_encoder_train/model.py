@@ -83,11 +83,22 @@ class CrossEncoderModule(L.LightningModule):
         if extra_token_count > 0:
             new_size = self.encoder.config.vocab_size + extra_token_count
             # mean_resizing=True (HF 5.x default) silently falls back to the
-            # centroid when the empirical covariance is degenerate, which it
-            # is here — all new rows end up identical (norm 0.29, pairwise
-            # cos≈1.0). Indistinguishable feature tokens stall training at
-            # the always-Exact attractor. Use noise init instead.
+            # centroid when the empirical covariance is degenerate — all new
+            # rows end up identical (norm 0.29, pairwise cos≈1.0), which
+            # stalls training at the always-Exact attractor. mean_resizing
+            # =False gives sigma=0.02 noise (norm ~0.65), distinguishable
+            # but too small vs existing ~2.26, so [CLS] attention barely
+            # sees them and they train far too slowly to converge in our
+            # screening budget. Rescale each new row to the mean L2 of
+            # existing rows: random direction + correct magnitude.
             self.encoder.resize_token_embeddings(new_size, mean_resizing=False)
+            with torch.no_grad():
+                emb = self.encoder.embeddings.word_embeddings.weight
+                existing = emb[: emb.size(0) - extra_token_count]
+                target_norm = existing.norm(dim=1).mean()
+                new_rows = emb[-extra_token_count:]
+                cur_norm = new_rows.norm(dim=1, keepdim=True).clamp_min(1e-9)
+                new_rows.mul_(target_norm / cur_norm)
         hidden_size = int(self.encoder.config.hidden_size)
         self.dropout = torch.nn.Dropout(float(cfg.model.head_dropout))
         self.classifier = torch.nn.Linear(
