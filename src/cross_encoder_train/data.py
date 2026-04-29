@@ -84,9 +84,14 @@ class CrossEncoderDataModule(LightningDataModule):
             return
 
         all_records, skipped_rows, skipped_unknown_label = self._prepare_records()
-        train_records, val_records, split_stats = self._split_records_by_query_id(
-            all_records
-        )
+        if self._split_column():
+            train_records, val_records, split_stats = (
+                self._split_records_by_assignment(all_records)
+            )
+        else:
+            train_records, val_records, split_stats = (
+                self._split_records_by_query_id(all_records)
+            )
 
         if not train_records:
             raise ValueError(
@@ -144,6 +149,8 @@ class CrossEncoderDataModule(LightningDataModule):
         if self.cfg.data.limit_rows:
             frame = frame.head(int(self.cfg.data.limit_rows))
 
+        split_column = self._split_column()
+
         columns = list(frame.columns)
         records = []
         skipped_rows = 0
@@ -168,18 +175,61 @@ class CrossEncoderDataModule(LightningDataModule):
                 if feature_tokens:
                     query_text = " ".join(feature_tokens) + " " + query_text
 
-            records.append(
-                {
-                    "query_id": base_record["query_id"],
-                    "offer_id": base_record["offer_id"],
-                    "query_text": query_text,
-                    "offer_text": base_record["offer_text"],
-                    "raw_label": raw_label,
-                    "label_id": encode_label(raw_label),
-                }
-            )
+            record = {
+                "query_id": base_record["query_id"],
+                "offer_id": base_record["offer_id"],
+                "query_text": query_text,
+                "offer_text": base_record["offer_text"],
+                "raw_label": raw_label,
+                "label_id": encode_label(raw_label),
+            }
+            if split_column:
+                raw_split = row.get(split_column, "")
+                record["split"] = (
+                    str(raw_split).strip().lower() if raw_split is not None else ""
+                )
+            records.append(record)
 
         return records, skipped_rows, skipped_unknown_label
+
+    def _split_column(self):
+        cfg = self.cfg.data
+        value = (
+            cfg.get("split_column", None) if hasattr(cfg, "get")
+            else getattr(cfg, "split_column", None)
+        )
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+    def _split_records_by_assignment(self, records):
+        train_records = []
+        val_records = []
+        skipped_other = 0
+        for record in records:
+            split_value = record.get("split", "")
+            if split_value == "train":
+                train_records.append(record)
+            elif split_value in ("val", "validation"):
+                val_records.append(record)
+            else:
+                skipped_other += 1
+
+        train_qids = {r["query_id"] for r in train_records}
+        val_qids = {r["query_id"] for r in val_records}
+
+        return (
+            train_records,
+            val_records,
+            {
+                "target_val_queries": len(val_qids),
+                "selected_val_queries": len(val_qids),
+                "connected_components": len(train_qids) + len(val_qids),
+                "split_assignment": True,
+                "skipped_other_split_rows": skipped_other,
+            },
+        )
 
     def _split_records_by_query_id(self, records):
         if not records:
