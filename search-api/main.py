@@ -75,6 +75,7 @@ from pymilvus import MilvusClient
 
 from embed_client import EmbedClient
 from filters import build_milvus_expr
+from milvus_helpers import BoundedMilvusClient
 from hybrid import Hit, Mode, SearchParams, run_search
 from models import (
     Article,
@@ -187,8 +188,13 @@ async def lifespan(app: FastAPI):
     milvus_uri = _required_env("MILVUS_URI")
     # Two clients per hybrid_v0.md "decoupled clients" — same URI, separate
     # connection state so future per-collection settings can diverge.
-    app.state.milvus = MilvusClient(milvus_uri)
-    app.state.codes_milvus = MilvusClient(milvus_uri)
+    # `BoundedMilvusClient` pins `consistency_level='Bounded'` on every
+    # read (search/query/get) per F7 §"Milvus consistency level" so a
+    # cluster-default change can't silently shift latency-sensitive
+    # reads to `Strong`. Writes (upsert/flush/has_collection/etc.)
+    # pass through unchanged.
+    app.state.milvus = BoundedMilvusClient(MilvusClient(milvus_uri))
+    app.state.codes_milvus = BoundedMilvusClient(MilvusClient(milvus_uri))
     app.state.codes_collection = os.environ.get(
         "MILVUS_CODES_COLLECTION", _DEFAULT_CODES_COLLECTION
     )
