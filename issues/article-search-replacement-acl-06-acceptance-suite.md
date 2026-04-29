@@ -6,6 +6,22 @@
 
 References: spec §10 in full.
 
+## Status
+
+🟡 **Partial — happy-path acceptance landed; per-filter / per-sort / per-aggregation expansion + captured-traffic smoke deferred.**
+
+Landed in commit `17ddc62`:
+  - End-to-end ACL → ftsearch → real Milvus via `httpx.ASGITransport` wiring the ACL TestClient to the real search-api app in-process.
+  - Fixture: sample_200 loaded into ephemeral `articles_v4_a6` + `offers_v5_a6` via the indexer's `load_split` (same code path production indexer runs).
+  - 7 §10 cases covered: schema compliance, articleId round-trip, explain stub both directions, dropped-enum rejection, score field dropped, ACL-internal metadata fields dropped.
+  - Surfaced + fixed one mapper bug (the customer-article-number fields ftsearch rejects but legacy carries — see A2 status update).
+
+Deferred:
+  - Per-filter narrowing tests (each §4.3 filter × one assertion). The existing `test_search_dedup_integration.py` already covers each filter against ftsearch directly; ACL pass-through expansion is mechanical.
+  - Per-sort × direction tests (§4.2). Same pattern.
+  - Per-aggregation correctness tests (§4.4).
+  - PostHog captured-traffic smoke run (requires PostHog credentials + live recording).
+
 **Fixture corpus** (locked): synthetic deterministic fixtures for §10 contract tests; **PostHog** (via `scripts/fetch_posthog_search_queries.py`) for the captured-traffic smoke run. Reference legacy aggregation fixtures at `next-gen/article/search/query/src/test/resources/articles_aggregations/` for shape/content inspiration where useful.
 
 ## Scope

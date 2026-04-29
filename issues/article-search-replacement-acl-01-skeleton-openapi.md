@@ -6,6 +6,10 @@
 
 References: spec §1, §2 (the deviations the OpenAPI must encode), §3 (verbatim contract).
 
+## Status
+
+✅ **Done** — commit `3aaac3d`. New `./acl/` directory with FastAPI app on port 8081 (`/healthz`, `/openapi.yaml`, `/metrics`, `POST /article-features/search` initially returned 501 stub, replaced by A2). Hand-authored OpenAPI 3.0 in `acl/openapi.yaml` encodes every §3 field and the §2 deviations (single-value `searchArticlesBy`, explanation stub, sort behavior). Wired into `playground-app/compose.yaml`. 8 unit tests cover healthz, openapi.yaml served + valid 3.0, schema invariants (single-value enum, pageSize cap, currency pattern, empty security).
+
 **Legacy reference** (next-gen): canonical legacy contract at `api-spec/specs/article-search/spec.yaml` (paths, error envelope at lines 246-278) and `query-search-api.yaml` (`SearchParams` lines 113-237 — defines `searchMode`, `searchArticlesBy`, all filters, sort, summaries). Health endpoint convention in legacy is Spring Boot Actuator (`/actuator/health`, `/actuator/prometheus`).
 
 ## Scope

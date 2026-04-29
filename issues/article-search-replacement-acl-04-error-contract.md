@@ -6,6 +6,10 @@
 
 References: spec §2.1 (rejection), §3.1 (envelope + table), §10 (acceptance lines).
 
+## Status
+
+✅ **Done** — commit `3c9ee10`. Three handlers on `acl/main.py`: `validation_error_handler` reshapes Pydantic 422 → legacy 400 `{message, details: ["field=<path>: <msg>", ...], timestamp}`; `http_error_handler` wraps explicit raises in the same envelope; `unhandled_error_handler` returns `{message: "Internal server error", details: []}` for any 5xx with NO traceback or internal-hostname leakage. Cross-field validator on `PriceFilter`: `currencyCode` required when `min` or `max` is set. 16 tests cover every dropped-enum value (`ALL_ATTRIBUTES`, `ARTICLE_NUMBER`, `CUSTOMER_ARTICLE_NUMBER`, `VENDOR_ARTICLE_NUMBER`, `EAN`, `TEST_PROFILE_01`, `TEST_PROFILE_20`), the cross-field rule both directions, and the no-leakage 5xx guarantee.
+
 **Legacy reference** (next-gen): error envelope schema at `api-spec/specs/article-search/spec.yaml:246-278` (`{message, details, timestamp}`, `details` is array of `{field, message}`). Dropped enum constants enumerated in `article/search/query/src/main/java/com/simplesystem/nextgen/article/search/query/api/ArticleSearchOperations.java:91-117` — full list to reject: `ALL_ATTRIBUTES`, `ARTICLE_NUMBER`, `CUSTOMER_ARTICLE_NUMBER`, `VENDOR_ARTICLE_NUMBER`, `EAN`, `TEST_PROFILE_01..20`.
 
 ## Scope

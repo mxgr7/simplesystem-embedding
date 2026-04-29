@@ -10,6 +10,19 @@ References: spec §4.7, §4.8, §9 #7, §9 #8.
 
 **Latency budget**: legacy SLO is **p99 < 5s, p50 < 1s**. Pick per-call timeouts so total request latency stays inside p99 even after the maximum-allowed retry chain.
 
+## Status
+
+✅ **Done** — landed across four commits:
+
+  * `9c9e073` — Bounded consistency. `BoundedMilvusClient` wraps every search/query/get with `consistency_level='Bounded'`; pass-through for writes.
+  * `4057488` — Per-call timeout (4s default) + exponential-backoff retry (5/500ms/1.5×/5s) on Milvus + embedder. Permanent errors (validation, 4xx) raise immediately; transient errors retry up to a 5s total budget.
+  * `6323a86` — RED metrics: `ftsearch_search_requests_total`, `_duration_seconds`, `_errors_total` broken out by sort × route × has_summaries. Counters for `_recall_clipped_total` and `_hitcount_clipped_total`.
+  * `b4198a9` — W3C trace-context middleware: parses `traceparent` + `baggage`, logs structured trace context per request, forwards `traceparent`/`tracestate`/baggage subset (`userId`, `companyId`, `customerOciSessionId`) to TEI on every outbound. Pymilvus pass-through skipped per spec hedge.
+
+Tests: 17 milvus_helpers + 6 embed_client + 10 metrics + 17 tracing.
+
+Caching deferred (optional per spec, low urgency).
+
 ## Scope
 
 The operational surface ftsearch needs once the capability work (F1..F6) is in. None of these change behaviour at the API surface — they make the service production-shaped under the resilience/observability requirements in §4.7.

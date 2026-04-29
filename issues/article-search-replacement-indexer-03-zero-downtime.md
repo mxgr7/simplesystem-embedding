@@ -11,6 +11,20 @@ References: spec §4.8, §6 (the bulk path is "first-time hydration, schema migr
 - Dual-write window: **bulk-start → alias-swap + 24 hours**, then dual-write stops. Rollback >24h after swap requires bulk re-import (I1), not an alias flip — document this prominently in the runbook.
 - New collection naming: **`offers_v{N}`** (versioned constants). Operator picks `N = current+1` and passes it to the reindex script.
 
+## Status
+
+🟡 **Partial — paired alias-swing CLI landed; full reindex orchestration deferred (depends on I2).**
+
+Landed in commit `0ab059f`:
+  - `scripts/swing_aliases.py` — single-command paired swap of `articles` + `offers` aliases per the F9 paired-swing protocol. Articles first, offers last (consumer-side last). Auto-rollback on second-swing failure. Explicit `--rollback-to` flag for post-cutover incidents.
+  - Pre-flight validation: existence + row count + `--join-key-sample` random offers verify their `article_hash` resolves in the target articles collection (catches join-key drift between the two streams cheaply).
+  - 5 e2e tests against live Milvus: dry-run leaves aliases untouched, happy-path swing, min-rows rejection, join-key drift rejection, explicit rollback.
+  - `indexer/bulk.py` flushes both collections at end of run so `get_collection_stats` returns current counts immediately — avoids a spurious "below --min-rows" rejection when the swing follows the indexer.
+
+Deferred (depend on I2 incremental):
+  - Reindex orchestration script (`scripts/indexer_reindex.py`) covering the full pipeline: create collections → run I1 bulk → instruct I2 to dual-write → validate → swing → drain dual-write window → drop old after soak.
+  - Operator runbook in `INDEX_HOSTING.md`.
+
 ## Scope
 
 The runbook + thin tooling for swinging the Milvus alias to a freshly-rebuilt collection without dropping search traffic. This is the legacy `@indexProperties.getName()` mechanism rebuilt around `MilvusClient.alter_alias`.

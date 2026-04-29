@@ -6,6 +6,10 @@
 
 References: spec §2.2 (explain stub), §3 (response shape), §4.4 (summary shapes), §9 #4 (articleId).
 
+## Status
+
+✅ **Done** — commit `3c9ee10` (committed alongside A4). `acl/mapping/response.py:map_response` drops `articles[].score`, injects `explanation = "N/A"` when the original request had `explain=true` (else key absent), drops `metadata.recallClipped` and `hitCountClipped` (ACL-internal observability fields not in legacy contract), passes summaries through unchanged. 9 unit tests cover each case; the integration suite (`test_acl_integration.py` + the e2e in `test_acl_acceptance_e2e.py`) exercises both `explain` paths against real ftsearch.
+
 **Legacy reference** (next-gen): response envelope in `api-spec/specs/article-search/spec.yaml`. `articleId` encode/decode in `article/search/commons/src/main/java/com/simplesystem/nextgen/article/search/commons/domain/ArticleId.java:22-37` — wire format `{friendlyId}:{base64Url(articleNumber)}` is byte-identical between ftsearch and the ACL response.
 
 ## Scope

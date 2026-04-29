@@ -6,6 +6,10 @@
 
 References: spec §4.7 (resilience table), §9 #7 (no auth).
 
+## Status
+
+✅ **Done** — commit `[A5]` (see git log; lands the same patterns F7 added to ftsearch). `acl/clients/ftsearch.py` retries on transient failures (5/500ms/1.5×/5s, 5s total budget); 4xx raises immediately. Per-call timeout `FTSEARCH_TIMEOUT_MS` (default 4500ms) sized to fit inside the legacy p99 SLO with ~500ms ACL headroom. `acl/tracing.py` mirrors `search-api/tracing.py` — middleware extracts traceparent + baggage subset, forwards on every retry attempt. `acl/metrics.py` adds `acl_ftsearch_call_duration_seconds{outcome}` histogram + `_retries_fired_total` + `_retries_exhausted_total` counters (bounded cardinality). 8 unit tests cover retry behaviour + tracing forwarding on every attempt + metrics emission.
+
 **Legacy reference** (next-gen): retry policy values in `article/search/query/src/main/resources/application.yml:91-94` (5 / 500ms / 1.5× / 5s). Tracing baggage W3C entries `userId`, `companyId`, `customerOciSessionId` from same file lines 56-60. Prometheus naming convention from `…/infrastructure/elastic/ElasticsearchMetrics.java` (namespace + `retries=` label tag for cardinality control).
 
 **Latency budget**: legacy SLO **p99 < 5s, p50 < 1s**. Default `FTSEARCH_TIMEOUT_MS=4500` (per call) leaves ~500ms ACL budget; reduce if the retry chain pushes p99 over.

@@ -6,6 +6,12 @@
 
 References: spec §3 (legacy request contract), §4.x (forwarding rules), §8 (cookbook).
 
+## Status
+
+✅ **Done** — commit `3e5e9b3`. `acl/models.py` has `LegacySearchRequest` matching the OpenAPI; `acl/mapping/request.py:map_request` is the pure mapper translating legacy → ftsearch (rename `queryString` → `query`, drop `searchArticlesBy` and `explain`, move page/pageSize/sort from body to query string, preserve currency two-roles). `acl/clients/ftsearch.py` is the async httpx client with default 4s timeout. The `/article-features/search` endpoint now does the full round-trip; upstream errors wrap in the legacy envelope. 13 mapper unit tests + 7 integration tests with `httpx.MockTransport`.
+
+A subsequent A6 run surfaced one mapper bug fixed in commit `17ddc62`: ftsearch's `SelectedArticleSources` rejects three legacy customer-article-number fields (the §2.1 enum collapse retired them). The mapper now strips them before forwarding.
+
 **Legacy reference** (next-gen): request shape `api-spec/specs/article-search/query-search-api.yaml` `SearchParams` (lines 113-237). `searchArticlesBy` enum at `article/search/query/src/main/java/com/simplesystem/nextgen/article/search/query/api/ArticleSearchOperations.java:91-117` (only `STANDARD` survives §2.1).
 
 ## Scope
