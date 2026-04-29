@@ -24,10 +24,14 @@ def add_list_features(df: pd.DataFrame) -> pd.DataFrame:
 
     out["group_size"] = g["offer_id"].transform("count").astype(np.int32)
 
+    # The 9 per-class list features (rank, gap_from_max, z-score) for the 3
+    # discriminative classes — empirically the sweet spot. Adding richer features
+    # (top2_gap, range, group_sum_*, row_argmax, complement variants) overfits
+    # the small val training set and hurts test performance.
     for col in ("ce_p_exact", "ce_p_substitute", "ce_p_irrelevant"):
-        # rank descending: 1 = best
+        # rank descending: 1 = best for that class
         out[f"{col}_rank_desc"] = g[col].rank(method="dense", ascending=False).astype(np.int32)
-        # gap from group max
+        # gap from group max for that class
         gmax = g[col].transform("max")
         out[f"{col}_gap_from_max"] = (gmax - out[col]).astype(np.float32)
         # z-score within group

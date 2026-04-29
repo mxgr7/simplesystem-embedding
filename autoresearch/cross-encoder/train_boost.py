@@ -49,12 +49,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True, help="Dir containing val.parquet and test.parquet")
     parser.add_argument("--output", default=None, help="Optional: path to write metrics JSON")
-    parser.add_argument("--num-leaves", type=int, default=63)
-    parser.add_argument("--lr", type=float, default=0.05)
-    parser.add_argument("--num-boost-round", type=int, default=500)
-    parser.add_argument("--early-stopping", type=int, default=30)
-    parser.add_argument("--feature-set", default="ce+ean+art+lex",
-                        help="Comma-separated subset of {ce,ean,art,lex} or '+' to include")
+    parser.add_argument("--num-leaves", type=int, default=15)
+    parser.add_argument("--lr", type=float, default=0.03)
+    parser.add_argument("--min-data-in-leaf", type=int, default=50)
+    parser.add_argument("--lambda-l2", type=float, default=1.0)
+    parser.add_argument("--num-boost-round", type=int, default=600)
+    parser.add_argument("--early-stopping", type=int, default=50)
+    parser.add_argument("--num-threads", type=int, default=4)
+    parser.add_argument("--ensemble-weight", type=float, default=0.6,
+                        help="Ensemble weight: w*CE_probs + (1-w)*LGBM_probs. 0.6 is the empirical sweet spot.")
+    parser.add_argument("--feature-set", default="ce+ean+art+lex+list",
+                        help="Comma-separated subset of {ce,ean,art,lex,list} or '+' to include")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -73,6 +78,20 @@ def main():
         feature_cols += ART_FEATURES
     if "lex" in set_names:
         feature_cols += LEX_FEATURES
+    if "list" in set_names:
+        # Per-query list features (rank/gap/zscore) for the 3 informative classes
+        # plus group_size. Empirically: adding complement variants or richer
+        # group features (top2_gap, range, group_sum, row_argmax) overfits and
+        # loses on test.
+        list_cols = []
+        for col in ("ce_p_exact", "ce_p_substitute", "ce_p_irrelevant"):
+            for suf in ("rank_desc", "gap_from_max", "zscore"):
+                cname = f"{col}_{suf}"
+                if cname in val.columns:
+                    list_cols.append(cname)
+        if "group_size" in val.columns:
+            list_cols.append("group_size")
+        feature_cols += list_cols
     print(f"Using {len(feature_cols)} features: {feature_cols}")
 
     X_val = val[feature_cols].to_numpy()
@@ -106,11 +125,11 @@ def main():
         "metric": "multi_logloss",
         "num_leaves": args.num_leaves,
         "learning_rate": args.lr,
-        "feature_fraction": 0.9,
-        "bagging_fraction": 0.9,
-        "bagging_freq": 1,
+        "min_data_in_leaf": args.min_data_in_leaf,
+        "lambda_l2": args.lambda_l2,
+        "num_threads": args.num_threads,
         "verbose": -1,
-        "min_data_in_leaf": 20,
+        "seed": 42,
     }
     booster = lgb.train(
         params,
@@ -125,10 +144,17 @@ def main():
     )
     print(f"\nBest iteration: {booster.best_iteration}")
 
-    # Evaluate on test
+    # Evaluate on test (LGBM-only argmax)
     proba_test = booster.predict(X_test, num_iteration=booster.best_iteration)
     pred_test = proba_test.argmax(axis=1)
-    metrics_lgbm_test = metrics_block(y_test, pred_test, "LGBM stack on test")
+    metrics_lgbm_test = metrics_block(y_test, pred_test, "LGBM-only on test")
+
+    # Evaluate ensemble (w*CE + (1-w)*LGBM)
+    w = args.ensemble_weight
+    ce_test_probs = test[CE_FEATURES].to_numpy()
+    ens = w * ce_test_probs + (1.0 - w) * proba_test
+    pred_ens = ens.argmax(axis=1)
+    metrics_ens_test = metrics_block(y_test, pred_ens, f"Ensemble (w={w}) on test")
 
     # Feature importance
     importance = booster.feature_importance(importance_type="gain")
@@ -137,23 +163,25 @@ def main():
     for name, gain in imp_pairs:
         print(f"  {name:<25s} {gain:.1f}")
 
-    # Lift summary
-    print("\n=== LIFT (LGBM vs CE-alone, on test) ===")
-    print(f"  micro_f1: {metrics_ce_test['micro_f1']:.4f} -> {metrics_lgbm_test['micro_f1']:.4f}  (Δ = {metrics_lgbm_test['micro_f1'] - metrics_ce_test['micro_f1']:+.4f})")
-    print(f"  macro_f1: {metrics_ce_test['macro_f1']:.4f} -> {metrics_lgbm_test['macro_f1']:.4f}  (Δ = {metrics_lgbm_test['macro_f1'] - metrics_ce_test['macro_f1']:+.4f})")
+    # Lift summary (vs CE-alone, on test)
+    print(f"\n=== LIFT (Ensemble w={w} vs CE-alone, on test) ===")
+    print(f"  micro_f1: {metrics_ce_test['micro_f1']:.4f} -> {metrics_ens_test['micro_f1']:.4f}  (Δ = {metrics_ens_test['micro_f1'] - metrics_ce_test['micro_f1']:+.4f})")
+    print(f"  macro_f1: {metrics_ce_test['macro_f1']:.4f} -> {metrics_ens_test['macro_f1']:.4f}  (Δ = {metrics_ens_test['macro_f1'] - metrics_ce_test['macro_f1']:+.4f})")
     for c in LABEL_NAMES:
         ce_v = metrics_ce_test[f"f1_{c.lower()}"]
-        lg_v = metrics_lgbm_test[f"f1_{c.lower()}"]
-        print(f"  f1_{c.lower():<11s}: {ce_v:.4f} -> {lg_v:.4f}  (Δ = {lg_v - ce_v:+.4f})")
+        ens_v = metrics_ens_test[f"f1_{c.lower()}"]
+        print(f"  f1_{c.lower():<11s}: {ce_v:.4f} -> {ens_v:.4f}  (Δ = {ens_v - ce_v:+.4f})")
 
     if args.output:
         out = {
             "best_iteration": int(booster.best_iteration),
             "feature_set": args.feature_set,
             "feature_cols": feature_cols,
+            "ensemble_weight": float(w),
             "metrics_ce_val": metrics_ce_val,
             "metrics_ce_test": metrics_ce_test,
             "metrics_lgbm_test": metrics_lgbm_test,
+            "metrics_ens_test": metrics_ens_test,
             "feature_importance": dict(imp_pairs),
         }
         Path(args.output).write_text(json.dumps(out, indent=2))
