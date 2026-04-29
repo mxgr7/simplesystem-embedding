@@ -2,7 +2,8 @@
 
 Top-level orchestrator that wires the DuckDB-native projection +
 aggregation (`indexer.duckdb_projection`) to TEI batched embedding with
-a Redis cache (`indexer.tei_cache`) and paired Milvus upserts.
+a Redis cache (`indexer.tei_cache`) and paired Milvus writes (upsert
+or bulk-insert).
 
 Pipeline:
 
@@ -14,8 +15,18 @@ Pipeline:
     cans/*.json.gz     ─┘  +  per-row projection
                               +  per-hash aggregation     ┐
                                   ▼                         │
-                              `articles` table  ──── batch  ┼─► embed_articles ─► upsert
-                              `offer_rows` table ── batch  ─┴───────────────────► upsert
+                              `articles` table  ──── batch  ┼─► embed_articles ─► sink
+                              `offer_rows` table ── batch  ─┴───────────────────► sink
+
+Two sink modes — pick via `sink_mode` ("upsert" or "bulk_insert"):
+
+  * "upsert" (default): per-batch `MilvusClient.upsert(data=...)`. Slow
+    but per-row idempotent and queryable immediately. Right for smoke
+    runs and small collections.
+  * "bulk_insert": stage all rows to parquet + MinIO/S3, submit
+    `do_bulk_insert` jobs. ~50–100K rows/sec vs ~800/sec for upsert.
+    Right for production-scale reindex (159M articles + 510M offers).
+    See `indexer.bulk_insert`.
 
 The DuckDB stage stages everything to disk-spill (`duckdb` temp dir),
 so a 510M-offer / 158 GB dataset fits a 1 TB NVMe scratch box. Article
@@ -53,6 +64,14 @@ import duckdb
 import redis
 from pymilvus import MilvusClient
 
+from indexer.bulk_insert import (
+    BulkInsertConfig,
+    BulkInsertStats,
+    submit_and_wait_bulk_insert,
+    upload_to_s3,
+    write_articles_parquet,
+    write_offers_parquet,
+)
 from indexer.duckdb_projection import (
     _build_articles_sql,
     _build_offers_sql,
@@ -79,6 +98,12 @@ class BulkRunStats:
     duckdb_seconds: float = 0.0
     total_seconds: float = 0.0
     tei: TEICacheStats = field(default_factory=TEICacheStats)
+    # Populated only on `sink_mode='bulk_insert'`. The upsert path
+    # leaves these zeroed out — the upsert wall time is in
+    # `article_upsert_seconds` / `offer_upsert_seconds` for both modes
+    # so the end-of-run summary stays comparable.
+    articles_bulk_insert: BulkInsertStats = field(default_factory=BulkInsertStats)
+    offers_bulk_insert: BulkInsertStats = field(default_factory=BulkInsertStats)
 
 
 def _connect_duckdb(
@@ -210,6 +235,109 @@ def _upsert_offers(
     return time.time() - t0
 
 
+def _bulk_insert_articles(
+    *,
+    con: duckdb.DuckDBPyConnection,
+    milvus_uri: str,
+    collection: str,
+    cache: TEICache,
+    batch_size: int,
+    cfg: BulkInsertConfig,
+) -> tuple[float, BulkInsertStats]:
+    """Bulk-insert variant of `_upsert_articles`. Streams DuckDB →
+    TEI cache → fp16 vectors → parquet on local stage dir →
+    MinIO/S3 → Milvus `do_bulk_insert`. The parquet writer flushes
+    each batch as a row group so no batch is held entirely in memory.
+
+    Returns `(wall_seconds, stats)`."""
+    cfg.stage_dir.mkdir(parents=True, exist_ok=True)
+    parquet_path = cfg.stage_dir / "articles.parquet"
+    s3_key = f"{cfg.s3_prefix}/articles.parquet"
+    out = BulkInsertStats()
+
+    def _embed_and_emit() -> Iterator[list[dict]]:
+        """Inner generator: pull a batch from DuckDB, attach embeddings,
+        yield it for the parquet writer."""
+        for batch in _iter_relation_dicts(con, "articles", batch_size):
+            embeddings = cache.embed_articles(batch)
+            for row in batch:
+                row["offer_embedding"] = embeddings[row["article_hash"]]
+            log.info(
+                "  articles staged: +%d  (cache hits=%d misses=%d)",
+                len(batch), cache.stats.hits, cache.stats.misses,
+            )
+            yield batch
+
+    t0 = time.time()
+    out.rows_written, out.parquet_bytes = write_articles_parquet(
+        _embed_and_emit(), parquet_path,
+        compression=cfg.parquet_compression,
+        compression_level=cfg.parquet_compression_level,
+    )
+    out.write_seconds = time.time() - t0
+    log.info(
+        "  articles parquet: %d rows, %.2f GB at %s",
+        out.rows_written, out.parquet_bytes / 1e9, parquet_path,
+    )
+
+    t0 = time.time()
+    upload_to_s3(parquet_path, cfg=cfg, key=s3_key)
+    out.upload_seconds = time.time() - t0
+    log.info("  articles uploaded → s3://%s/%s in %.1fs", cfg.s3_bucket, s3_key, out.upload_seconds)
+
+    rows_imported, out.bulk_insert_seconds = submit_and_wait_bulk_insert(
+        milvus_uri=milvus_uri, collection=collection, s3_keys=[s3_key], cfg=cfg,
+    )
+    log.info("  articles bulk_insert imported %d rows in %.1fs", rows_imported, out.bulk_insert_seconds)
+    parquet_path.unlink(missing_ok=True)
+    return time.time() - t0 + out.write_seconds, out
+
+
+def _bulk_insert_offers(
+    *,
+    con: duckdb.DuckDBPyConnection,
+    milvus_uri: str,
+    collection: str,
+    batch_size: int,
+    cfg: BulkInsertConfig,
+) -> tuple[float, BulkInsertStats]:
+    """Bulk-insert variant of `_upsert_offers`. No embedding step —
+    offer rows already carry their `_placeholder_vector` from the SQL."""
+    cfg.stage_dir.mkdir(parents=True, exist_ok=True)
+    parquet_path = cfg.stage_dir / "offers.parquet"
+    s3_key = f"{cfg.s3_prefix}/offers.parquet"
+    out = BulkInsertStats()
+
+    def _emit() -> Iterator[list[dict]]:
+        for batch in _iter_relation_dicts(con, "offer_rows", batch_size):
+            log.info("  offers staged: +%d", len(batch))
+            yield batch
+
+    t0 = time.time()
+    out.rows_written, out.parquet_bytes = write_offers_parquet(
+        _emit(), parquet_path,
+        compression=cfg.parquet_compression,
+        compression_level=cfg.parquet_compression_level,
+    )
+    out.write_seconds = time.time() - t0
+    log.info(
+        "  offers parquet: %d rows, %.2f GB at %s",
+        out.rows_written, out.parquet_bytes / 1e9, parquet_path,
+    )
+
+    t0 = time.time()
+    upload_to_s3(parquet_path, cfg=cfg, key=s3_key)
+    out.upload_seconds = time.time() - t0
+    log.info("  offers uploaded → s3://%s/%s in %.1fs", cfg.s3_bucket, s3_key, out.upload_seconds)
+
+    rows_imported, out.bulk_insert_seconds = submit_and_wait_bulk_insert(
+        milvus_uri=milvus_uri, collection=collection, s3_keys=[s3_key], cfg=cfg,
+    )
+    log.info("  offers bulk_insert imported %d rows in %.1fs", rows_imported, out.bulk_insert_seconds)
+    parquet_path.unlink(missing_ok=True)
+    return time.time() - t0 + out.write_seconds, out
+
+
 def run_bulk_indexer(
     *,
     # Source — globs / S3 prefixes for each collection
@@ -231,12 +359,21 @@ def run_bulk_indexer(
     duckdb_temp_dir: str | None = None,
     duckdb_temp_dir_limit_gb: int = 500,
     s3_region: str | None = "eu-central-1",
+    # Sink — "upsert" (default, per-row) or "bulk_insert" (parquet → MinIO →
+    # `do_bulk_insert`). Production-scale runs need bulk_insert; smoke runs
+    # leave it on upsert for queryable-immediately semantics.
+    sink_mode: str = "upsert",
+    bulk_insert: BulkInsertConfig | None = None,
 ) -> BulkRunStats:
     """End-to-end bulk indexer entry point.
 
     The CLI (`scripts/indexer_bulk.py`) is a thin argparse wrapper
     around this — call this from a notebook or a parent driver if you
     want programmatic control over batch sizes."""
+    if sink_mode not in ("upsert", "bulk_insert"):
+        raise ValueError(f"sink_mode must be 'upsert' or 'bulk_insert', got {sink_mode!r}")
+    if sink_mode == "bulk_insert" and bulk_insert is None:
+        bulk_insert = BulkInsertConfig()
     wall_t0 = time.time()
     stats = BulkRunStats()
 
@@ -292,29 +429,49 @@ def run_bulk_indexer(
     redis_client = redis.Redis.from_url(redis_url)
     redis_client.ping()  # fail-fast if Redis is unreachable
 
-    log.info("Phase 1: upserting %d article rows (TEI batch=%d)…",
-             stats.article_count, tei_batch_size)
+    log.info("Phase 1: writing %d article rows via %s (TEI batch=%d)…",
+             stats.article_count, sink_mode, tei_batch_size)
     with TEICache(
         tei_url=tei_url,
         redis_client=redis_client,
         tei_batch_size=tei_batch_size,
     ) as cache:
-        stats.article_upsert_seconds = _upsert_articles(
-            con=con,
-            milvus=milvus,
-            collection=articles_collection,
-            cache=cache,
-            batch_size=article_batch_size,
-        )
+        if sink_mode == "upsert":
+            stats.article_upsert_seconds = _upsert_articles(
+                con=con,
+                milvus=milvus,
+                collection=articles_collection,
+                cache=cache,
+                batch_size=article_batch_size,
+            )
+        else:
+            stats.article_upsert_seconds, stats.articles_bulk_insert = _bulk_insert_articles(
+                con=con,
+                milvus_uri=milvus_uri,
+                collection=articles_collection,
+                cache=cache,
+                batch_size=article_batch_size,
+                cfg=bulk_insert,    # type: ignore[arg-type]
+            )
         stats.tei = cache.stats
 
-    log.info("Phase 2: upserting %d offer rows (no embedding)…", stats.offer_row_count)
-    stats.offer_upsert_seconds = _upsert_offers(
-        con=con,
-        milvus=milvus,
-        collection=offers_collection,
-        batch_size=offer_batch_size,
-    )
+    log.info("Phase 2: writing %d offer rows via %s (no embedding)…",
+             stats.offer_row_count, sink_mode)
+    if sink_mode == "upsert":
+        stats.offer_upsert_seconds = _upsert_offers(
+            con=con,
+            milvus=milvus,
+            collection=offers_collection,
+            batch_size=offer_batch_size,
+        )
+    else:
+        stats.offer_upsert_seconds, stats.offers_bulk_insert = _bulk_insert_offers(
+            con=con,
+            milvus_uri=milvus_uri,
+            collection=offers_collection,
+            batch_size=offer_batch_size,
+            cfg=bulk_insert,    # type: ignore[arg-type]
+        )
 
     stats.total_seconds = time.time() - wall_t0
     log.info(

@@ -44,6 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from indexer.bulk import run_bulk_indexer  # noqa: E402
+from indexer.bulk_insert import BulkInsertConfig  # noqa: E402
 
 # Mongo Atlas snapshot collection names — these become the per-collection
 # subdirectory under both the S3 base and any local cache.
@@ -129,7 +130,34 @@ def main() -> None:
                            "Bump for full-catalog runs (158 GB offers + 28 GB pricings, "
                            "uncompressed factor ~3-4×).")
     tune.add_argument("--s3-region", default="eu-central-1",
-                      help="S3 region for the credential_chain secret. Ignored on --local-cache runs.")
+                      help="S3 region for the credential_chain secret on the SOURCE side "
+                           "(reading raw shards). Ignored on --local-cache runs. The MinIO "
+                           "sink uses --bulk-insert-s3-* flags below instead.")
+
+    sink = p.add_argument_group(
+        "Sink mode",
+        "Default 'upsert' is per-row idempotent + queryable immediately (right for smoke "
+        "runs and small collections). 'bulk_insert' stages a parquet to MinIO and submits "
+        "do_bulk_insert — ~50–100K rows/sec vs ~800/sec for upsert (right for a full reindex).",
+    )
+    sink.add_argument("--sink-mode", choices=["upsert", "bulk_insert"], default="upsert",
+                      help="How to write to Milvus (default 'upsert').")
+    sink.add_argument("--bulk-insert-s3-endpoint", default="http://localhost:9000",
+                      help="MinIO/S3 endpoint URL for the parquet staging bucket "
+                           "(default localhost:9000 = local docker-compose MinIO).")
+    sink.add_argument("--bulk-insert-s3-bucket", default="a-bucket",
+                      help="S3 bucket for staged parquets (default 'a-bucket' — Milvus's "
+                           "default MinIO bucket).")
+    sink.add_argument("--bulk-insert-s3-prefix", default="f9_indexer",
+                      help="Key prefix under the bucket. Default 'f9_indexer'.")
+    sink.add_argument("--bulk-insert-s3-access-key", default="minioadmin",
+                      help="S3 access key (default 'minioadmin').")
+    sink.add_argument("--bulk-insert-s3-secret-key", default="minioadmin",
+                      help="S3 secret key (default 'minioadmin').")
+    sink.add_argument("--bulk-insert-stage-dir", default="/tmp/f9_indexer_stage",
+                      help="Local directory for parquet staging before upload "
+                           "(default /tmp/f9_indexer_stage). Sized to hold the full "
+                           "articles + offers parquets — at production scale ~60 GB.")
 
     p.add_argument("--log-level", default="INFO",
                    help="Python logging level (default INFO).")
@@ -142,6 +170,18 @@ def main() -> None:
     )
 
     globs = _build_globs(args)
+
+    bulk_cfg = None
+    if args.sink_mode == "bulk_insert":
+        bulk_cfg = BulkInsertConfig(
+            s3_endpoint=args.bulk_insert_s3_endpoint,
+            s3_bucket=args.bulk_insert_s3_bucket,
+            s3_prefix=args.bulk_insert_s3_prefix,
+            s3_access_key=args.bulk_insert_s3_access_key,
+            s3_secret_key=args.bulk_insert_s3_secret_key,
+            stage_dir=Path(args.bulk_insert_stage_dir),
+        )
+
     stats = run_bulk_indexer(
         offers_glob=globs["offers_glob"],
         pricings_glob=globs["pricings_glob"],
@@ -158,6 +198,8 @@ def main() -> None:
         duckdb_temp_dir=args.duckdb_temp_dir,
         duckdb_temp_dir_limit_gb=args.duckdb_temp_dir_limit_gb,
         s3_region=args.s3_region,
+        sink_mode=args.sink_mode,
+        bulk_insert=bulk_cfg,
     )
 
     print()
@@ -179,6 +221,17 @@ def main() -> None:
     if stats.article_count:
         hit_rate = stats.tei.hits / stats.article_count
         print(f"    hit rate:    {hit_rate:>12.1%}")
+
+    if args.sink_mode == "bulk_insert":
+        for label, b in (("articles", stats.articles_bulk_insert),
+                         ("offers",   stats.offers_bulk_insert)):
+            print()
+            print(f"  bulk_insert ({label}):")
+            print(f"    rows:           {b.rows_written:>12,}")
+            print(f"    parquet size:   {b.parquet_bytes / 1e9:>10.2f} GB")
+            print(f"    parquet write:  {b.write_seconds:>10.1f}s")
+            print(f"    upload:         {b.upload_seconds:>10.1f}s")
+            print(f"    bulk_insert:    {b.bulk_insert_seconds:>10.1f}s")
 
 
 if __name__ == "__main__":
