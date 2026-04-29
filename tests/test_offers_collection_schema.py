@@ -34,6 +34,13 @@ ALIAS = "offers_v_alias"
 # Per-offer scope after the F9 split. Article-level fields (name,
 # manufacturerName, categories, eclass codes, s2class codes) live on
 # `articles_v{N}` — see `test_articles_collection_schema.py`.
+#
+# F8 per-offer envelope columns (`price_list_ids`, `currencies`,
+# `{ccy}_price_min/max`) live here — Path B's bounded probe pushes
+# price-list / currency / range pre-filters down via these columns
+# instead of a full-collection scan + JSON post-pass.
+CATALOG_CURRENCIES = ("eur", "chf", "huf", "pln", "gbp", "czk", "cny")
+
 EXPECTED_FIELDS = {
     "id", "_placeholder_vector",
     "article_hash",
@@ -43,6 +50,9 @@ EXPECTED_FIELDS = {
     "core_marker_enabled_sources", "core_marker_disabled_sources",
     "features",
     "relationship_accessory_for", "relationship_spare_part_for", "relationship_similar_to",
+    # F8 envelope:
+    "price_list_ids", "currencies",
+    *(f"{c}_price_{s}" for c in CATALOG_CURRENCIES for s in ("min", "max")),
 }
 EXPECTED_SCALAR_INDEXES = {
     "article_hash",
@@ -51,6 +61,7 @@ EXPECTED_SCALAR_INDEXES = {
     "core_marker_enabled_sources", "core_marker_disabled_sources",
     "relationship_accessory_for", "relationship_spare_part_for", "relationship_similar_to",
     "ean", "article_number",
+    "price_list_ids", "currencies",
 }
 
 # Article-level fields present in the legacy fixture; stripped before
@@ -79,14 +90,27 @@ def fixture_rows() -> list[dict]:
 
 def _to_offers_row(row: dict) -> dict:
     """Strip article-level fields and metadata, add the F9 placeholder
-    vector + a synthetic article_hash. The hash function lands in F9 PR2;
-    here it's a stable placeholder derived from the PK."""
+    vector + a synthetic article_hash + sentinel F8 envelope columns.
+    The schema rejects rows missing any column (`enable_dynamic_field=False`),
+    so the F8 envelope cells must be present even on this schema smoke
+    where the actual envelope content is irrelevant — only the PK
+    round-trip is being validated."""
     out = {
         k: v for k, v in row.items()
         if not k.startswith("_") and k != "vector_seed" and k not in ARTICLE_LEVEL_KEYS
     }
     out["_placeholder_vector"] = [0.0, 0.0]
     out["article_hash"] = f"{abs(hash(row['id'])):032x}"[:32]
+    # F8 envelope sentinels: empty arrays + ±MAX_PRICE_SENTINEL pair so
+    # range predicates naturally exclude these stub rows from any real
+    # filter. Mirrors `indexer.projection._offer_envelope` for the empty
+    # case; values from the projection are tested in the parity suite.
+    out["price_list_ids"] = []
+    out["currencies"] = []
+    sentinel = 3.4028234663852886e38
+    for ccy in CATALOG_CURRENCIES:
+        out[f"{ccy}_price_min"] = sentinel
+        out[f"{ccy}_price_max"] = -sentinel
     return out
 
 
