@@ -38,6 +38,7 @@ from acl.clients.ftsearch import FtsearchClient
 from acl.mapping.request import map_request
 from acl.mapping.response import map_response
 from acl.models import LegacySearchRequest
+from acl.tracing import extract_trace_context, log_request_context
 
 BASE_DIR = Path(__file__).resolve().parent
 OPENAPI_YAML_PATH = BASE_DIR / "openapi.yaml"
@@ -107,6 +108,20 @@ async def openapi_yaml() -> Response:
     return Response(content=_OPENAPI_YAML_TEXT, media_type="application/yaml")
 
 
+@app.middleware("http")
+async def trace_context(request: Request, call_next):
+    """A5 — extract W3C trace context + propagated baggage from the
+    inbound request, stash it on `request.state.trace_ctx` so the
+    /article-features/search handler can forward it to ftsearch.
+    Same shape as `search-api/main.py:trace_context`."""
+    if request.url.path in {"/healthz", "/openapi.yaml", "/metrics", "/docs", "/redoc"}:
+        return await call_next(request)
+    ctx = extract_trace_context(dict(request.headers))
+    request.state.trace_ctx = ctx
+    log_request_context(ctx, route=request.url.path)
+    return await call_next(request)
+
+
 # Metrics endpoint via prometheus-fastapi-instrumentator. Note: per
 # packet A1 spec, /metrics should run on a SEPARATE uvicorn instance
 # on port 9090. The MVP exposes it on the app port too — operators
@@ -148,9 +163,15 @@ async def search(
         body, page=page, page_size=page_size, sort=sort,
     )
     client: FtsearchClient = request.app.state.ftsearch
+    # Forward the trace headers to ftsearch so its logs share the
+    # same trace_id. Absence is fine — `getattr` falls back to None.
+    trace_ctx = getattr(request.state, "trace_ctx", None)
+    forward_headers = trace_ctx.headers_for_forwarding() if trace_ctx else None
     try:
         ftsearch_body = await client.search(
-            ftsearch_request.body, params=ftsearch_request.params,
+            ftsearch_request.body,
+            params=ftsearch_request.params,
+            headers=forward_headers,
         )
     except httpx.HTTPStatusError as exc:
         # ftsearch returned 4xx or 5xx — wrap in the legacy envelope.
