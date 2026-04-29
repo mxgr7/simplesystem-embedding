@@ -81,6 +81,7 @@ class CrossEncoderModule(L.LightningModule):
             hidden_size, NUM_CLASSES, dtype=self.model_dtype
         )
         self.label_smoothing = float(cfg.model.label_smoothing)
+        self.focal_gamma = float(cfg.model.get("focal_gamma", 0.0))
         self.use_class_weights = bool(cfg.model.use_class_weights)
         self.register_buffer(
             "class_weights",
@@ -130,6 +131,15 @@ class CrossEncoderModule(L.LightningModule):
 
     def compute_loss(self, logits, labels):
         weight = self.class_weights if self.use_class_weights else None
+        if self.focal_gamma > 0.0:
+            log_probs = F.log_softmax(logits.float(), dim=-1)
+            log_pt = log_probs.gather(1, labels.unsqueeze(1)).squeeze(1)
+            pt = log_pt.exp()
+            focal_weight = (1.0 - pt).pow(self.focal_gamma)
+            loss = -focal_weight * log_pt
+            if weight is not None:
+                loss = loss * weight[labels]
+            return loss.mean()
         return F.cross_entropy(
             logits.float(),
             labels,

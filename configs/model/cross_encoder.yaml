@@ -1,6 +1,7 @@
 model_name: deepset/gelectra-large
 head_dropout: 0.1
 label_smoothing: 0.0
+focal_gamma: 2.0
 use_class_weights: false
 gradient_checkpointing: false
 compile: true
