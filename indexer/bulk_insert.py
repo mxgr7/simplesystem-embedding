@@ -6,17 +6,24 @@ upstream; the difference is the Milvus sink:
   - upsert path:   `MilvusClient.upsert(data=batch)` per batch.
                    Slow (~800 rows/sec) but per-row idempotent and
                    queryable immediately.
-  - bulk-insert:   stage all rows to a parquet file, upload to MinIO,
-                   submit one `do_bulk_insert` job per file. Throughput
-                   ~50–100K rows/sec; rows visible only after the
-                   server finishes its `PreImport → Import → Sort →
-                   IndexBuilding` pipeline.
+  - bulk-insert:   stage chunked parquets to MinIO, submit one
+                   `do_bulk_insert` per chunk (parallel via thread
+                   pool). Throughput ~50–100K rows/sec aggregate; rows
+                   visible only after the server finishes its
+                   `PreImport → Import → Sort → IndexBuilding` pipeline.
 
 At F9 production scale (159M articles + 510M offers) the upsert path
 is ~10 days of Milvus-side work; bulk-insert collapses that to ~2h.
 The two paths share the same row-emission code — we wrap the
 DuckDB-fed `_iter_relation_dicts` stream into parquet writers per
 collection rather than into per-batch Milvus calls.
+
+Pipelining: `stream_chunks_to_milvus` produces chunk parquets one at
+a time and hands each to a `ThreadPoolExecutor` for upload + submit.
+Chunk N+1 stages while chunk N is still uploading or being ingested
+server-side, so the wall time is roughly `max(stage, upload+submit)`
+rather than their sum. Mirrors the pipelining trick from
+`scripts/milvus_bulk_import.py:stage_and_submit`.
 
 Encoding rules (pinned by Milvus 2.6 bulk-insert format):
   - `FLOAT16_VECTOR` columns → `LIST<UINT8>` of raw fp16 bytes
@@ -47,6 +54,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -68,7 +76,15 @@ DIM = 128  # `articles_v{N}.offer_embedding` dim, per create_articles_collection
 @dataclass
 class BulkInsertConfig:
     """All knobs for the bulk-insert sink. Defaults match the local
-    docker-compose MinIO at `localhost:9000` (see `playground-app/compose.yaml`)."""
+    docker-compose MinIO at `localhost:9000` (see `playground-app/compose.yaml`).
+
+    Chunking + parallelism: parquet output is split at `chunk_rows`
+    per file. `upload_workers` threads upload + submit chunks
+    concurrently, so chunk N+1's upload can overlap with chunk N's
+    server-side `do_bulk_insert` pipeline. At production scale the
+    serial path is upload-bound (single-stream MinIO at ~200 MB/s);
+    `upload_workers=4` saturates a 1 GbE link without exhausting MinIO.
+    Tune up if MinIO is on a 10 GbE link."""
     s3_endpoint: str = "http://localhost:9000"
     s3_bucket: str = "a-bucket"
     s3_prefix: str = "f9_indexer"
@@ -80,6 +96,8 @@ class BulkInsertConfig:
     parquet_compression_level: int = 1
     write_batch_rows: int = 100_000
     poll_interval_s: float = 5.0
+    chunk_rows: int = 1_000_000
+    upload_workers: int = 4
 
 
 @dataclass
@@ -244,45 +262,109 @@ def _offers_batch_to_arrow(batch: list[dict]) -> pa.RecordBatch:
 
 # ---------- writers -------------------------------------------------------
 
-def write_articles_parquet(
+# Type alias for a "row converter" — turns one orchestrator batch
+# (list of DuckDB dicts) into one parquet RecordBatch with the right
+# column types. Lets `_write_chunked` stay schema-agnostic.
+from typing import Callable
+
+_BatchConverter = Callable[[list[dict]], pa.RecordBatch]
+
+
+def _write_chunked(
     batches: Iterator[list[dict]],
-    out_path: Path,
     *,
+    stage_dir: Path,
+    name_template: str,
+    schema: pa.Schema,
+    convert: _BatchConverter,
+    chunk_rows: int,
     compression: str,
     compression_level: int,
-) -> tuple[int, int]:
-    """Write one parquet file from an iterator of article batches.
-    Returns `(rows_written, file_size_bytes)`."""
-    schema = articles_parquet_schema()
-    rows = 0
-    with pq.ParquetWriter(out_path, schema, compression=compression,
-                          compression_level=compression_level) as w:
-        for batch in batches:
-            if not batch:
-                continue
-            w.write_batch(_articles_batch_to_arrow(batch))
-            rows += len(batch)
-    return rows, out_path.stat().st_size
+) -> Iterator[tuple[Path, int, int]]:
+    """Stream parquet output as a sequence of `(path, rows, bytes)` chunks.
+
+    A new chunk file opens whenever the in-flight writer reaches
+    `chunk_rows`. The last chunk may be smaller. Yields each chunk the
+    moment it closes — callers can pipeline upload/submit while the
+    next chunk stages.
+
+    `name_template` should contain a `{idx:04d}` placeholder, e.g.
+    `articles.{idx:04d}.parquet`."""
+    chunk_idx = 0
+    rows_in_chunk = 0
+    writer: pq.ParquetWriter | None = None
+    path: Path | None = None
+
+    def _open() -> tuple[Path, pq.ParquetWriter]:
+        p = stage_dir / name_template.format(idx=chunk_idx)
+        return p, pq.ParquetWriter(
+            p, schema,
+            compression=compression,
+            compression_level=compression_level,
+        )
+
+    for batch in batches:
+        if not batch:
+            continue
+        if writer is None:
+            path, writer = _open()
+            rows_in_chunk = 0
+        writer.write_batch(convert(batch))
+        rows_in_chunk += len(batch)
+        if rows_in_chunk >= chunk_rows:
+            writer.close()
+            assert path is not None
+            yield path, rows_in_chunk, path.stat().st_size
+            chunk_idx += 1
+            writer, path, rows_in_chunk = None, None, 0
+
+    if writer is not None and path is not None:
+        writer.close()
+        yield path, rows_in_chunk, path.stat().st_size
+
+
+def write_articles_parquet(
+    batches: Iterator[list[dict]],
+    *,
+    stage_dir: Path,
+    chunk_rows: int,
+    compression: str,
+    compression_level: int,
+) -> Iterator[tuple[Path, int, int]]:
+    """Articles parquet writer. Yields one `(path, rows, bytes)` per
+    chunk as it closes."""
+    yield from _write_chunked(
+        batches,
+        stage_dir=stage_dir,
+        name_template="articles.{idx:04d}.parquet",
+        schema=articles_parquet_schema(),
+        convert=_articles_batch_to_arrow,
+        chunk_rows=chunk_rows,
+        compression=compression,
+        compression_level=compression_level,
+    )
 
 
 def write_offers_parquet(
     batches: Iterator[list[dict]],
-    out_path: Path,
     *,
+    stage_dir: Path,
+    chunk_rows: int,
     compression: str,
     compression_level: int,
-) -> tuple[int, int]:
-    """Write one parquet file from an iterator of offer batches."""
-    schema = offers_parquet_schema()
-    rows = 0
-    with pq.ParquetWriter(out_path, schema, compression=compression,
-                          compression_level=compression_level) as w:
-        for batch in batches:
-            if not batch:
-                continue
-            w.write_batch(_offers_batch_to_arrow(batch))
-            rows += len(batch)
-    return rows, out_path.stat().st_size
+) -> Iterator[tuple[Path, int, int]]:
+    """Offers parquet writer. Yields one `(path, rows, bytes)` per
+    chunk as it closes."""
+    yield from _write_chunked(
+        batches,
+        stage_dir=stage_dir,
+        name_template="offers.{idx:04d}.parquet",
+        schema=offers_parquet_schema(),
+        convert=_offers_batch_to_arrow,
+        chunk_rows=chunk_rows,
+        compression=compression,
+        compression_level=compression_level,
+    )
 
 
 # ---------- MinIO upload + Milvus submit ----------------------------------
@@ -294,6 +376,113 @@ def upload_to_s3(local: Path, *, cfg: BulkInsertConfig, key: str) -> None:
     client.upload_file(str(local), cfg.s3_bucket, key)
 
 
+def _ensure_milvus_connection(milvus_uri: str) -> None:
+    """`do_bulk_insert` lives on the legacy `pymilvus.utility` API which
+    uses the global `connections` registry. `connections.connect` is
+    idempotent on the same alias, so it's safe to call repeatedly from
+    background threads."""
+    if "://" in milvus_uri:
+        _scheme, _, hostport = milvus_uri.partition("://")
+    else:
+        hostport = milvus_uri
+    host, _, port = hostport.partition(":")
+    connections.connect(alias="default", host=host or "localhost", port=port or "19530")
+
+
+def stream_chunks_to_milvus(
+    chunks: Iterator[tuple[Path, int, int]],
+    *,
+    milvus_uri: str,
+    collection: str,
+    cfg: BulkInsertConfig,
+    on_chunk_done: Callable[[Path, int, int, int], None] | None = None,
+) -> tuple[int, BulkInsertStats]:
+    """Pipelined upload + `do_bulk_insert` over a chunk-yielding writer.
+
+    For each `(path, rows, bytes)` produced by the writer:
+      1. Submit the chunk to a worker thread that uploads it to MinIO,
+         then calls `utility.do_bulk_insert(collection, files=[key])`.
+      2. Collect job IDs as workers complete.
+      3. Continue consuming the writer in the main thread (it stages
+         the next chunk's parquet while prior chunks are in-flight).
+
+    After the writer drains, poll the server until every job reaches
+    Completed (or Failed → raise). Per-chunk parquet files are deleted
+    immediately after upload to keep `stage_dir` bounded.
+
+    `on_chunk_done(path, rows, bytes, job_id)` is invoked once per chunk
+    after its bulk_insert is submitted — used by the orchestrator for
+    progress logging."""
+    _ensure_milvus_connection(milvus_uri)
+    pool = ThreadPoolExecutor(max_workers=cfg.upload_workers)
+    upload_futures: list[Future[tuple[int, int]]] = []
+    stats = BulkInsertStats()
+
+    def _upload_and_submit(path: Path, rows: int, byte_count: int) -> tuple[int, int]:
+        s3_key = f"{cfg.s3_prefix}/{path.name}"
+        t0 = time.time()
+        upload_to_s3(path, cfg=cfg, key=s3_key)
+        upload_t = time.time() - t0
+        path.unlink(missing_ok=True)
+        # `do_bulk_insert` returns immediately with a job id; the actual
+        # ingest runs on the Milvus side and we poll for it below. Each
+        # call needs a connection on this thread's connection-pool slot.
+        _ensure_milvus_connection(milvus_uri)
+        job_id = utility.do_bulk_insert(collection_name=collection, files=[s3_key])
+        log.info(
+            "  %s: uploaded %.2f GB in %.1fs → job %d",
+            path.name, byte_count / 1e9, upload_t, job_id,
+        )
+        if on_chunk_done is not None:
+            on_chunk_done(path, rows, byte_count, job_id)
+        return job_id, rows
+
+    # Drain the writer; spawn an upload+submit task for each chunk.
+    write_t0 = time.time()
+    for path, rows, bytes_ in chunks:
+        stats.rows_written += rows
+        stats.parquet_bytes += bytes_
+        upload_futures.append(pool.submit(_upload_and_submit, path, rows, bytes_))
+    stats.write_seconds = time.time() - write_t0
+
+    # Wait for every upload+submit to complete. Job IDs collected here.
+    job_ids: list[int] = []
+    upload_t0 = time.time()
+    for fut in as_completed(upload_futures):
+        job_id, _rows = fut.result()
+        job_ids.append(job_id)
+    stats.upload_seconds = time.time() - upload_t0
+    pool.shutdown(wait=True)
+
+    # Poll all jobs to completion. Each chunk's IndexBuilding stage
+    # runs in parallel server-side, so this is roughly bounded by the
+    # slowest single chunk's pipeline + cluster contention.
+    insert_t0 = time.time()
+    pending = list(job_ids)
+    total_rows = 0
+    while pending:
+        next_pending: list[int] = []
+        for job_id in pending:
+            state = utility.get_bulk_insert_state(job_id)
+            if state.state_name == "Completed":
+                total_rows += state.row_count
+                log.info("  job %d Completed (%d rows)", job_id, state.row_count)
+            elif state.state_name == "Failed":
+                raise RuntimeError(f"bulk_insert job {job_id} FAILED: {state.infos}")
+            else:
+                next_pending.append(job_id)
+        if next_pending:
+            still = ", ".join(
+                f"{j}={utility.get_bulk_insert_state(j).progress}%"
+                for j in next_pending
+            )
+            log.info("  bulk_insert pending: %s", still)
+            time.sleep(cfg.poll_interval_s)
+        pending = next_pending
+    stats.bulk_insert_seconds = time.time() - insert_t0
+    return total_rows, stats
+
+
 def submit_and_wait_bulk_insert(
     *,
     milvus_uri: str,
@@ -301,13 +490,13 @@ def submit_and_wait_bulk_insert(
     s3_keys: list[str],
     cfg: BulkInsertConfig,
 ) -> tuple[int, float]:
-    """Submit one or more parquet files to `do_bulk_insert` and wait for
-    every job to complete (or fail). Returns `(total_rows, wall_seconds)`.
+    """Submit one or more pre-uploaded parquet files to `do_bulk_insert`
+    and wait for every job to complete. Returns
+    `(total_rows, wall_seconds)`.
 
-    `do_bulk_insert` is on the legacy `pymilvus.utility` API which uses
-    the global `connections` registry — connect by URI here so callers
-    that already drive a `MilvusClient` don't have to. `connections.connect`
-    is idempotent on the same alias."""
+    Used for already-staged-and-uploaded chunks; the new chunked
+    orchestrator (`stream_chunks_to_milvus`) handles upload + submit
+    itself."""
     if not s3_keys:
         return 0, 0.0
     # `MilvusClient(uri=...)` accepts URIs like "http://host:19530";
@@ -358,5 +547,6 @@ __all__ = [
     "write_articles_parquet",
     "write_offers_parquet",
     "upload_to_s3",
+    "stream_chunks_to_milvus",
     "submit_and_wait_bulk_insert",
 ]

@@ -156,8 +156,18 @@ def main() -> None:
                       help="S3 secret key (default 'minioadmin').")
     sink.add_argument("--bulk-insert-stage-dir", default="/tmp/f9_indexer_stage",
                       help="Local directory for parquet staging before upload "
-                           "(default /tmp/f9_indexer_stage). Sized to hold the full "
-                           "articles + offers parquets — at production scale ~60 GB.")
+                           "(default /tmp/f9_indexer_stage). Sized to hold the "
+                           "in-flight chunks (chunk_rows × upload_workers); "
+                           "completed chunks are deleted after upload.")
+    sink.add_argument("--bulk-insert-chunk-rows", type=int, default=1_000_000,
+                      help="Rows per parquet chunk (default 1M). Each chunk = "
+                           "one upload + one do_bulk_insert job. At production "
+                           "scale ~130–510 chunks. Smaller = better pipelining "
+                           "but more job-pipeline overhead per chunk.")
+    sink.add_argument("--bulk-insert-upload-workers", type=int, default=4,
+                      help="ThreadPool workers for parallel upload + submit "
+                           "(default 4). Tune up if MinIO/network is the "
+                           "bottleneck and Milvus has spare ingest capacity.")
 
     p.add_argument("--log-level", default="INFO",
                    help="Python logging level (default INFO).")
@@ -180,6 +190,8 @@ def main() -> None:
             s3_access_key=args.bulk_insert_s3_access_key,
             s3_secret_key=args.bulk_insert_s3_secret_key,
             stage_dir=Path(args.bulk_insert_stage_dir),
+            chunk_rows=args.bulk_insert_chunk_rows,
+            upload_workers=args.bulk_insert_upload_workers,
         )
 
     stats = run_bulk_indexer(

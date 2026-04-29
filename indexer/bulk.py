@@ -67,8 +67,7 @@ from pymilvus import MilvusClient
 from indexer.bulk_insert import (
     BulkInsertConfig,
     BulkInsertStats,
-    submit_and_wait_bulk_insert,
-    upload_to_s3,
+    stream_chunks_to_milvus,
     write_articles_parquet,
     write_offers_parquet,
 )
@@ -244,20 +243,18 @@ def _bulk_insert_articles(
     batch_size: int,
     cfg: BulkInsertConfig,
 ) -> tuple[float, BulkInsertStats]:
-    """Bulk-insert variant of `_upsert_articles`. Streams DuckDB →
-    TEI cache → fp16 vectors → parquet on local stage dir →
-    MinIO/S3 → Milvus `do_bulk_insert`. The parquet writer flushes
-    each batch as a row group so no batch is held entirely in memory.
+    """Bulk-insert variant of `_upsert_articles`. Streams DuckDB → TEI
+    cache → fp16 vectors → chunked parquets in `stage_dir`, with each
+    chunk pipelined into upload + `do_bulk_insert` via a thread pool
+    (`stream_chunks_to_milvus`). Chunk N+1 stages while chunk N is
+    still uploading or being ingested server-side.
 
     Returns `(wall_seconds, stats)`."""
     cfg.stage_dir.mkdir(parents=True, exist_ok=True)
-    parquet_path = cfg.stage_dir / "articles.parquet"
-    s3_key = f"{cfg.s3_prefix}/articles.parquet"
-    out = BulkInsertStats()
 
     def _embed_and_emit() -> Iterator[list[dict]]:
         """Inner generator: pull a batch from DuckDB, attach embeddings,
-        yield it for the parquet writer."""
+        yield for the chunked parquet writer."""
         for batch in _iter_relation_dicts(con, "articles", batch_size):
             embeddings = cache.embed_articles(batch)
             for row in batch:
@@ -269,28 +266,18 @@ def _bulk_insert_articles(
             yield batch
 
     t0 = time.time()
-    out.rows_written, out.parquet_bytes = write_articles_parquet(
-        _embed_and_emit(), parquet_path,
+    chunks = write_articles_parquet(
+        _embed_and_emit(),
+        stage_dir=cfg.stage_dir,
+        chunk_rows=cfg.chunk_rows,
         compression=cfg.parquet_compression,
         compression_level=cfg.parquet_compression_level,
     )
-    out.write_seconds = time.time() - t0
-    log.info(
-        "  articles parquet: %d rows, %.2f GB at %s",
-        out.rows_written, out.parquet_bytes / 1e9, parquet_path,
+    rows_imported, stats = stream_chunks_to_milvus(
+        chunks, milvus_uri=milvus_uri, collection=collection, cfg=cfg,
     )
-
-    t0 = time.time()
-    upload_to_s3(parquet_path, cfg=cfg, key=s3_key)
-    out.upload_seconds = time.time() - t0
-    log.info("  articles uploaded → s3://%s/%s in %.1fs", cfg.s3_bucket, s3_key, out.upload_seconds)
-
-    rows_imported, out.bulk_insert_seconds = submit_and_wait_bulk_insert(
-        milvus_uri=milvus_uri, collection=collection, s3_keys=[s3_key], cfg=cfg,
-    )
-    log.info("  articles bulk_insert imported %d rows in %.1fs", rows_imported, out.bulk_insert_seconds)
-    parquet_path.unlink(missing_ok=True)
-    return time.time() - t0 + out.write_seconds, out
+    log.info("  articles bulk_insert imported %d rows total", rows_imported)
+    return time.time() - t0, stats
 
 
 def _bulk_insert_offers(
@@ -304,9 +291,6 @@ def _bulk_insert_offers(
     """Bulk-insert variant of `_upsert_offers`. No embedding step —
     offer rows already carry their `_placeholder_vector` from the SQL."""
     cfg.stage_dir.mkdir(parents=True, exist_ok=True)
-    parquet_path = cfg.stage_dir / "offers.parquet"
-    s3_key = f"{cfg.s3_prefix}/offers.parquet"
-    out = BulkInsertStats()
 
     def _emit() -> Iterator[list[dict]]:
         for batch in _iter_relation_dicts(con, "offer_rows", batch_size):
@@ -314,28 +298,18 @@ def _bulk_insert_offers(
             yield batch
 
     t0 = time.time()
-    out.rows_written, out.parquet_bytes = write_offers_parquet(
-        _emit(), parquet_path,
+    chunks = write_offers_parquet(
+        _emit(),
+        stage_dir=cfg.stage_dir,
+        chunk_rows=cfg.chunk_rows,
         compression=cfg.parquet_compression,
         compression_level=cfg.parquet_compression_level,
     )
-    out.write_seconds = time.time() - t0
-    log.info(
-        "  offers parquet: %d rows, %.2f GB at %s",
-        out.rows_written, out.parquet_bytes / 1e9, parquet_path,
+    rows_imported, stats = stream_chunks_to_milvus(
+        chunks, milvus_uri=milvus_uri, collection=collection, cfg=cfg,
     )
-
-    t0 = time.time()
-    upload_to_s3(parquet_path, cfg=cfg, key=s3_key)
-    out.upload_seconds = time.time() - t0
-    log.info("  offers uploaded → s3://%s/%s in %.1fs", cfg.s3_bucket, s3_key, out.upload_seconds)
-
-    rows_imported, out.bulk_insert_seconds = submit_and_wait_bulk_insert(
-        milvus_uri=milvus_uri, collection=collection, s3_keys=[s3_key], cfg=cfg,
-    )
-    log.info("  offers bulk_insert imported %d rows in %.1fs", rows_imported, out.bulk_insert_seconds)
-    parquet_path.unlink(missing_ok=True)
-    return time.time() - t0 + out.write_seconds, out
+    log.info("  offers bulk_insert imported %d rows total", rows_imported)
+    return time.time() - t0, stats
 
 
 def run_bulk_indexer(
