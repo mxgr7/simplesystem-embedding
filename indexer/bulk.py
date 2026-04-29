@@ -67,6 +67,8 @@ from pymilvus import MilvusClient
 from indexer.bulk_insert import (
     BulkInsertConfig,
     BulkInsertStats,
+    load_checkpoint,
+    save_checkpoint,
     stream_chunks_to_milvus,
     write_articles_parquet,
     write_offers_parquet,
@@ -142,13 +144,25 @@ def _iter_relation_dicts(
     con: duckdb.DuckDBPyConnection,
     table_name: str,
     batch_size: int,
+    *,
+    offset: int = 0,
 ) -> Iterator[list[dict]]:
     """Stream a DuckDB table as batches of plain dicts. `fetchmany`
     pulls one chunk at a time so the orchestrator never holds more
     than `batch_size` rows in Python at once — important at the
     130M-article scale where holding everything would OOM Python long
-    before Milvus pushed back."""
-    cur = con.execute(f"SELECT * FROM {table_name}")
+    before Milvus pushed back.
+
+    `offset` skips that many rows from the start of the scan — used by
+    the bulk-insert resume path to pick up past chunks already
+    successfully ingested. DuckDB's table scan is deterministic on a
+    static materialised table (no concurrent writers), so the same
+    offset returns the same suffix across runs.
+    """
+    if offset > 0:
+        cur = con.execute(f"SELECT * FROM {table_name} OFFSET {offset}")
+    else:
+        cur = con.execute(f"SELECT * FROM {table_name}")
     columns = [d[0] for d in cur.description]
     while True:
         rows = cur.fetchmany(batch_size)
@@ -242,6 +256,7 @@ def _bulk_insert_articles(
     cache: TEICache,
     batch_size: int,
     cfg: BulkInsertConfig,
+    checkpoint: dict,
 ) -> tuple[float, BulkInsertStats]:
     """Bulk-insert variant of `_upsert_articles`. Streams DuckDB → TEI
     cache → fp16 vectors → chunked parquets in `stage_dir`, with each
@@ -249,13 +264,27 @@ def _bulk_insert_articles(
     (`stream_chunks_to_milvus`). Chunk N+1 stages while chunk N is
     still uploading or being ingested server-side.
 
+    Resume: `checkpoint['articles']['rows_done']` is used as a DuckDB
+    OFFSET so a re-run skips rows already ingested. The chunk file
+    names continue past the indices already in the bucket
+    (`starting_chunk_idx = checkpoint['articles']['chunks_done']`) so
+    new files don't collide with old ones still in MinIO. After each
+    chunk's bulk_insert Completes, the checkpoint is updated atomically.
+
     Returns `(wall_seconds, stats)`."""
     cfg.stage_dir.mkdir(parents=True, exist_ok=True)
+    rows_done = checkpoint["articles"]["rows_done"]
+    chunks_done = checkpoint["articles"]["chunks_done"]
+    if rows_done > 0:
+        log.info(
+            "  articles: resuming from row %d (chunk %d) per checkpoint",
+            rows_done, chunks_done,
+        )
 
     def _embed_and_emit() -> Iterator[list[dict]]:
         """Inner generator: pull a batch from DuckDB, attach embeddings,
         yield for the chunked parquet writer."""
-        for batch in _iter_relation_dicts(con, "articles", batch_size):
+        for batch in _iter_relation_dicts(con, "articles", batch_size, offset=rows_done):
             embeddings = cache.embed_articles(batch)
             for row in batch:
                 row["offer_embedding"] = embeddings[row["article_hash"]]
@@ -265,6 +294,11 @@ def _bulk_insert_articles(
             )
             yield batch
 
+    def _on_chunk_completed(chunk_idx: int, rows: int) -> None:
+        checkpoint["articles"]["chunks_done"] = chunk_idx + 1
+        checkpoint["articles"]["rows_done"] = checkpoint["articles"].get("rows_done", 0) + rows
+        save_checkpoint(cfg.checkpoint_path, checkpoint)
+
     t0 = time.time()
     chunks = write_articles_parquet(
         _embed_and_emit(),
@@ -272,9 +306,11 @@ def _bulk_insert_articles(
         chunk_rows=cfg.chunk_rows,
         compression=cfg.parquet_compression,
         compression_level=cfg.parquet_compression_level,
+        starting_chunk_idx=chunks_done,
     )
     rows_imported, stats = stream_chunks_to_milvus(
         chunks, milvus_uri=milvus_uri, collection=collection, cfg=cfg,
+        on_chunk_completed=_on_chunk_completed,
     )
     log.info("  articles bulk_insert imported %d rows total", rows_imported)
     return time.time() - t0, stats
@@ -287,15 +323,29 @@ def _bulk_insert_offers(
     collection: str,
     batch_size: int,
     cfg: BulkInsertConfig,
+    checkpoint: dict,
 ) -> tuple[float, BulkInsertStats]:
     """Bulk-insert variant of `_upsert_offers`. No embedding step —
-    offer rows already carry their `_placeholder_vector` from the SQL."""
+    offer rows already carry their `_placeholder_vector` from the SQL.
+    Resume semantics mirror `_bulk_insert_articles`."""
     cfg.stage_dir.mkdir(parents=True, exist_ok=True)
+    rows_done = checkpoint["offers"]["rows_done"]
+    chunks_done = checkpoint["offers"]["chunks_done"]
+    if rows_done > 0:
+        log.info(
+            "  offers: resuming from row %d (chunk %d) per checkpoint",
+            rows_done, chunks_done,
+        )
 
     def _emit() -> Iterator[list[dict]]:
-        for batch in _iter_relation_dicts(con, "offer_rows", batch_size):
+        for batch in _iter_relation_dicts(con, "offer_rows", batch_size, offset=rows_done):
             log.info("  offers staged: +%d", len(batch))
             yield batch
+
+    def _on_chunk_completed(chunk_idx: int, rows: int) -> None:
+        checkpoint["offers"]["chunks_done"] = chunk_idx + 1
+        checkpoint["offers"]["rows_done"] = checkpoint["offers"].get("rows_done", 0) + rows
+        save_checkpoint(cfg.checkpoint_path, checkpoint)
 
     t0 = time.time()
     chunks = write_offers_parquet(
@@ -304,9 +354,11 @@ def _bulk_insert_offers(
         chunk_rows=cfg.chunk_rows,
         compression=cfg.parquet_compression,
         compression_level=cfg.parquet_compression_level,
+        starting_chunk_idx=chunks_done,
     )
     rows_imported, stats = stream_chunks_to_milvus(
         chunks, milvus_uri=milvus_uri, collection=collection, cfg=cfg,
+        on_chunk_completed=_on_chunk_completed,
     )
     log.info("  offers bulk_insert imported %d rows total", rows_imported)
     return time.time() - t0, stats
@@ -403,6 +455,23 @@ def run_bulk_indexer(
     redis_client = redis.Redis.from_url(redis_url)
     redis_client.ping()  # fail-fast if Redis is unreachable
 
+    # Load resume state for the bulk-insert path. `checkpoint_path=None`
+    # gives the empty initial state — no resume, fresh run.
+    checkpoint = (
+        load_checkpoint(bulk_insert.checkpoint_path)
+        if sink_mode == "bulk_insert" and bulk_insert is not None
+        else None
+    )
+    if checkpoint and (
+        checkpoint["articles"]["rows_done"] > 0
+        or checkpoint["offers"]["rows_done"] > 0
+    ):
+        log.info(
+            "Resuming from checkpoint: articles=%d/%d rows, offers=%d/%d rows",
+            checkpoint["articles"]["rows_done"], stats.article_count,
+            checkpoint["offers"]["rows_done"],   stats.offer_row_count,
+        )
+
     log.info("Phase 1: writing %d article rows via %s (TEI batch=%d)…",
              stats.article_count, sink_mode, tei_batch_size)
     with TEICache(
@@ -426,6 +495,7 @@ def run_bulk_indexer(
                 cache=cache,
                 batch_size=article_batch_size,
                 cfg=bulk_insert,    # type: ignore[arg-type]
+                checkpoint=checkpoint,    # type: ignore[arg-type]
             )
         stats.tei = cache.stats
 
@@ -445,6 +515,7 @@ def run_bulk_indexer(
             collection=offers_collection,
             batch_size=offer_batch_size,
             cfg=bulk_insert,    # type: ignore[arg-type]
+            checkpoint=checkpoint,    # type: ignore[arg-type]
         )
 
     stats.total_seconds = time.time() - wall_t0

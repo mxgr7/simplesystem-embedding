@@ -168,6 +168,18 @@ def main() -> None:
                       help="ThreadPool workers for parallel upload + submit "
                            "(default 4). Tune up if MinIO/network is the "
                            "bottleneck and Milvus has spare ingest capacity.")
+    sink.add_argument("--bulk-insert-checkpoint", default="",
+                      help="Path to a JSON checkpoint file enabling resume. "
+                           "If set, after each chunk completes the file is "
+                           "atomically updated; on restart the orchestrator "
+                           "skips DuckDB rows already ingested. Recommended "
+                           "for any long-running run; default off.")
+    sink.add_argument("--bulk-insert-retry-attempts", type=int, default=5,
+                      help="Total attempts (1 try + N retries) for upload + "
+                           "do_bulk_insert on transient failures. boto3 "
+                           "uses this for S3 retries internally; the "
+                           "do_bulk_insert wrapper uses it with exponential "
+                           "backoff. Default 5.")
 
     p.add_argument("--log-level", default="INFO",
                    help="Python logging level (default INFO).")
@@ -192,6 +204,8 @@ def main() -> None:
             stage_dir=Path(args.bulk_insert_stage_dir),
             chunk_rows=args.bulk_insert_chunk_rows,
             upload_workers=args.bulk_insert_upload_workers,
+            checkpoint_path=Path(args.bulk_insert_checkpoint) if args.bulk_insert_checkpoint else None,
+            retry_attempts=args.bulk_insert_retry_attempts,
         )
 
     stats = run_bulk_indexer(

@@ -98,6 +98,22 @@ class BulkInsertConfig:
     poll_interval_s: float = 5.0
     chunk_rows: int = 1_000_000
     upload_workers: int = 4
+    # Retry tunables. boto3 retries S3 ops itself via its `retries`
+    # config (we set it on every client). do_bulk_insert is wrapped
+    # by `_do_bulk_insert_with_retry`. Both use exponential backoff
+    # capped at `retry_max_backoff_s`.
+    retry_attempts: int = 5
+    retry_initial_backoff_s: float = 2.0
+    retry_max_backoff_s: float = 60.0
+    # Resume support. If `checkpoint_path` is set, the orchestrator:
+    #   1. On startup: reads the file (if present), skips DuckDB rows
+    #      already done, continues chunk numbering from the last index.
+    #   2. After each chunk's bulk_insert succeeds: updates the file
+    #      atomically (write-temp + rename).
+    # Default `None` = no resume; partial runs are wasted on failure.
+    # For production runs always set this to a stable path under
+    # `stage_dir` so a node restart picks up where it left off.
+    checkpoint_path: Path | None = None
 
 
 @dataclass
@@ -117,9 +133,123 @@ def _s3_client(cfg: BulkInsertConfig):
         endpoint_url=cfg.s3_endpoint,
         aws_access_key_id=cfg.s3_access_key,
         aws_secret_access_key=cfg.s3_secret_key,
-        config=Config(signature_version="s3v4"),
+        # `retries.mode='standard'` gives 5xx + ConnectTimeout +
+        # ReadTimeout retries with exponential backoff out of the box.
+        # `max_attempts` includes the initial call, so attempts=5 means
+        # 1 try + 4 retries.
+        config=Config(
+            signature_version="s3v4",
+            retries={"max_attempts": cfg.retry_attempts, "mode": "standard"},
+        ),
         region_name=cfg.s3_region,
     )
+
+
+# Milvus exception messages we treat as PERMANENT — retrying these is
+# pointless and just delays surfacing the real problem to the operator.
+# Lowercased substring match; expand as we encounter new permanent
+# failure shapes in production.
+_PERMANENT_MILVUS_ERRORS = (
+    "validation",
+    "schema",
+    "not exist",
+    "not found",
+    "permission",
+    "unauthenticated",
+    "field not found",
+    "duplicate",
+)
+
+
+def _is_permanent_milvus_error(exc: BaseException) -> bool:
+    """Return True for errors that won't go away by waiting. Anything
+    else is treated as transient and retried."""
+    msg = str(exc).lower()
+    return any(s in msg for s in _PERMANENT_MILVUS_ERRORS)
+
+
+def _do_bulk_insert_with_retry(
+    *,
+    collection: str,
+    files: list[str],
+    cfg: BulkInsertConfig,
+) -> int:
+    """Wrap `utility.do_bulk_insert` with exponential-backoff retries on
+    transient failures. Permanent failures (validation, schema, perms)
+    raise immediately so operators see the real cause.
+
+    Boto3 retries S3 ops itself; this wrapper is for the gRPC call into
+    Milvus. Returns the job_id."""
+    last_exc: Exception | None = None
+    for attempt in range(cfg.retry_attempts):
+        try:
+            return utility.do_bulk_insert(collection_name=collection, files=files)
+        except Exception as e:
+            if _is_permanent_milvus_error(e):
+                log.error("do_bulk_insert: permanent failure (%s) — not retrying", e)
+                raise
+            last_exc = e
+            if attempt == cfg.retry_attempts - 1:
+                log.error("do_bulk_insert: exhausted %d attempts — final error: %s",
+                          cfg.retry_attempts, e)
+                raise
+            wait = min(
+                cfg.retry_initial_backoff_s * (2 ** attempt),
+                cfg.retry_max_backoff_s,
+            )
+            log.warning(
+                "do_bulk_insert attempt %d/%d failed (%s) — retrying in %.1fs",
+                attempt + 1, cfg.retry_attempts, e, wait,
+            )
+            time.sleep(wait)
+    # Unreachable — the loop either returns or raises.
+    raise RuntimeError("unreachable") from last_exc
+
+
+# ---------- checkpoint ----------------------------------------------------
+
+# Increment if checkpoint format changes incompatibly.
+_CHECKPOINT_VERSION = 1
+
+
+def _empty_checkpoint() -> dict:
+    """Initial state when no checkpoint file exists yet — fresh run."""
+    return {
+        "version": _CHECKPOINT_VERSION,
+        "articles": {"rows_done": 0, "chunks_done": 0},
+        "offers":   {"rows_done": 0, "chunks_done": 0},
+    }
+
+
+def load_checkpoint(path: Path | None) -> dict:
+    """Load checkpoint state from disk, or return the empty initial
+    state if `path` is None or the file doesn't exist. Raises if the
+    file exists but isn't parseable — operators should investigate
+    rather than silently lose track of completed chunks."""
+    if path is None or not path.exists():
+        return _empty_checkpoint()
+    state = json.loads(path.read_text())
+    if state.get("version") != _CHECKPOINT_VERSION:
+        raise ValueError(
+            f"Checkpoint at {path} has version {state.get('version')!r}; "
+            f"this build expects {_CHECKPOINT_VERSION}. Delete the file "
+            f"to start fresh, or downgrade."
+        )
+    # Tolerate a checkpoint that only mentions one stream.
+    state.setdefault("articles", {"rows_done": 0, "chunks_done": 0})
+    state.setdefault("offers",   {"rows_done": 0, "chunks_done": 0})
+    return state
+
+
+def save_checkpoint(path: Path | None, state: dict) -> None:
+    """Atomically persist checkpoint state via temp + rename. No-op when
+    `path` is None (resume disabled)."""
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(path)
 
 
 # ---------- schemas -------------------------------------------------------
@@ -280,8 +410,10 @@ def _write_chunked(
     chunk_rows: int,
     compression: str,
     compression_level: int,
-) -> Iterator[tuple[Path, int, int]]:
-    """Stream parquet output as a sequence of `(path, rows, bytes)` chunks.
+    starting_chunk_idx: int = 0,
+) -> Iterator[tuple[int, Path, int, int]]:
+    """Stream parquet output as a sequence of `(chunk_idx, path, rows, bytes)`
+    chunks.
 
     A new chunk file opens whenever the in-flight writer reaches
     `chunk_rows`. The last chunk may be smaller. Yields each chunk the
@@ -289,8 +421,10 @@ def _write_chunked(
     next chunk stages.
 
     `name_template` should contain a `{idx:04d}` placeholder, e.g.
-    `articles.{idx:04d}.parquet`."""
-    chunk_idx = 0
+    `articles.{idx:04d}.parquet`. `starting_chunk_idx` lets a resume
+    continue file numbering past the chunks already in the bucket so
+    the new files don't collide with old ones."""
+    chunk_idx = starting_chunk_idx
     rows_in_chunk = 0
     writer: pq.ParquetWriter | None = None
     path: Path | None = None
@@ -314,13 +448,13 @@ def _write_chunked(
         if rows_in_chunk >= chunk_rows:
             writer.close()
             assert path is not None
-            yield path, rows_in_chunk, path.stat().st_size
+            yield chunk_idx, path, rows_in_chunk, path.stat().st_size
             chunk_idx += 1
             writer, path, rows_in_chunk = None, None, 0
 
     if writer is not None and path is not None:
         writer.close()
-        yield path, rows_in_chunk, path.stat().st_size
+        yield chunk_idx, path, rows_in_chunk, path.stat().st_size
 
 
 def write_articles_parquet(
@@ -330,9 +464,10 @@ def write_articles_parquet(
     chunk_rows: int,
     compression: str,
     compression_level: int,
-) -> Iterator[tuple[Path, int, int]]:
-    """Articles parquet writer. Yields one `(path, rows, bytes)` per
-    chunk as it closes."""
+    starting_chunk_idx: int = 0,
+) -> Iterator[tuple[int, Path, int, int]]:
+    """Articles parquet writer. Yields `(chunk_idx, path, rows, bytes)`
+    per chunk as it closes."""
     yield from _write_chunked(
         batches,
         stage_dir=stage_dir,
@@ -342,6 +477,7 @@ def write_articles_parquet(
         chunk_rows=chunk_rows,
         compression=compression,
         compression_level=compression_level,
+        starting_chunk_idx=starting_chunk_idx,
     )
 
 
@@ -352,9 +488,9 @@ def write_offers_parquet(
     chunk_rows: int,
     compression: str,
     compression_level: int,
-) -> Iterator[tuple[Path, int, int]]:
-    """Offers parquet writer. Yields one `(path, rows, bytes)` per
-    chunk as it closes."""
+    starting_chunk_idx: int = 0,
+) -> Iterator[tuple[int, Path, int, int]]:
+    """Offers parquet writer."""
     yield from _write_chunked(
         batches,
         stage_dir=stage_dir,
@@ -364,6 +500,7 @@ def write_offers_parquet(
         chunk_rows=chunk_rows,
         compression=compression,
         compression_level=compression_level,
+        starting_chunk_idx=starting_chunk_idx,
     )
 
 
@@ -390,96 +527,141 @@ def _ensure_milvus_connection(milvus_uri: str) -> None:
 
 
 def stream_chunks_to_milvus(
-    chunks: Iterator[tuple[Path, int, int]],
+    chunks: Iterator[tuple[int, Path, int, int]],
     *,
     milvus_uri: str,
     collection: str,
     cfg: BulkInsertConfig,
-    on_chunk_done: Callable[[Path, int, int, int], None] | None = None,
+    on_chunk_completed: Callable[[int, int], None] | None = None,
 ) -> tuple[int, BulkInsertStats]:
     """Pipelined upload + `do_bulk_insert` over a chunk-yielding writer.
 
-    For each `(path, rows, bytes)` produced by the writer:
-      1. Submit the chunk to a worker thread that uploads it to MinIO,
-         then calls `utility.do_bulk_insert(collection, files=[key])`.
-      2. Collect job IDs as workers complete.
-      3. Continue consuming the writer in the main thread (it stages
-         the next chunk's parquet while prior chunks are in-flight).
+    For each `(chunk_idx, path, rows, bytes)` produced by the writer:
+      1. Submit the chunk to a worker thread that uploads it to MinIO
+         (boto3 retries internally) then calls `do_bulk_insert` (with
+         retry via `_do_bulk_insert_with_retry`).
+      2. Track the in-flight (chunk_idx, job_id, rows) tuple.
+      3. As jobs complete, fire `on_chunk_completed(chunk_idx, rows)`
+         so the orchestrator can persist a checkpoint.
 
-    After the writer drains, poll the server until every job reaches
-    Completed (or Failed → raise). Per-chunk parquet files are deleted
-    immediately after upload to keep `stage_dir` bounded.
+    Per-chunk parquet files are deleted immediately after upload so the
+    local stage dir holds at most `chunk_rows × upload_workers` rows
+    worth of data at any moment.
 
-    `on_chunk_done(path, rows, bytes, job_id)` is invoked once per chunk
-    after its bulk_insert is submitted — used by the orchestrator for
-    progress logging."""
+    `on_chunk_completed` is invoked synchronously from the polling loop
+    in submission order — checkpoint writes serialise here, so a
+    completion of chunk N+1 won't be persisted until chunk N has been
+    persisted, which keeps the stored `chunks_done` monotonic and safe
+    to use as a resume offset (`rows_done = chunks_done × chunk_rows`)."""
     _ensure_milvus_connection(milvus_uri)
     pool = ThreadPoolExecutor(max_workers=cfg.upload_workers)
-    upload_futures: list[Future[tuple[int, int]]] = []
+    # Each future returns (chunk_idx, job_id, rows) once its parquet is
+    # uploaded + bulk_insert is submitted. Polling happens in the main
+    # thread so we don't double-poll the same job.
+    upload_futures: list[Future[tuple[int, int, int]]] = []
     stats = BulkInsertStats()
 
-    def _upload_and_submit(path: Path, rows: int, byte_count: int) -> tuple[int, int]:
+    def _upload_and_submit(
+        chunk_idx: int, path: Path, rows: int, byte_count: int,
+    ) -> tuple[int, int, int]:
         s3_key = f"{cfg.s3_prefix}/{path.name}"
         t0 = time.time()
         upload_to_s3(path, cfg=cfg, key=s3_key)
         upload_t = time.time() - t0
         path.unlink(missing_ok=True)
-        # `do_bulk_insert` returns immediately with a job id; the actual
-        # ingest runs on the Milvus side and we poll for it below. Each
-        # call needs a connection on this thread's connection-pool slot.
         _ensure_milvus_connection(milvus_uri)
-        job_id = utility.do_bulk_insert(collection_name=collection, files=[s3_key])
+        job_id = _do_bulk_insert_with_retry(
+            collection=collection, files=[s3_key], cfg=cfg,
+        )
         log.info(
             "  %s: uploaded %.2f GB in %.1fs → job %d",
             path.name, byte_count / 1e9, upload_t, job_id,
         )
-        if on_chunk_done is not None:
-            on_chunk_done(path, rows, byte_count, job_id)
-        return job_id, rows
+        return chunk_idx, job_id, rows
 
     # Drain the writer; spawn an upload+submit task for each chunk.
     write_t0 = time.time()
-    for path, rows, bytes_ in chunks:
+    for chunk_idx, path, rows, bytes_ in chunks:
         stats.rows_written += rows
         stats.parquet_bytes += bytes_
-        upload_futures.append(pool.submit(_upload_and_submit, path, rows, bytes_))
+        upload_futures.append(pool.submit(_upload_and_submit, chunk_idx, path, rows, bytes_))
     stats.write_seconds = time.time() - write_t0
 
-    # Wait for every upload+submit to complete. Job IDs collected here.
-    job_ids: list[int] = []
+    # Collect (chunk_idx, job_id, rows) per chunk that successfully
+    # submitted. If any worker raised (e.g. retry-exhausted upload or
+    # do_bulk_insert error), we keep going so we can poll already-
+    # submitted chunks before propagating the exception. Without this
+    # we'd lose track of jobs that are running server-side, leaving
+    # the checkpoint stale and the next resume re-importing duplicates.
+    submitted: list[tuple[int, int, int]] = []
+    submit_exceptions: list[BaseException] = []
     upload_t0 = time.time()
     for fut in as_completed(upload_futures):
-        job_id, _rows = fut.result()
-        job_ids.append(job_id)
+        try:
+            submitted.append(fut.result())
+        except BaseException as e:
+            submit_exceptions.append(e)
     stats.upload_seconds = time.time() - upload_t0
     pool.shutdown(wait=True)
 
-    # Poll all jobs to completion. Each chunk's IndexBuilding stage
-    # runs in parallel server-side, so this is roughly bounded by the
-    # slowest single chunk's pipeline + cluster contention.
+    # Poll all submitted jobs to completion. Fire `on_chunk_completed`
+    # only for the *contiguous* prefix of completed chunks — out-of-order
+    # server-side completions (chunk 5 done while chunk 3 still importing)
+    # must NOT advance `chunks_done` past chunk 3, because the checkpoint
+    # is consumed as a single-integer resume offset.
     insert_t0 = time.time()
-    pending = list(job_ids)
+    submitted.sort(key=lambda t: t[0])
+    expected_next_idx = submitted[0][0] if submitted else 0
+    completed_rows_by_idx: dict[int, int] = {}
+    pending: list[tuple[int, int, int]] = list(submitted)
     total_rows = 0
+    poll_failures: list[str] = []
     while pending:
-        next_pending: list[int] = []
-        for job_id in pending:
+        next_pending: list[tuple[int, int, int]] = []
+        for chunk_idx, job_id, rows in pending:
             state = utility.get_bulk_insert_state(job_id)
             if state.state_name == "Completed":
                 total_rows += state.row_count
-                log.info("  job %d Completed (%d rows)", job_id, state.row_count)
+                completed_rows_by_idx[chunk_idx] = rows
+                log.info("  chunk %d (job %d) Completed (%d rows)",
+                         chunk_idx, job_id, state.row_count)
             elif state.state_name == "Failed":
-                raise RuntimeError(f"bulk_insert job {job_id} FAILED: {state.infos}")
+                # Track but don't raise here — we want to flush the
+                # contiguous-prefix checkpoint for any earlier chunks
+                # that did succeed before bailing.
+                poll_failures.append(
+                    f"chunk {chunk_idx} (job {job_id}) FAILED: {state.infos}"
+                )
+                log.error("  %s", poll_failures[-1])
             else:
-                next_pending.append(job_id)
+                next_pending.append((chunk_idx, job_id, rows))
+
+        # Drain contiguous-prefix completions into the checkpoint.
+        while expected_next_idx in completed_rows_by_idx:
+            rows = completed_rows_by_idx.pop(expected_next_idx)
+            if on_chunk_completed is not None:
+                on_chunk_completed(expected_next_idx, rows)
+            expected_next_idx += 1
+
         if next_pending:
             still = ", ".join(
-                f"{j}={utility.get_bulk_insert_state(j).progress}%"
-                for j in next_pending
+                f"chunk {ci}={utility.get_bulk_insert_state(ji).progress}%"
+                for ci, ji, _ in next_pending
             )
             log.info("  bulk_insert pending: %s", still)
             time.sleep(cfg.poll_interval_s)
         pending = next_pending
     stats.bulk_insert_seconds = time.time() - insert_t0
+
+    # Surface any deferred failures (poll-side or submit-side) now that
+    # we've safely persisted the prefix of completed chunks.
+    if poll_failures:
+        raise RuntimeError("; ".join(poll_failures))
+    if submit_exceptions:
+        # Re-raise the first to preserve the traceback; secondary errors
+        # are typically the same cascading-network issue and one example
+        # is enough for the operator.
+        raise submit_exceptions[0]
     return total_rows, stats
 
 
@@ -549,4 +731,6 @@ __all__ = [
     "upload_to_s3",
     "stream_chunks_to_milvus",
     "submit_and_wait_bulk_insert",
+    "load_checkpoint",
+    "save_checkpoint",
 ]
