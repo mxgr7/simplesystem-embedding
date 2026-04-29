@@ -240,6 +240,12 @@ class Metadata(_Strict):
     # surface a "results may be incomplete" notice or widen the filter.
     # Defaults to false / omitted on the wire when not set.
     recall_clipped: bool = Field(default=False, alias="recallClipped")
+    # F4: set when the count(*) pass hit `HITCOUNT_CAP` (or
+    # `PATH_B_HASH_LIMIT` in Path B's bounded probe) and the true total
+    # is unknown beyond the cap. `hitCount` carries the cap value as a
+    # lower bound; callers should display ">= hitCount" rather than
+    # "exactly hitCount" when this fires.
+    hit_count_clipped: bool = Field(default=False, alias="hitCountClipped")
 
 
 class SearchResponse(_Strict):

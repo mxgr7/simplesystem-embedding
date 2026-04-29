@@ -229,10 +229,180 @@ def test_bounded_probe_overflow_emits_recall_clipped_metadata(
     `recallClipped: true`."""
     with _make_client(monkeypatch_session, path_b_hash_limit=2) as c:
         all_vendors = sorted({r["vendor_id"] for r in projected_rows})
-        # Vendor IN [all vendors] matches every offer in our namespace
-        # (and others); after dedup the distinct hash count vastly
-        # exceeds the limit of 2.
         body = _post(c, vendorIdsFilter=all_vendors)
         assert body["metadata"].get("recallClipped") is True, (
             f"expected recallClipped=true, got metadata={body['metadata']}"
         )
+        # When recallClipped fires, hitCount is the probe-limit lower bound
+        # and hitCountClipped also fires.
+        assert body["metadata"].get("hitCountClipped") is True
+        assert body["metadata"]["hitCount"] == 2
+
+
+# ──────────────────────────────────────────────────────────────────────
+# F4 — searchMode + sort + hitCount + pagination
+# ──────────────────────────────────────────────────────────────────────
+
+def test_search_mode_summaries_only_returns_empty_articles_with_hitcount(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """SUMMARIES_ONLY: skip article hydration but populate hitCount over
+    the full filtered set. Summaries themselves are F5; this test just
+    verifies the mode flag wiring."""
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, expected = vendor_counts.most_common(1)[0]
+    body = _post(client, searchMode="SUMMARIES_ONLY", vendorIdsFilter=[top_vendor])
+    assert body["articles"] == []
+    # hitCount is the count of *distinct articles* with offers from this
+    # vendor. The 200-doc sample has minimal hash dedup, so this is
+    # roughly equal to the offer count.
+    assert body["metadata"]["hitCount"] >= 1
+    assert body["metadata"]["hitCount"] <= expected
+
+
+def test_search_mode_both_populates_articles_and_hitcount(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """BOTH: same as HITS_ONLY for articles + hitCount; F5 fills in
+    summaries. Verify the response shape doesn't degrade."""
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post(client, searchMode="BOTH", vendorIdsFilter=[top_vendor])
+    assert len(body["articles"]) >= 1
+    assert body["metadata"]["hitCount"] >= 1
+
+
+def _post_with_sort(client: TestClient, sort: str, **overrides) -> dict:
+    body = {**_BASE_BODY, **overrides}
+    r = client.post(f"/{OFFERS}/_search?pageSize=500&sort={sort}", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_sort_articleid_asc_orders_articles_by_representative_id(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post_with_sort(client, "articleId,asc", vendorIdsFilter=[top_vendor])
+    ids = _ids(body)
+    assert ids == sorted(ids), f"ids not sorted asc: {ids[:5]} ..."
+
+
+def test_sort_articleid_desc_orders_articles_by_representative_id(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post_with_sort(client, "articleId,desc", vendorIdsFilter=[top_vendor])
+    ids = _ids(body)
+    assert ids == sorted(ids, reverse=True), f"ids not sorted desc: {ids[:5]} ..."
+
+
+def test_pagination_returns_distinct_slices(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """page=1 and page=2 must produce disjoint result sets when sort
+    is deterministic. Use sort=articleId,asc + a wide vendor filter."""
+    all_vendors = sorted({r["vendor_id"] for r in projected_rows})
+    page_1 = client.post(
+        f"/{OFFERS}/_search?pageSize=5&page=1&sort=articleId,asc",
+        json={**_BASE_BODY, "vendorIdsFilter": all_vendors},
+    ).json()
+    page_2 = client.post(
+        f"/{OFFERS}/_search?pageSize=5&page=2&sort=articleId,asc",
+        json={**_BASE_BODY, "vendorIdsFilter": all_vendors},
+    ).json()
+    p1_ids = _ids(page_1)
+    p2_ids = _ids(page_2)
+    assert len(p1_ids) == 5
+    assert len(p2_ids) == 5
+    assert set(p1_ids).isdisjoint(set(p2_ids)), (
+        f"page 1 and page 2 overlap: {set(p1_ids) & set(p2_ids)}"
+    )
+    # Both pages share the same hitCount (it's over the full filtered set).
+    assert page_1["metadata"]["hitCount"] == page_2["metadata"]["hitCount"]
+    # pageCount = ceil(hitCount / pageSize)
+    expected_pages = (page_1["metadata"]["hitCount"] + 4) // 5
+    assert page_1["metadata"]["pageCount"] == expected_pages
+
+
+def test_hitcount_accurate_over_filtered_set(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """hitCount must reflect the full filtered set independent of pageSize.
+    Filter to a single vendor's namespace (we control the sample) and
+    confirm pageSize=1 vs pageSize=500 yield the same hitCount."""
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body_small = client.post(
+        f"/{OFFERS}/_search?pageSize=1",
+        json={**_BASE_BODY, "vendorIdsFilter": [top_vendor]},
+    ).json()
+    body_large = client.post(
+        f"/{OFFERS}/_search?pageSize=500",
+        json={**_BASE_BODY, "vendorIdsFilter": [top_vendor]},
+    ).json()
+    assert body_small["metadata"]["hitCount"] == body_large["metadata"]["hitCount"]
+
+
+def test_hitcount_clipped_when_cap_exceeded(
+    monkeypatch_session, projected_rows: list[dict],
+) -> None:
+    """Reload with `HITCOUNT_CAP=1`. A vendor + manufacturer filter
+    matches more than 1 distinct article in our namespace → cap fires:
+    `hitCount == 1`, `hitCountClipped == True`."""
+    from collections import Counter
+    # Pick a vendor + manufacturer pair that has at least 2 distinct
+    # articles in the sample.
+    pair_counts = Counter(
+        (r["vendor_id"], r["manufacturerName"]) for r in projected_rows
+        if r.get("manufacturerName")
+    )
+    if not pair_counts:
+        pytest.skip("no (vendor, manufacturer) pairs in sample")
+    (vendor, mfr), count = pair_counts.most_common(1)[0]
+    if count < 2:
+        pytest.skip("most popular (vendor, manufacturer) pair has only one row")
+
+    # _make_client sets the dedup envs + EMBED_URL/MILVUS_URI; layering
+    # HITCOUNT_CAP after captures the small cap.
+    with _make_client(monkeypatch_session) as _c_warmup:
+        pass  # ensure the standard envs are in monkeypatch_session
+    monkeypatch_session.setenv("HITCOUNT_CAP", "1")
+    import importlib
+
+    import main as main_mod
+    importlib.reload(main_mod)
+    try:
+        with TestClient(main_mod.app) as c:
+            body = c.post(
+                f"/{OFFERS}/_search?pageSize=10",
+                json={**_BASE_BODY,
+                      "vendorIdsFilter": [vendor],
+                      "manufacturersFilter": [mfr]},
+            ).json()
+            assert body["metadata"]["hitCount"] == 1
+            assert body["metadata"]["hitCountClipped"] is True
+    finally:
+        monkeypatch_session.delenv("HITCOUNT_CAP", raising=False)
+        importlib.reload(main_mod)
+
+
+def test_sort_name_smoke(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """sort=name needs the article-meta fetch path to fire. Verify a
+    request returns 200 and articles are present (exact name ordering
+    against shared test data is brittle — assert the response shape)."""
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post_with_sort(client, "name,asc", vendorIdsFilter=[top_vendor])
+    assert "articles" in body
+    assert body["metadata"]["hitCount"] >= 1

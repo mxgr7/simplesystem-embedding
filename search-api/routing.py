@@ -1,4 +1,5 @@
-"""F9 routing — dispatch a SearchRequest across the two-collection topology.
+"""F9 routing + F4 sort/paging — dispatch a SearchRequest across the
+two-collection topology with sort, hitCount and relevance-pool bounds.
 
 Two paths, picked deterministically by F9 §"Routing rule":
 
@@ -6,7 +7,8 @@ Two paths, picked deterministically by F9 §"Routing rule":
     1. ANN + BM25 on `articles_v{N}` constrained to `article_expr`.
     2. RRF fuse over `article_hash`.
     3. Resolve offers: query `offers_v{N}` filtered by `article_hash IN [...]`.
-    4. Pick representative offer per hash; price post-pass; paginate.
+    4. Pick representative offer per hash (sort-aware); price post-pass;
+       sort + paginate.
 
   Path B (filter-first) — at least one per-offer filter applies:
     1. Bounded probe: query `offers_v{N}` with `offer_expr`, limit
@@ -16,8 +18,20 @@ Two paths, picked deterministically by F9 §"Routing rule":
        filters; documented in spec §2.4).
     3. Otherwise: ANN + BM25 on `articles_v{N}` with
        `article_hash IN [probe-hashes] AND article_expr`.
-    4. Re-attach offers from the probe (no extra round-trip);
-       representative selection; price post-pass; paginate.
+    4. Re-attach offers from the probe; sort-aware representative
+       selection; price post-pass; sort + paginate.
+
+F4 sort + hitCount layers on top:
+
+  * Sort: relevance (default), articleId, name, price (asc|desc).
+    Multi-key requests apply only the first key.
+  * Relevance-pool bounding: when sort is non-relevance AND a query
+    string is present, the ranked candidate pool is capped at
+    `RELEVANCE_POOL_MAX` and floor-pruned at `RELEVANCE_SCORE_FLOOR ×
+    top_score`. Browse (no query) skips both bounds.
+  * hitCount: total filtered article count via a separate `query()`
+    pass capped at `HITCOUNT_CAP`. Clipped flag set if the cap fires
+    or Path B's probe overflowed.
 
 Path A and Path B are *not* recall-equivalent under selective offer
 filters — choosing the wrong path silently under-recalls. The rule is
@@ -37,7 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Sequence
 
 import numpy as np
@@ -49,8 +63,19 @@ from filters import (
     has_per_vendor_blocked_eclass,
 )
 from hybrid import Hit, is_strict_identifier, rrf_merge
-from models import EClassVersion, SearchRequest
-from prices import passes_price_filter
+from models import EClassVersion, SearchRequest, SortDirection
+from prices import resolve_price
+
+
+_DEFAULT_DIRECTION = SortDirection.DESC
+from sorting import (
+    SortField,
+    SortPlan,
+    _Materialised,
+    bound_relevance_pool,
+    pick_representative,
+    sort_items,
+)
 
 EmbedFn = Callable[[str], Awaitable[list[float]]]
 
@@ -68,6 +93,11 @@ DEFAULT_DENSE_POOL = 200
 DEFAULT_BM25_POOL = 200
 DEFAULT_RRF_K = 60
 
+# F4 — relevance-pool bounds and hitCount cap.
+DEFAULT_RELEVANCE_POOL_MAX = 200
+DEFAULT_RELEVANCE_SCORE_FLOOR = 0.20
+DEFAULT_HITCOUNT_CAP = 10_000
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Result + dispatch entry
@@ -78,6 +108,8 @@ class DispatchResult:
     hits: list[Hit]
     debug: dict
     recall_clipped: bool = False
+    hit_count: int = 0
+    hit_count_clipped: bool = False
 
 
 @dataclass(slots=True)
@@ -93,13 +125,18 @@ class _Timings:
     embed_ms: float | None = None
     dense_ms: float | None = None
     bm25_ms: float | None = None
+    sort_field: str | None = None
+    relevance_bound_dropped: int | None = None
+    hit_count_query_ms: float | None = None
 
 
 async def dispatch_dedup(
     req: SearchRequest,
     *,
+    page: int = 1,
     page_size: int,
     overfetch_n: int,
+    sort_plan: SortPlan | None = None,
     client: MilvusClient,
     embed: EmbedFn,
     articles_collection: str,
@@ -109,53 +146,44 @@ async def dispatch_dedup(
     bm25_pool: int = DEFAULT_BM25_POOL,
     rrf_k: int = DEFAULT_RRF_K,
     num_candidates: int | None = None,
+    relevance_pool_max: int = DEFAULT_RELEVANCE_POOL_MAX,
+    relevance_score_floor: float = DEFAULT_RELEVANCE_SCORE_FLOOR,
+    hitcount_cap: int = DEFAULT_HITCOUNT_CAP,
 ) -> DispatchResult:
-    """F9 dedup-topology dispatcher. Returns a `DispatchResult` whose
-    `hits` are offer-level (one Hit per article, representative offer
-    selected per F9 representative rule)."""
+    """F9 + F4 dispatcher. Returns a `DispatchResult` carrying the page
+    of hits (one per article, representative offer per sort rule), the
+    full filtered article hit count (capped + clipped flag), and a
+    debug envelope."""
+    if sort_plan is None:
+        sort_plan = SortPlan(SortField.RELEVANCE, _DEFAULT_DIRECTION)
     article_expr = build_article_expr(req)
     offer_expr = build_offer_expr(req)
-    timings = _Timings(article_expr=article_expr, offer_expr=offer_expr)
+    timings = _Timings(
+        article_expr=article_expr, offer_expr=offer_expr,
+        sort_field=sort_plan.field.value,
+    )
     query_text = (req.query or "").strip()
 
     price_active = _price_active(req)
-    effective_k = (
-        page_size * overfetch_n if price_active and page_size > 0
-        else max(page_size, 1)
+    rank_limit = _rank_limit(
+        sort_plan, query_text, page=page, page_size=page_size,
+        overfetch_n=overfetch_n, price_active=price_active,
+        relevance_pool_max=relevance_pool_max,
+        hitcount_cap=hitcount_cap,
+        dense_pool=dense_pool,
     )
 
+    # Path selection (F9 deterministic rule).
     if offer_expr is None:
-        # Path A — no per-offer constraint to enforce.
-        hits, debug = await _path_a(
-            req, query_text, article_expr, effective_k,
-            client=client, embed=embed,
-            articles_collection=articles_collection,
-            offers_collection=offers_collection,
-            dense_pool=dense_pool, bm25_pool=bm25_pool,
-            rrf_k=rrf_k, num_candidates=num_candidates,
-            timings=timings,
-        )
         timings.path = "A"
-        return DispatchResult(hits=hits, debug={**_debug(timings), **debug})
-
-    # Path B — bounded probe on offers.
-    t0 = time.perf_counter()
-    probe_rows = await asyncio.to_thread(
-        _offer_probe, client, offers_collection,
-        offer_expr=offer_expr, limit=path_b_hash_limit + 1,
-    )
-    timings.offer_resolve_ms = (time.perf_counter() - t0) * 1000
-    timings.probe_hits = len(probe_rows)
-
-    distinct_hashes = sorted({r["article_hash"] for r in probe_rows})
-    timings.distinct_hashes = len(distinct_hashes)
-
-    if len(distinct_hashes) > path_b_hash_limit:
-        # Probe overflow → Path A fallback. Per F9: accepts under-recall
-        # for selective-but-not-tight filters.
-        timings.probe_overflowed = True
-        hits, debug = await _path_a(
-            req, query_text, article_expr, effective_k,
+        materialised, hit_count, hit_count_clipped = await _path_a(
+            req, query_text, article_expr,
+            sort_plan=sort_plan,
+            rank_limit=rank_limit,
+            relevance_pool_max=relevance_pool_max,
+            relevance_score_floor=relevance_score_floor,
+            hitcount_cap=hitcount_cap,
+            price_active=price_active,
             client=client, embed=embed,
             articles_collection=articles_collection,
             offers_collection=offers_collection,
@@ -163,21 +191,113 @@ async def dispatch_dedup(
             rrf_k=rrf_k, num_candidates=num_candidates,
             timings=timings,
         )
-        timings.path = "A_fallback"
-        return DispatchResult(hits=hits, debug={**_debug(timings), **debug}, recall_clipped=True)
+        recall_clipped = False
+    else:
+        # Path B — bounded probe on offers.
+        t0 = time.perf_counter()
+        probe_rows = await asyncio.to_thread(
+            _offer_probe, client, offers_collection,
+            offer_expr=offer_expr, limit=path_b_hash_limit + 1,
+        )
+        timings.offer_resolve_ms = (time.perf_counter() - t0) * 1000
+        timings.probe_hits = len(probe_rows)
 
-    timings.path = "B"
-    hits, debug = await _path_b(
-        req, query_text, article_expr, distinct_hashes, probe_rows,
-        page_size=page_size, effective_k=effective_k,
-        client=client, embed=embed,
-        articles_collection=articles_collection,
-        dense_pool=dense_pool, bm25_pool=bm25_pool,
-        rrf_k=rrf_k, num_candidates=num_candidates,
-        price_active=price_active,
-        timings=timings,
+        distinct_hashes = sorted({r["article_hash"] for r in probe_rows})
+        timings.distinct_hashes = len(distinct_hashes)
+
+        if len(distinct_hashes) > path_b_hash_limit:
+            # Probe overflow → Path A fallback with clipped hit count
+            # (the true count is unknown beyond the probe limit).
+            timings.probe_overflowed = True
+            timings.path = "A_fallback"
+            materialised, _hit_count_unused, _clipped_unused = await _path_a(
+                req, query_text, article_expr,
+                sort_plan=sort_plan,
+                rank_limit=rank_limit,
+                relevance_pool_max=relevance_pool_max,
+                relevance_score_floor=relevance_score_floor,
+                hitcount_cap=hitcount_cap,
+                price_active=price_active,
+                client=client, embed=embed,
+                articles_collection=articles_collection,
+                offers_collection=offers_collection,
+                dense_pool=dense_pool, bm25_pool=bm25_pool,
+                rrf_k=rrf_k, num_candidates=num_candidates,
+                timings=timings,
+                skip_count=True,
+            )
+            # hit_count for the fallback request is not the article-side
+            # count — the user filtered by per-offer expr that we
+            # couldn't fully enforce. Report the probe-limit lower bound
+            # with `hit_count_clipped=True`.
+            hit_count = path_b_hash_limit
+            hit_count_clipped = True
+            recall_clipped = True
+        else:
+            timings.path = "B"
+            materialised, hit_count, hit_count_clipped = await _path_b(
+                req, query_text, article_expr, distinct_hashes, probe_rows,
+                sort_plan=sort_plan,
+                rank_limit=rank_limit,
+                relevance_pool_max=relevance_pool_max,
+                relevance_score_floor=relevance_score_floor,
+                hitcount_cap=hitcount_cap,
+                price_active=price_active,
+                client=client, embed=embed,
+                articles_collection=articles_collection,
+                dense_pool=dense_pool, bm25_pool=bm25_pool,
+                rrf_k=rrf_k, num_candidates=num_candidates,
+                timings=timings,
+            )
+            recall_clipped = False
+
+    # Final sort, then page slice. _Materialised already carries the
+    # representative offer + sort-key data; sort_items applies the
+    # primary sort with the universal articleId-asc tiebreak.
+    sorted_items = sort_items(materialised, sort_plan)
+    page_offset = max(0, (page - 1) * page_size)
+    page_slice = sorted_items[page_offset:page_offset + page_size]
+    hits = _to_hits(page_slice, sort_plan)
+
+    return DispatchResult(
+        hits=hits,
+        debug=_debug(timings),
+        recall_clipped=recall_clipped,
+        hit_count=hit_count,
+        hit_count_clipped=hit_count_clipped,
     )
-    return DispatchResult(hits=hits, debug={**_debug(timings), **debug})
+
+
+def _rank_limit(
+    sort_plan: SortPlan,
+    query_text: str,
+    *,
+    page: int,
+    page_size: int,
+    overfetch_n: int,
+    price_active: bool,
+    relevance_pool_max: int,
+    hitcount_cap: int,
+    dense_pool: int,
+) -> int:
+    """How many candidate articles the rank step should fetch.
+
+      relevance + query: max(page * page_size * overfetch, dense_pool)
+        — over-fetch covers both paging and price post-pass drops.
+      relevance + browse: hitcount_cap — ordering is undefined, so
+        return as many as the hitcount cap allows so the page slice
+        can land anywhere in the filtered set.
+      non-relevance + query: relevance_pool_max — F4 bounds the pool.
+      non-relevance + browse: hitcount_cap — full filtered set sortable.
+    """
+    page_window = max(page * page_size, 1) * (overfetch_n if price_active else 1)
+    if sort_plan.is_relevance:
+        if query_text:
+            return max(page_window, dense_pool)
+        return hitcount_cap
+    if query_text:
+        return relevance_pool_max
+    return hitcount_cap
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -188,8 +308,13 @@ async def _path_a(
     req: SearchRequest,
     query_text: str,
     article_expr: str | None,
-    effective_k: int,
     *,
+    sort_plan: SortPlan,
+    rank_limit: int,
+    relevance_pool_max: int,
+    relevance_score_floor: float,
+    hitcount_cap: int,
+    price_active: bool,
     client: MilvusClient,
     embed: EmbedFn,
     articles_collection: str,
@@ -199,53 +324,85 @@ async def _path_a(
     rrf_k: int,
     num_candidates: int | None,
     timings: _Timings,
-) -> tuple[list[Hit], dict]:
+    skip_count: bool = False,
+) -> tuple[list[_Materialised], int, bool]:
     """Vector-first path. Article expression pushed down to ANN/BM25;
     offer resolve attaches per-hash offers (no offer-side filter)."""
     if query_text:
         ranked_hashes = await _rank_articles(
             query_text, article_expr, client=client, embed=embed,
             articles_collection=articles_collection,
-            limit=effective_k, dense_pool=dense_pool, bm25_pool=bm25_pool,
+            limit=rank_limit, dense_pool=dense_pool, bm25_pool=bm25_pool,
             rrf_k=rrf_k, num_candidates=num_candidates, timings=timings,
         )
-    else:
-        # No query string → no defensible ANN ordering. Browse-only:
-        # query articles for any hash matching article_expr (no order).
-        # If no article_expr either, return nothing (mirrors legacy
-        # _filter_only_browse on no-filter no-query).
-        if article_expr is None:
-            return [], {}
+    elif article_expr is not None:
+        # Browse-only mode: any article matching article_expr.
         t0 = time.perf_counter()
         rows = await asyncio.to_thread(
             _article_browse, client, articles_collection,
-            article_expr=article_expr, limit=effective_k,
+            article_expr=article_expr, limit=rank_limit,
         )
         timings.article_rank_ms = (time.perf_counter() - t0) * 1000
         ranked_hashes = [(r["article_hash"], 0.0) for r in rows]
+    else:
+        # No query, no article filter, no offer filter — no defensible
+        # default browse. Mirrors the legacy `_filter_only_browse`
+        # behaviour of returning nothing.
+        return [], 0, False
+
+    # Relevance-pool bound: only when sort is non-relevance AND query
+    # is present. Browse traffic and relevance-default sort skip both
+    # bounds (per F4 §"Relevance-pool bounding").
+    if not sort_plan.is_relevance and query_text:
+        before = len(ranked_hashes)
+        ranked_hashes = bound_relevance_pool(
+            ranked_hashes,
+            pool_max=relevance_pool_max, score_floor=relevance_score_floor,
+        )
+        timings.relevance_bound_dropped = before - len(ranked_hashes)
 
     if not ranked_hashes:
-        return [], {}
+        if skip_count:
+            return [], 0, False
+        hit_count, clipped = await _count_articles(
+            client, articles_collection,
+            article_expr=article_expr, hashes=None, cap=hitcount_cap,
+            timings=timings,
+        )
+        return [], hit_count, clipped
 
-    # Resolve offers: hash IN [ranked]. No offer-side expr filter.
     hashes = [h for h, _ in ranked_hashes]
-    t0 = time.perf_counter()
-    offers_by_hash = await asyncio.to_thread(
+
+    # Concurrent: offer resolve, article meta (name/eclass), hit count.
+    offers_task = asyncio.to_thread(
         _resolve_offers, client, offers_collection,
         hashes=hashes, offer_expr=None,
         need_eclass_post_pass=has_per_vendor_blocked_eclass(req),
     )
-    timings.offer_resolve_ms = (timings.offer_resolve_ms or 0.0) + (time.perf_counter() - t0) * 1000
-
-    # Per-vendor blocked_eclass_vendors needs article eclass codes for
-    # the filtered post-pass. Fetch from articles when active.
-    article_meta = await _maybe_fetch_article_meta(
-        client, articles_collection, hashes, req,
+    meta_task = _fetch_article_meta(
+        client, articles_collection, hashes, req, sort_plan=sort_plan,
     )
 
-    return _materialise_hits(
+    t0 = time.perf_counter()
+    if skip_count:
+        offers_by_hash, article_meta = await asyncio.gather(offers_task, meta_task)
+        hit_count, clipped = 0, False
+    else:
+        count_task = _count_articles(
+            client, articles_collection,
+            article_expr=article_expr, hashes=None, cap=hitcount_cap,
+            timings=timings,
+        )
+        offers_by_hash, article_meta, (hit_count, clipped) = await asyncio.gather(
+            offers_task, meta_task, count_task,
+        )
+    timings.offer_resolve_ms = (timings.offer_resolve_ms or 0.0) + (time.perf_counter() - t0) * 1000
+
+    materialised = _materialise(
         ranked_hashes, offers_by_hash, article_meta, req,
-    ), {}
+        sort_plan=sort_plan, price_active=price_active,
+    )
+    return materialised, hit_count, clipped
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -259,8 +416,12 @@ async def _path_b(
     distinct_hashes: list[str],
     probe_rows: list[dict],
     *,
-    page_size: int,
-    effective_k: int,
+    sort_plan: SortPlan,
+    rank_limit: int,
+    relevance_pool_max: int,
+    relevance_score_floor: float,
+    hitcount_cap: int,
+    price_active: bool,
     client: MilvusClient,
     embed: EmbedFn,
     articles_collection: str,
@@ -268,65 +429,74 @@ async def _path_b(
     bm25_pool: int,
     rrf_k: int,
     num_candidates: int | None,
-    price_active: bool,
     timings: _Timings,
-) -> tuple[list[Hit], dict]:
-    """Filter-first path. Bounded probe already returned `probe_rows`
-    constrained to `offer_expr`; this function ranks the matching hashes
-    via the article ANN/BM25 (constrained to `hash IN distinct_hashes`)
-    and re-attaches offers from the probe."""
-    # Group probe rows by hash so we can re-attach without another query.
+) -> tuple[list[_Materialised], int, bool]:
+    """Filter-first path. Probe already enforced offer_expr; rank the
+    matching hashes (or browse if no query); re-attach probe offers."""
     offers_by_hash: dict[str, list[dict]] = {}
     for r in probe_rows:
         offers_by_hash.setdefault(r["article_hash"], []).append(r)
 
     if not distinct_hashes:
-        return [], {}
+        return [], 0, False
+
+    constrained_hash_expr = _hash_in_expr(distinct_hashes)
 
     if query_text:
-        # Constrain article ANN/BM25 to the probe hashes + article_expr.
-        constrained_expr = _and_exprs(
-            _hash_in_expr(distinct_hashes), article_expr,
-        )
+        constrained_expr = _and_exprs(constrained_hash_expr, article_expr)
         ranked_hashes = await _rank_articles(
             query_text, constrained_expr, client=client, embed=embed,
             articles_collection=articles_collection,
-            limit=effective_k, dense_pool=dense_pool, bm25_pool=bm25_pool,
+            limit=rank_limit, dense_pool=dense_pool, bm25_pool=bm25_pool,
             rrf_k=rrf_k, num_candidates=num_candidates, timings=timings,
         )
     elif article_expr is not None:
-        # No query but article_expr applies: query articles to filter the
-        # probe hashes by article-side constraints (categories, eclass,
-        # manufacturer). Order is unspecified — Milvus returns whatever.
-        constrained_expr = _and_exprs(
-            _hash_in_expr(distinct_hashes), article_expr,
-        )
+        constrained_expr = _and_exprs(constrained_hash_expr, article_expr)
         t0 = time.perf_counter()
         rows = await asyncio.to_thread(
             _article_browse, client, articles_collection,
-            article_expr=constrained_expr, limit=effective_k,
+            article_expr=constrained_expr, limit=rank_limit,
         )
         timings.article_rank_ms = (time.perf_counter() - t0) * 1000
         ranked_hashes = [(r["article_hash"], 0.0) for r in rows]
     else:
-        # No query AND no article_expr: present probe results in
-        # deterministic id-ascending order. Milvus's row order is stable
-        # within a query but not meaningful — pick a deterministic
-        # representative-offer order so callers see consistent results.
+        # No query, no article_expr — probe order is the only ordering.
         ranked_hashes = [(h, 0.0) for h in distinct_hashes]
 
-    if not ranked_hashes:
-        return [], {}
+    if not sort_plan.is_relevance and query_text:
+        before = len(ranked_hashes)
+        ranked_hashes = bound_relevance_pool(
+            ranked_hashes,
+            pool_max=relevance_pool_max, score_floor=relevance_score_floor,
+        )
+        timings.relevance_bound_dropped = before - len(ranked_hashes)
 
-    # Per-vendor blocked_eclass_vendors needs article eclass codes.
+    # hitCount: count of articles in `hash IN distinct_hashes AND
+    # article_expr`. When article_expr is None, every distinct probe
+    # hash is a hit by definition.
+    if article_expr is None:
+        hit_count = len(distinct_hashes)
+        clipped = False
+    else:
+        hit_count, clipped = await _count_articles(
+            client, articles_collection,
+            article_expr=article_expr, hashes=distinct_hashes,
+            cap=hitcount_cap, timings=timings,
+        )
+
+    if not ranked_hashes:
+        return [], hit_count, clipped
+
     hashes = [h for h, _ in ranked_hashes]
-    article_meta = await _maybe_fetch_article_meta(
-        client, articles_collection, hashes, req,
+    article_meta = await _fetch_article_meta(
+        client, articles_collection, hashes, req, sort_plan=sort_plan,
     )
 
-    return _materialise_hits(
+    materialised = _materialise(
         ranked_hashes, offers_by_hash, article_meta, req,
-    ), {}
+        sort_plan=sort_plan, price_active=price_active,
+    )
+    return materialised, hit_count, clipped
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -546,29 +716,53 @@ def _bm25_search_articles(
 # Materialisation: representative-offer pick + price post-pass
 # ──────────────────────────────────────────────────────────────────────
 
-def _materialise_hits(
+def _materialise(
     ranked_hashes: list[tuple[str, float]],
     offers_by_hash: dict[str, list[dict]],
     article_meta: dict[str, dict] | None,
     req: SearchRequest,
-) -> list[Hit]:
-    """For each ranked hash, pick a representative offer and apply the
-    price post-pass + per-vendor blocked_eclass_vendors filter (Python).
-    Articles whose offers all fail post-pass drop from the response."""
-    out: list[Hit] = []
+    *,
+    sort_plan: SortPlan,
+    price_active: bool,
+) -> list[_Materialised]:
+    """For each ranked hash, run the per-vendor blocked-eclass post-pass
+    (when active), pick a sort-aware representative offer, and capture
+    the article-level data needed for the final sort.
+
+    Articles whose offers all fail the post-pass drop. The returned list
+    is in rank order (caller applies the final sort)."""
+    out: list[_Materialised] = []
     sas = req.selected_article_sources
     pf = req.price_filter
-    price_active = _price_active(req)
+    bound_currency = pf.currency_code if pf else "EUR"
+    per_vendor_blocked = has_per_vendor_blocked_eclass(req)
+
+    def _resolver(o: dict) -> "Decimal | None":
+        # Returns the resolved price under the request scope, or None if
+        # no in-scope price exists OR the price falls outside the
+        # request's price filter bounds. The materialiser's caller treats
+        # None as "this offer doesn't pass the price post-pass" — so a
+        # filter-active request automatically drops out-of-bounds offers.
+        from prices import decode_minor_units
+        resolved = resolve_price(
+            o.get("prices"),
+            currency=req.currency,
+            source_price_list_ids=sas.source_price_list_ids,
+        )
+        if resolved is None:
+            return None
+        if pf and pf.min is not None and resolved < decode_minor_units(pf.min, bound_currency):
+            return None
+        if pf and pf.max is not None and resolved > decode_minor_units(pf.max, bound_currency):
+            return None
+        return resolved
 
     for hash_, score in ranked_hashes:
         offers = offers_by_hash.get(hash_, [])
         if not offers:
             continue
 
-        # Per-vendor blocked_eclass_vendors filter (Python post-pass).
-        # Drops offers whose vendor is in a restricted list AND whose
-        # article eclass falls into the blocked set.
-        if article_meta is not None and has_per_vendor_blocked_eclass(req):
+        if per_vendor_blocked and article_meta is not None:
             article = article_meta.get(hash_, {})
             offers = [
                 o for o in offers
@@ -577,26 +771,45 @@ def _materialise_hits(
             if not offers:
                 continue
 
-        # Price post-pass: pick the alphabetically-lowest id offer that
-        # passes; if none pass, drop the article.
-        candidates = sorted(offers, key=lambda o: str(o.get("id", "")))
-        chosen: dict | None = None
-        for o in candidates:
-            if not price_active or passes_price_filter(
-                o.get("prices"),
-                request_currency=req.currency,
-                source_price_list_ids=sas.source_price_list_ids,
-                bound_currency_code=pf.currency_code if pf else "EUR",
-                min_minor=pf.min if pf else None,
-                max_minor=pf.max if pf else None,
-            ):
-                chosen = o
-                break
+        chosen = pick_representative(
+            offers, plan=sort_plan,
+            price_filter_active=price_active,
+            price_resolver=_resolver,
+        )
         if chosen is None:
             continue
+        offer, resolved_price = chosen
 
-        out.append(Hit(id=str(chosen["id"]), score=score, source="rrf"))
+        article_name = None
+        if sort_plan.field is SortField.NAME and article_meta is not None:
+            article_name = (article_meta.get(hash_) or {}).get("name")
+
+        out.append(_Materialised(
+            article_hash=hash_,
+            relevance_score=score,
+            representative_offer=offer,
+            resolved_price=resolved_price,
+            article_name=article_name,
+        ))
     return out
+
+
+def _to_hits(items: list[_Materialised], sort_plan: SortPlan) -> list[Hit]:
+    """Convert sorted _Materialised items into Hits.
+
+    For relevance sort, score is the RRF score and source is `rrf`.
+    For non-relevance sort, score is None per spec §3 (the wire schema
+    accepts null) and source is `sort` for telemetry."""
+    if sort_plan.is_relevance:
+        return [
+            Hit(id=str(m.representative_offer["id"]),
+                score=m.relevance_score, source="rrf")
+            for m in items
+        ]
+    return [
+        Hit(id=str(m.representative_offer["id"]), score=0.0, source="sort")
+        for m in items
+    ]
 
 
 def _per_vendor_blocked(
@@ -629,19 +842,35 @@ _ECLASS_FIELD = {
 }
 
 
-async def _maybe_fetch_article_meta(
+async def _fetch_article_meta(
     client: MilvusClient,
     articles_collection: str,
     hashes: list[str],
     req: SearchRequest,
+    *,
+    sort_plan: SortPlan,
 ) -> dict[str, dict] | None:
-    """Fetch eclass codes per article hash when the per-vendor
-    blocked-eclass-vendors post-pass is active. None otherwise."""
-    if not has_per_vendor_blocked_eclass(req) or not hashes:
+    """Fetch article-level fields needed downstream. Always batched into
+    a single query; returns None when no fields are needed.
+
+    Fields fetched on demand:
+      - `name` if sort=name (required for the final sort key).
+      - `eclassN_code` for each version referenced by per-vendor entries
+        in `blocked_eclass_vendors_filters` (required for the Python
+        post-pass on offer × article eclass correlation).
+    """
+    if not hashes:
         return None
-    fields = sorted({_ECLASS_FIELD[e.e_class_version]
-                     for e in req.blocked_eclass_vendors_filters
-                     if e.vendor_ids})
+    needed: set[str] = set()
+    if sort_plan.field is SortField.NAME:
+        needed.add("name")
+    if has_per_vendor_blocked_eclass(req):
+        needed |= {_ECLASS_FIELD[e.e_class_version]
+                   for e in req.blocked_eclass_vendors_filters
+                   if e.vendor_ids}
+    if not needed:
+        return None
+    fields = sorted(needed)
     rows = await asyncio.to_thread(
         client.query,
         collection_name=articles_collection,
@@ -650,6 +879,42 @@ async def _maybe_fetch_article_meta(
         limit=len(hashes),
     )
     return {str(r["article_hash"]): r for r in rows}
+
+
+async def _count_articles(
+    client: MilvusClient,
+    articles_collection: str,
+    *,
+    article_expr: str | None,
+    hashes: list[str] | None,
+    cap: int,
+    timings: _Timings,
+) -> tuple[int, bool]:
+    """Run a count(*)-style pass. Returns `(count, clipped)` where
+    `clipped` is true when the result hit the cap (the true count is
+    `>= count`).
+
+    `expr` composition: `article_expr ∧ (hash IN [hashes])`. Both are
+    optional; if both None we count every row in the collection (with
+    `article_hash != ""` as the always-true sentinel).
+    """
+    expr = _and_exprs(
+        article_expr,
+        _hash_in_expr(hashes) if hashes else None,
+    ) or 'article_hash != ""'
+    fetch_limit = min(cap + 1, _MILVUS_MAX_QUERY_WINDOW)
+    t0 = time.perf_counter()
+    rows = await asyncio.to_thread(
+        client.query,
+        collection_name=articles_collection,
+        filter=expr,
+        output_fields=["article_hash"],
+        limit=fetch_limit,
+    )
+    timings.hit_count_query_ms = (timings.hit_count_query_ms or 0.0) + (time.perf_counter() - t0) * 1000
+    if len(rows) > cap:
+        return (cap, True)
+    return (len(rows), False)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -680,14 +945,17 @@ def _debug(t: _Timings) -> dict:
         "path": t.path,
         "article_expr": t.article_expr,
         "offer_expr": t.offer_expr,
+        "sort_field": t.sort_field,
         "probe_hits": t.probe_hits,
         "probe_overflowed": t.probe_overflowed,
         "distinct_hashes": t.distinct_hashes,
+        "relevance_bound_dropped": t.relevance_bound_dropped,
         "embed_ms": _r(t.embed_ms),
         "dense_ms": _r(t.dense_ms),
         "bm25_ms": _r(t.bm25_ms),
         "article_rank_ms": _r(t.article_rank_ms),
         "offer_resolve_ms": _r(t.offer_resolve_ms),
+        "hit_count_query_ms": _r(t.hit_count_query_ms),
     }
 
 

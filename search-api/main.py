@@ -45,6 +45,16 @@ Environment variables:
                             Default 16383 — Milvus 2.6's `proxy.maxResultWindow`
                             quota caps `(offset+limit)` at 16384 on `query()`.
                             Raise the Milvus quota + restart to push higher.
+  RELEVANCE_POOL_MAX        F4: candidate-pool ceiling when sort is non-relevance
+                            AND a query string is present. Default 200.
+  RELEVANCE_SCORE_FLOOR     F4: relative score floor (×top_score). Candidates
+                            below this floor drop from the relevance pool when
+                            non-relevance sort is active. Default 0.20.
+  HITCOUNT_CAP              F4: maximum count returned in `metadata.hitCount`.
+                            When the cap fires, `hitCountClipped: true`.
+                            Default 10000.
+  PRICE_FILTER_OVERFETCH_N  F3: page over-fetch factor when a price filter is
+                            active. Default 10.
 """
 
 from __future__ import annotations
@@ -76,7 +86,14 @@ from models import (
     parse_sort_params,
 )
 from prices import passes_price_filter
-from routing import DEFAULT_PATH_B_HASH_LIMIT, dispatch_dedup
+from routing import (
+    DEFAULT_HITCOUNT_CAP,
+    DEFAULT_PATH_B_HASH_LIMIT,
+    DEFAULT_RELEVANCE_POOL_MAX,
+    DEFAULT_RELEVANCE_SCORE_FLOOR,
+    dispatch_dedup,
+)
+from sorting import parse_plan as parse_sort_plan
 
 BASE_DIR = Path(__file__).resolve().parent
 OPENAPI_YAML_PATH = BASE_DIR / "openapi.yaml"
@@ -193,6 +210,15 @@ async def lifespan(app: FastAPI):
     )
     app.state.path_b_hash_limit = int(
         os.environ.get("PATH_B_HASH_LIMIT", DEFAULT_PATH_B_HASH_LIMIT)
+    )
+    app.state.relevance_pool_max = int(
+        os.environ.get("RELEVANCE_POOL_MAX", DEFAULT_RELEVANCE_POOL_MAX)
+    )
+    app.state.relevance_score_floor = float(
+        os.environ.get("RELEVANCE_SCORE_FLOOR", DEFAULT_RELEVANCE_SCORE_FLOOR)
+    )
+    app.state.hitcount_cap = int(
+        os.environ.get("HITCOUNT_CAP", DEFAULT_HITCOUNT_CAP)
     )
     try:
         yield
@@ -433,13 +459,14 @@ async def _search_dedup(
     page: int,
     page_size: int,
     overfetch_n: int,
+    sort_clauses: list,
 ) -> SearchResponse:
-    """F9 dispatch: route the request through `routing.dispatch_dedup`,
-    convert the result to the `SearchResponse` envelope. The legacy
-    single-collection path stays untouched."""
+    """F9 + F4 dispatch: route through `routing.dispatch_dedup`, convert
+    the result to the `SearchResponse` envelope. SUMMARIES_ONLY skips
+    article hydration but still populates hitCount."""
     client: MilvusClient = request.app.state.milvus
     articles_collection: str = request.app.state.articles_collection
-    offers_collection: str = collection  # URL placeholder is the offer alias
+    offers_collection: str = collection
     path_b_hash_limit: int = request.app.state.path_b_hash_limit
 
     if not client.has_collection(articles_collection):
@@ -460,26 +487,45 @@ async def _search_dedup(
         vectors = await request.app.state.embed.embed([rendered])
         return vectors[0] if vectors else []
 
+    sort_plan = parse_sort_plan(sort_clauses)
+
     result = await dispatch_dedup(
-        body, page_size=page_size, overfetch_n=overfetch_n,
+        body,
+        page=page, page_size=page_size, overfetch_n=overfetch_n,
+        sort_plan=sort_plan,
         client=client, embed=embed_fn,
         articles_collection=articles_collection,
         offers_collection=offers_collection,
         path_b_hash_limit=path_b_hash_limit,
+        relevance_pool_max=request.app.state.relevance_pool_max,
+        relevance_score_floor=request.app.state.relevance_score_floor,
+        hitcount_cap=request.app.state.hitcount_cap,
     )
 
-    page_hits = result.hits[:page_size]
-    articles = [Article(articleId=h.id, score=h.score) for h in page_hits]
+    # SUMMARIES_ONLY: empty articles[] but real hitCount (F5 fills in
+    # summaries; this packet wires the mode flag).
+    skip_articles = body.search_mode is SearchMode.SUMMARIES_ONLY
+    articles = (
+        [] if skip_articles
+        else [Article(articleId=h.id, score=h.score) for h in result.hits]
+    )
+
+    page_count = (
+        (result.hit_count + page_size - 1) // page_size
+        if page_size > 0 and result.hit_count > 0 else 0
+    )
+
     return SearchResponse(
         articles=articles,
         summaries=Summaries(),
         metadata=Metadata(
             page=page,
             pageSize=page_size,
-            pageCount=0,
-            term=body.query,
-            hitCount=len(articles),
+            pageCount=page_count,
+            term=body.query or "",
+            hitCount=result.hit_count,
             recallClipped=result.recall_clipped,
+            hitCountClipped=result.hit_count_clipped,
         ),
     )
 
@@ -505,7 +551,7 @@ async def search(
     slice only) and empty summaries.
     """
     try:
-        parse_sort_params(sort)
+        sort_clauses = parse_sort_params(sort)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -518,6 +564,7 @@ async def search(
         return await _search_dedup(
             body, request, collection,
             page=page, page_size=page_size, overfetch_n=overfetch_n,
+            sort_clauses=sort_clauses,
         )
 
     expr = build_milvus_expr(body)
