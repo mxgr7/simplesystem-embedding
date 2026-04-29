@@ -22,9 +22,12 @@ clean_html: true
 limit_rows: null
 column_rename: null
 
+# Three feature slots emitted as special tokens prepended to the query text.
+# article uses 5 states (NONE / EXACT / SUBSTRING_ONLY / MISMATCH / OFFER_INVALID);
+# ean and spec use 3 states (NONE / MATCH / MISMATCH).
 features:
   enabled: false
-  slot_order: [ean, article, shape, spec, brand]
+  slot_order: [ean, article, spec]
   normalize:
     leading_zeros: keep
     multivalue_separators: ",;|"
@@ -37,12 +40,6 @@ features:
     enabled: true
     offer_fields: [article_number, manufacturer_article_number]
     min_token_len: 4
-    on_offer_invalid: none
-  shape:
-    enabled: true
-    offer_fields: [article_number, manufacturer_article_number]
-    min_token_len: 4
-    on_offer_invalid: none
   spec:
     enabled: false
     offer_fields: [name, description]
@@ -77,12 +74,6 @@ features:
       - pg_gland
       - awg
       - lumen_lux
-    on_offer_invalid: none
-  brand:
-    enabled: false
-    offer_field: manufacturer_name
-    dictionary_path: artifacts/brand_dictionary.txt
-    min_query_token_len: 3
     on_offer_invalid: none
 
 query_template: |-

@@ -2,28 +2,31 @@ import math
 import re
 import unicodedata
 from collections import Counter
-from pathlib import Path
 
 from cross_encoder_train import specs
 
 
-_NONE = "NONE"
-_MATCH = "MATCH"
-_MISMATCH = "MISMATCH"
-_STATES = (_NONE, _MATCH, _MISMATCH)
+_DEFAULT_SLOT_ORDER = ("ean", "article", "spec")
 
-_DEFAULT_SLOT_ORDER = ("ean", "article", "shape", "spec", "brand")
 _TOKEN_PREFIX = {
     "ean": "EAN",
     "article": "ART",
-    "shape": "SHAPE",
     "spec": "SPEC",
-    "brand": "BRAND",
+}
+
+# Per-slot state vocabularies. The `article` slot collapses the former
+# `article` (exact) and `shape` (substring) slots into a single 5-state
+# variable: EXACT subsumes SUBSTRING_ONLY (every exact match is also a
+# substring match), and OFFER_INVALID is now an explicit state rather than a
+# policy-controlled fallback to NONE/MISMATCH.
+_SLOT_STATES = {
+    "ean": ("NONE", "MATCH", "MISMATCH"),
+    "article": ("NONE", "EXACT", "SUBSTRING_ONLY", "MISMATCH", "OFFER_INVALID"),
+    "spec": ("NONE", "MATCH", "MISMATCH"),
 }
 
 _DIGIT_RUN = re.compile(r"\d+")
 _ALNUM_TOKEN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/\-]*[A-Za-z0-9])?")
-_WORD = re.compile(r"\w+", re.UNICODE)
 
 
 def _cfg_get(section, key, default=None):
@@ -52,7 +55,7 @@ def feature_token_names(features_cfg):
             continue
         if not _slot_enabled(features_cfg, slot):
             continue
-        for state in _STATES:
+        for state in _SLOT_STATES[slot]:
             tokens.append(f"[{prefix}_{state}]")
     return tokens
 
@@ -114,18 +117,6 @@ def _validate_alnum_id(value, min_len=4, max_len=32):
     return text
 
 
-def _validate_brand_offer(value, max_tokens=3, min_len=2, max_len=40):
-    text = _norm_unicode(value).strip().lower()
-    if not (min_len <= len(text) <= max_len):
-        return None
-    parts = text.split()
-    if len(parts) > max_tokens:
-        return None
-    if not any(c.isalpha() for c in text):
-        return None
-    return text
-
-
 def _query_ean_candidate(query):
     for match in _DIGIT_RUN.finditer(query or ""):
         run = match.group(0)
@@ -152,33 +143,6 @@ def _query_id_candidates(query, min_len=4):
     return candidates
 
 
-def _query_brand_candidate(query, brand_set, min_len=3):
-    if not query or not brand_set:
-        return None
-    text = _norm_unicode(query).lower()
-    for token in _WORD.findall(text):
-        if len(token) >= min_len and token in brand_set:
-            return token
-    return None
-
-
-def load_brand_dictionary(path):
-    if not path:
-        return set()
-    file_path = Path(path)
-    if not file_path.exists():
-        return set()
-    brands = set()
-    for line in file_path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        token = stripped.split("#", 1)[0].split()[0].strip().lower()
-        if token:
-            brands.add(token)
-    return brands
-
-
 def _emit(prefix, state):
     return f"[{prefix}_{state}]"
 
@@ -195,13 +159,8 @@ class FeatureExtractor:
 
         self.ean_cfg = _cfg_get(features_cfg, "ean")
         self.article_cfg = _cfg_get(features_cfg, "article")
-        self.shape_cfg = _cfg_get(features_cfg, "shape")
         self.spec_cfg = _cfg_get(features_cfg, "spec")
-        self.brand_cfg = _cfg_get(features_cfg, "brand")
 
-        self.brand_set = load_brand_dictionary(
-            _cfg_get(self.brand_cfg, "dictionary_path") if self.brand_cfg else None
-        )
         self.spec_rule_names = list(_cfg_get(self.spec_cfg, "rules", []) or [])
 
         normalize_cfg = _cfg_get(features_cfg, "normalize") or {}
@@ -216,13 +175,13 @@ class FeatureExtractor:
         self.rows_seen = 0
 
     def feature_token_count(self):
-        return len(self.slot_order) * len(_STATES)
+        return sum(len(_SLOT_STATES[s]) for s in self.slot_order)
 
     def token_strings(self):
         tokens = []
         for slot in self.slot_order:
             prefix = _TOKEN_PREFIX[slot]
-            for state in _STATES:
+            for state in _SLOT_STATES[slot]:
                 tokens.append(_emit(prefix, state))
         return tokens
 
@@ -234,12 +193,8 @@ class FeatureExtractor:
                 out.append(self._extract_ean(context))
             elif slot == "article":
                 out.append(self._extract_article(context))
-            elif slot == "shape":
-                out.append(self._extract_shape(context))
             elif slot == "spec":
                 out.append(self._extract_spec(context))
-            elif slot == "brand":
-                out.append(self._extract_brand(context))
         return out
 
     def _record(self, slot, key):
@@ -266,7 +221,7 @@ class FeatureExtractor:
         query_candidate = _query_ean_candidate(self._query(context))
         if query_candidate is None:
             self._record("ean", "query_none")
-            return _emit(prefix, _NONE)
+            return _emit(prefix, "NONE")
         self._record("ean", "query_present")
 
         validated = _validate_ean(
@@ -275,34 +230,19 @@ class FeatureExtractor:
         if validated is None:
             self._record("ean", "offer_invalid")
             if _on_invalid_policy(cfg) == "mismatch":
-                return _emit(prefix, _MISMATCH)
-            return _emit(prefix, _NONE)
+                return _emit(prefix, "MISMATCH")
+            return _emit(prefix, "NONE")
         self._record("ean", "offer_valid")
 
         if validated == query_candidate:
             self._record("ean", "match")
-            return _emit(prefix, _MATCH)
+            return _emit(prefix, "MATCH")
         self._record("ean", "mismatch")
-        return _emit(prefix, _MISMATCH)
+        return _emit(prefix, "MISMATCH")
 
     def _extract_article(self, context):
-        return self._extract_id(
-            context,
-            slot="article",
-            cfg=self.article_cfg,
-            substring=False,
-        )
-
-    def _extract_shape(self, context):
-        return self._extract_id(
-            context,
-            slot="shape",
-            cfg=self.shape_cfg,
-            substring=True,
-        )
-
-    def _extract_id(self, context, slot, cfg, substring):
-        prefix = _TOKEN_PREFIX[slot]
+        prefix = _TOKEN_PREFIX["article"]
+        cfg = self.article_cfg
         offer_fields = list(
             _cfg_get(
                 cfg,
@@ -314,32 +254,30 @@ class FeatureExtractor:
 
         query_candidates = _query_id_candidates(self._query(context), min_len=min_len)
         if not query_candidates:
-            self._record(slot, "query_none")
-            return _emit(prefix, _NONE)
-        self._record(slot, "query_present")
+            self._record("article", "query_none")
+            return _emit(prefix, "NONE")
+        self._record("article", "query_present")
 
         offer_values = self._collect_offer_ids(context, offer_fields)
         if not offer_values:
-            self._record(slot, "offer_invalid")
-            if _on_invalid_policy(cfg) == "mismatch":
-                return _emit(prefix, _MISMATCH)
-            return _emit(prefix, _NONE)
-        self._record(slot, "offer_valid")
+            self._record("article", "offer_invalid")
+            return _emit(prefix, "OFFER_INVALID")
+        self._record("article", "offer_valid")
 
-        if substring:
-            for cand in query_candidates:
-                for offer_id in offer_values:
-                    if cand in offer_id or offer_id in cand:
-                        self._record(slot, "match")
-                        return _emit(prefix, _MATCH)
-        else:
-            offer_set = set(offer_values)
-            for cand in query_candidates:
-                if cand in offer_set:
-                    self._record(slot, "match")
-                    return _emit(prefix, _MATCH)
-        self._record(slot, "mismatch")
-        return _emit(prefix, _MISMATCH)
+        offer_set = set(offer_values)
+        for cand in query_candidates:
+            if cand in offer_set:
+                self._record("article", "exact")
+                return _emit(prefix, "EXACT")
+
+        for cand in query_candidates:
+            for offer_id in offer_values:
+                if cand in offer_id or offer_id in cand:
+                    self._record("article", "substring_only")
+                    return _emit(prefix, "SUBSTRING_ONLY")
+
+        self._record("article", "mismatch")
+        return _emit(prefix, "MISMATCH")
 
     def _collect_offer_ids(self, context, fields):
         out = []
@@ -362,7 +300,7 @@ class FeatureExtractor:
         query_specs = specs.extract(self._query(context), self.spec_rule_names)
         if not query_specs:
             self._record("spec", "query_none")
-            return _emit(prefix, _NONE)
+            return _emit(prefix, "NONE")
         self._record("spec", "query_present")
 
         haystack_parts = []
@@ -375,47 +313,18 @@ class FeatureExtractor:
         if not haystack.strip():
             self._record("spec", "offer_invalid")
             if _on_invalid_policy(cfg) == "mismatch":
-                return _emit(prefix, _MISMATCH)
-            return _emit(prefix, _NONE)
+                return _emit(prefix, "MISMATCH")
+            return _emit(prefix, "NONE")
         self._record("spec", "offer_valid")
 
         if all(token in haystack for token in query_specs):
             self._record("spec", "match")
-            return _emit(prefix, _MATCH)
+            return _emit(prefix, "MATCH")
         self._record("spec", "mismatch")
-        return _emit(prefix, _MISMATCH)
-
-    def _extract_brand(self, context):
-        prefix = _TOKEN_PREFIX["brand"]
-        cfg = self.brand_cfg
-        offer_field = _cfg_get(cfg, "offer_field", "manufacturer_name")
-        min_query_len = int(_cfg_get(cfg, "min_query_token_len", 3) or 3)
-
-        query_brand = _query_brand_candidate(
-            self._query(context), self.brand_set, min_len=min_query_len
-        )
-        if query_brand is None:
-            self._record("brand", "query_none")
-            return _emit(prefix, _NONE)
-        self._record("brand", "query_present")
-
-        validated = _validate_brand_offer(self._field(context, offer_field))
-        if validated is None:
-            self._record("brand", "offer_invalid")
-            if _on_invalid_policy(cfg) == "mismatch":
-                return _emit(prefix, _MISMATCH)
-            return _emit(prefix, _NONE)
-        self._record("brand", "offer_valid")
-
-        if query_brand == validated or query_brand in validated.split():
-            self._record("brand", "match")
-            return _emit(prefix, _MATCH)
-        self._record("brand", "mismatch")
-        return _emit(prefix, _MISMATCH)
+        return _emit(prefix, "MISMATCH")
 
     def stats_dict(self):
         out = {f"features/{k}": int(v) for k, v in self.stats.items()}
         out["features/rows_seen"] = int(self.rows_seen)
-        out["features/brand_dict_size"] = int(len(self.brand_set))
         out["features/token_count"] = int(self.feature_token_count())
         return out
