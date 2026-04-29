@@ -17,7 +17,9 @@ into the new `articles_v{N}` collection (see
 `scripts/create_articles_collection.py`). What remains here is the
 per-offer scope:
 
-  - `id` PK as before (legacy `{friendlyId}:{base64Url(articleNumber)}`).
+  - `id` PK is `{vendor_uuid_dashed}:{base64Url(articleNumber)}` (post-F9
+    PR2b — F9 dropped the legacy friendly_id base62 encoding so the
+    DuckDB-native projection has no UDF requirement).
   - `article_hash` VARCHAR(32), INVERTED — join key into `articles_v{N}`.
   - Per-offer scalars (vendor, catalog, prices JSON, delivery, core
     markers, relationships, ean, article_number, features).
@@ -91,8 +93,9 @@ SCALAR_INDEX_FIELDS = (
 def build_schema(client: MilvusClient):
     schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
 
-    # PK: legacy composite `{friendlyId}:{base64Url(articleNumber)}`. 256
-    # leaves ample headroom (observed up to ~85 chars in fixtures).
+    # PK: `{vendor_uuid_dashed}:{base64Url(articleNumber)}`. 256 leaves
+    # ample headroom — UUID head is 36 chars, observed b64 tail tops out
+    # ~65 chars in fixtures (long INDUSTRIAL-PART article numbers).
     schema.add_field("id", DataType.VARCHAR, max_length=256, is_primary=True)
 
     # Milvus 2.6 requires every collection to declare at least one vector

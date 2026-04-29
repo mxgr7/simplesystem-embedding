@@ -20,7 +20,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from indexer.friendly_id import to_uuid
 from indexer.projection import (  # noqa: E402
     CATALOG_CURRENCIES,
     HASH_VERSION,
@@ -42,13 +41,15 @@ def records() -> list[dict]:
 
 # ---------- shape against real records -----------------------------------
 
-def test_pk_format_friendlyid_colon_b64url(records: list[dict]) -> None:
+def test_pk_format_uuid_colon_b64url(records: list[dict]) -> None:
+    """PK shape after dropping friendly_id: `{vendor_uuid_dashed}:{b64url(article_number)}`.
+    DuckDB-native projection produces both halves without a UDF."""
     row = project(records[0]).row
     assert ":" in row["id"]
-    fid, b64 = row["id"].split(":", 1)
-    # FriendlyId is 22 chars and decodes to the vendorId UUID.
-    assert len(fid) == 22
-    assert str(to_uuid(fid)) == row["vendor_id"]
+    head, b64 = row["id"].split(":", 1)
+    # Head is the canonical hyphenated UUID and matches vendor_id verbatim.
+    assert head == row["vendor_id"]
+    uuid.UUID(head)  # parses
     # b64url part round-trips to article_number.
     pad = "=" * (-len(b64) % 4)
     assert base64.urlsafe_b64decode(b64 + pad).decode("utf-8") == row["article_number"]

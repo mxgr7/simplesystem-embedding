@@ -8,8 +8,6 @@ tests, TEI for production).
 
 Legacy parity sources:
   * `articleId` composite ........ `commons/.../domain/ArticleId.java`
-  * `friendlyId` from vendorId ... `indexer/friendly_id.py` (port of
-                                   `com.devskiller.friendly_id` 1.1.0)
   * Category path encoding ....... `commons/.../domain/CategoryPath.java`
   * Single-unit price ............ `indexer/.../CalculatingPrice.java`
                                    `indexer/.../Pricing.java#priceForLowestAmount`
@@ -43,7 +41,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Iterable
 
-from indexer.friendly_id import to_friendly_id
 
 log = logging.getLogger(__name__)
 
@@ -321,7 +318,7 @@ def project(record: dict[str, Any]) -> ProjectionResult:
 
     vendor_uuid = _decode_uuid(outer["vendorId"])
     article_number = outer["articleNumber"]
-    pk = f"{to_friendly_id(vendor_uuid)}:{_b64url_no_pad(article_number)}"
+    pk = f"{vendor_uuid}:{_b64url_no_pad(article_number)}"
 
     # Prices: built-in `pricings.{open,closed}` + joined `pricings[]` rows.
     prices_out: list[dict[str, Any]] = []

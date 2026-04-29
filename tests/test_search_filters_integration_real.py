@@ -194,12 +194,16 @@ def test_and_composition_strictly_narrows(
 def test_articleid_format_matches_legacy(
     client: TestClient, projected_rows: list[dict],
 ) -> None:
-    """Acceptance: every articleId on the wire is `{friendlyId}:{base64Url}`
-    (22-char friendlyId, ":", at least one b64 char)."""
+    """Acceptance: every articleId on the wire is `{vendor_uuid}:{base64Url}`
+    (36-char hyphenated UUID, ":", at least one b64 char). PK shape changed
+    in F9 PR2b to drop the legacy friendly_id encoding — the DuckDB-native
+    projection has no base62 primitive, and the UUID prefix is just as
+    grep-able and ~2× more diagnostic when staring at a search response."""
+    import uuid as _uuid
     body = _post(client, vendorIdsFilter=[r["vendor_id"] for r in projected_rows])
     for aid in _ids(body):
         head, _, tail = aid.partition(":")
-        assert len(head) == 22, f"friendly_id wrong length on {aid!r}"
+        _uuid.UUID(head)  # parses as a canonical UUID
         assert tail, f"empty articleNumber portion on {aid!r}"
 
 
