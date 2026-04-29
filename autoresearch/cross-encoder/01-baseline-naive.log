@@ -1,0 +1,197 @@
+Seed set to 42
+model:
+  model_name: deepset/gelectra-large
+  head_dropout: 0.1
+  label_smoothing: 0.0
+  focal_gamma: 2.0
+  use_class_weights: false
+  gradient_checkpointing: false
+  compile: true
+data:
+  path: ../data/queries_offers_esci/queries_offers_merged_labeled.parquet
+  positive_label: Exact
+  split_column: split
+  column_mapping:
+    query_id: query_id
+    offer_id: offer_id
+    query_term: query_term
+    name: name
+    manufacturer_name: manufacturer_name
+    manufacturer_article_number: manufacturer_article_number
+    manufacturer_article_type: manufacturer_article_type
+    article_number: article_number
+    ean: ean
+    category_paths: category_paths
+    description: description
+    label: label
+  batch_size: 32
+  num_workers: 8
+  pin_memory: true
+  max_pair_length: 512
+  val_fraction: 0.05
+  clean_html: true
+  limit_rows: null
+  column_rename: null
+  features:
+    enabled: false
+    slot_order:
+    - ean
+    - article
+    - spec
+    normalize:
+      leading_zeros: keep
+      multivalue_separators: ',;|'
+    ean:
+      enabled: true
+      offer_field: ean
+      validate: gtin
+      on_offer_invalid: none
+    article:
+      enabled: true
+      offer_fields:
+      - article_number
+      - manufacturer_article_number
+      min_token_len: 4
+    spec:
+      enabled: false
+      offer_fields:
+      - name
+      - description
+      rules:
+      - thread_m
+      - g_thread
+      - dimensions
+      - fraction
+      - decimal_de
+      - mm
+      - cm
+      - micrometre
+      - cross_sect
+      - inch_zoll
+      - voltage
+      - ampere
+      - ah
+      - watt
+      - hz
+      - volume_l
+      - mass_kg
+      - pressure
+      - din
+      - iso
+      - en_norm
+      - strength_cls
+      - stainless
+      - ral_color
+      - ip_rating
+      - cat_rating
+      - dn_nw_pn
+      - pg_gland
+      - awg
+      - lumen_lux
+      on_offer_invalid: none
+  query_template: '{{ query_term }}'
+  offer_template: 'Artikel: {{ name }}
+
+    {% if ean %} EAN: {{ ean }}{% endif %}
+
+    {% if article_number %} Artikelnummer: {{ article_number }}{% endif %}
+
+    {% if manufacturer_article_number %} Herstellernummer: {{ manufacturer_article_number
+    }}{% endif %}
+
+    {% if category_text %} Kategorie: {{ category_text }}{% endif %}
+
+    {% if manufacturer_article_type %} Artikeltyp: {{ manufacturer_article_type }}{%
+    endif %}
+
+    {% if manufacturer_name %} Marke: {{ manufacturer_name }}{% endif %}
+
+    {% if clean_description %} Beschreibung: {{ clean_description }}{% endif %}'
+trainer:
+  accelerator: auto
+  devices: 1
+  max_epochs: 1
+  max_time: null
+  precision: bf16-mixed
+  log_every_n_steps: 10
+  accumulate_grad_batches: 1
+  deterministic: false
+  limit_train_batches: 1.0
+  limit_val_batches: 1.0
+  val_check_interval: 1.0
+  checkpoint_dir: checkpoints
+  enable_checkpointing: true
+  resume_from_checkpoint: null
+  monitor_metric: val/cls/micro_f1
+  monitor_mode: max
+  validate_before_training: false
+optimizer:
+  lr: 1.5e-05
+  weight_decay: 0.01
+  scheduler: constant_with_warmup
+  warmup_ratio: 0.33
+  warmup_steps: null
+  override_lr_on_resume: false
+logger:
+  tracking_uri: http://127.0.0.1:5001
+  experiment_name: simplesystem-embedding
+  run_name: 01-baseline-naive-retrain-1ep
+  log_model: false
+  tags:
+    project: embedding-train
+seed: 42
+log_level: WARNING
+
+Loading weights:   0%|          | 0/389 [00:00<?, ?it/s]Loading weights: 100%|██████████| 389/389 [00:00<00:00, 6539.60it/s]
+[1mElectraModel LOAD REPORT[0m from: deepset/gelectra-large
+Key                                               | Status     |  | 
+--------------------------------------------------+------------+--+-
+discriminator_predictions.dense.bias              | UNEXPECTED |  | 
+discriminator_predictions.dense_prediction.weight | UNEXPECTED |  | 
+discriminator_predictions.dense.weight            | UNEXPECTED |  | 
+discriminator_predictions.dense_prediction.bias   | UNEXPECTED |  | 
+electra.embeddings.position_ids                   | UNEXPECTED |  | 
+
+[3mNotes:
+- UNEXPECTED[3m	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.[0m
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+💡 Tip: For seamless cloud logging and experiment tracking, try installing [litlogger](https://pypi.org/project/litlogger/) to enable LitLogger, which logs metrics and artifacts automatically to the Lightning Experiments platform.
+`Trainer(limit_train_batches=1.0)` was configured so 100% of the batches per epoch will be used..
+`Trainer(limit_val_batches=1.0)` was configured so 100% of the batches will be used..
+`Trainer(val_check_interval=1.0)` was configured so validation will run at the end of the training epoch..
+Loaded dataset: {'train_rows': 624501, 'val_rows': 76048, 'train_queries': 16044, 'val_queries': 1950, 'skipped_rows': 0, 'skipped_unknown_label': 0, 'target_val_queries': 1950, 'selected_val_queries': 1950, 'connected_components': 17994, 'split_assignment': True, 'skipped_other_split_rows': 75179, 'train_irrelevant_rows': 216993, 'val_irrelevant_rows': 25638, 'train_complement_rows': 10034, 'val_complement_rows': 1394, 'train_substitute_rows': 81073, 'val_substitute_rows': 9660, 'train_exact_rows': 316401, 'val_exact_rows': 39356, 'class_weight_0': 0.7194944076537031, 'class_weight_1': 15.559622284233606, 'class_weight_2': 1.9257366817559483, 'class_weight_3': 0.49344107635563733}
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+Loading `train_dataloader` to estimate number of stepping batches.
+/home/max/workspaces/simplesystem/embedding/.venv/lib/python3.13/site-packages/lightning/pytorch/utilities/_pytree.py:21: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+/home/max/workspaces/simplesystem/embedding/.venv/lib/python3.13/site-packages/lightning/pytorch/utilities/model_summary/model_summary.py:242: Precision bf16-mixed is not supported by the model summary.  Estimated model size in MB will not be accurate. Using 32 bits instead.
+┏━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name       ┃ Type            ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ encoder    │ OptimizedModule │  334 M │ eval  │     0 │
+│ 1 │ dropout    │ Dropout         │      0 │ train │     0 │
+│ 2 │ classifier │ Linear          │  4.1 K │ train │     0 │
+└───┴────────────┴─────────────────┴────────┴───────┴───────┘
+Trainable params: 334 M                                                         
+Non-trainable params: 0                                                         
+Total params: 334 M                                                             
+Total estimated model params size (MB): 1.3 K                                   
+Modules in train mode: 2                                                        
+Modules in eval mode: 442                                                       
+Total FLOPs: 0                                                                  
+/home/max/workspaces/simplesystem/embedding/.venv/lib/python3.13/site-packages/lightning/pytorch/loops/fit_loop.py:534: Found 442 module(s) in eval mode at the start of training. This may lead to unexpected behavior during training. If this is intentional, you can ignore this warning.
+`Trainer.fit` stopped: `max_epochs=1` reached.
+Epoch 0/0  ━━━━━━━━━━━━━━━ 19516/19516 0:38:38 •       7.42it/s v_num: d368     
+                                       0:00:00                  train/loss_step:
+                                                                0.022 val/loss: 
+                                                                0.130           
+                                                                val/cls/macro_f…
+                                                                0.780           
+                                                                val/rank/ndcg_a…
+                                                                0.924           
+                                                                train/loss_epoc…
+                                                                0.128           
+🏃 View run 01-baseline-naive-retrain-1ep at: http://127.0.0.1:5001/#/experiments/8/runs/0ac8299883d5453e9267b061cc9bd368
+🧪 View experiment at: http://127.0.0.1:5001/#/experiments/8
+Best checkpoint: /home/max/workspaces/simplesystem/embedding/checkpoints/01-baseline-naive-retrain-1ep/best-step=19516-val_cls_micro_f1=0.8851.ckpt
