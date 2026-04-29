@@ -78,6 +78,7 @@ from embed_client import EmbedClient
 from filters import build_milvus_expr
 from metrics import record_search, record_search_error
 from milvus_helpers import BoundedMilvusClient
+from tracing import extract_trace_context, log_request_context
 from hybrid import Hit, Mode, SearchParams, run_search
 from models import (
     Article,
@@ -281,6 +282,20 @@ async def require_api_key(request: Request, call_next):
 
 
 @app.middleware("http")
+async def trace_context(request: Request, call_next):
+    """F7 §"Tracing baggage" — parse W3C trace headers from inbound,
+    stash a `TraceContext` on `request.state.trace_ctx`, log a single
+    structured line per request so a log shipper can correlate by
+    trace_id. Public endpoints (/metrics, /docs, etc.) are skipped."""
+    if request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+    ctx = extract_trace_context(dict(request.headers))
+    request.state.trace_ctx = ctx
+    log_request_context(ctx, route=request.url.path)
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def limit_concurrency(request: Request, call_next):
     if request.url.path in _PUBLIC_PATHS:
         return await call_next(request)
@@ -389,7 +404,11 @@ async def search_v0(
         # The dense path embeds with QUERY_PREFIX prepended; BM25 path uses
         # the raw lowercased query (handled inside hybrid.run_search). We
         # always pass the rendered (prefixed) query into the embedder.
-        vectors = await request.app.state.embed.embed([rendered])
+        vectors = await request.app.state.embed.embed(
+            [rendered],
+            headers=getattr(request.state, "trace_ctx", None).headers_for_forwarding()
+                if getattr(request.state, "trace_ctx", None) else None,
+        )
         return vectors[0] if vectors else []
 
     hits, debug_info = await run_search(
@@ -492,7 +511,11 @@ async def _search_dedup(
 
     async def embed_fn(_text: str) -> list[float]:
         rendered = f"{request.app.state.query_prefix}{query_text}"
-        vectors = await request.app.state.embed.embed([rendered])
+        vectors = await request.app.state.embed.embed(
+            [rendered],
+            headers=getattr(request.state, "trace_ctx", None).headers_for_forwarding()
+                if getattr(request.state, "trace_ctx", None) else None,
+        )
         return vectors[0] if vectors else []
 
     sort_plan = parse_sort_plan(sort_clauses)
@@ -646,7 +669,11 @@ async def search(
 
         async def embed_fn(text: str) -> list[float]:
             rendered = f"{request.app.state.query_prefix}{query_text}"
-            vectors = await request.app.state.embed.embed([rendered])
+            vectors = await request.app.state.embed.embed(
+            [rendered],
+            headers=getattr(request.state, "trace_ctx", None).headers_for_forwarding()
+                if getattr(request.state, "trace_ctx", None) else None,
+        )
             return vectors[0] if vectors else []
 
         hits, _debug = await run_search(

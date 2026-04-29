@@ -68,16 +68,25 @@ class EmbedClient:
         self._client = httpx.AsyncClient(timeout=timeout)
         self._policy = retry_policy
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> list[list[float]]:
+        """`headers` propagates W3C trace context (traceparent /
+        tracestate / baggage) per F7 §"Tracing baggage". Caller is
+        `main.py:_search_dedup`'s `embed_fn` closure, which builds
+        the headers dict from `request.state.trace_ctx`."""
         if self._policy is None:
-            return await self._embed_once(texts)
+            return await self._embed_once(texts, headers=headers)
 
         loop = asyncio.get_event_loop()
         started = loop.time()
         last_exc: BaseException | None = None
         for attempt in range(self._policy.max_attempts):
             try:
-                return await self._embed_once(texts)
+                return await self._embed_once(texts, headers=headers)
             except BaseException as e:
                 last_exc = e
                 if not _is_transient(e):
@@ -101,13 +110,19 @@ class EmbedClient:
                 await asyncio.sleep(wait)
         raise RuntimeError("unreachable") from last_exc
 
-    async def _embed_once(self, texts: list[str]) -> list[list[float]]:
+    async def _embed_once(
+        self,
+        texts: list[str],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> list[list[float]]:
         # `truncate=True` makes TEI right-truncate inputs longer than
         # the model's max_input_length instead of 413'ing — same
         # behaviour as the indexer-side `tei_cache.py:_tei_embed`.
         resp = await self._client.post(
             f"{self._base_url}/embed",
             json={"inputs": texts, "truncate": True},
+            headers=headers,
         )
         resp.raise_for_status()
         return resp.json()
