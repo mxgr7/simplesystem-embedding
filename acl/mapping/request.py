@@ -41,6 +41,19 @@ class FtsearchRequest:
     params: dict[str, str | int | list[str]]
 
 
+# Catalog-scoping fields ftsearch doesn't carry — they served the
+# now-removed `CUSTOMER_ARTICLE_NUMBER` search mode (§2.1). The
+# legacy DTO accepts them so old next-gen clients don't break, but
+# we strip them on the way out. ftsearch's
+# `SelectedArticleSources._Strict` has `extra='forbid'`, so leaving
+# them in would 422 the upstream call.
+_DROPPED_SELECTED_ARTICLE_SOURCES_FIELDS = (
+    "customerArticleNumbersIndexingSourceIds",
+    "customerManagedArticleNumberListId",
+    "uiCustomerArticleNumberSourceId",
+)
+
+
 def map_request(
     req: LegacySearchRequest,
     *,
@@ -66,6 +79,13 @@ def map_request(
     # §2.2 — `explain` never reaches ftsearch. A3 fills in the
     # `articles[].explanation` field on the way back.
     body.pop("explain", None)
+
+    # Strip fields the ftsearch SelectedArticleSources doesn't accept
+    # (see `_DROPPED_SELECTED_ARTICLE_SOURCES_FIELDS` above).
+    sas = body.get("selectedArticleSources")
+    if isinstance(sas, dict):
+        for field in _DROPPED_SELECTED_ARTICLE_SOURCES_FIELDS:
+            sas.pop(field, None)
 
     params: dict[str, str | int | list[str]] = {
         "page": page,
