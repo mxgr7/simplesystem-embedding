@@ -26,6 +26,7 @@ from pathlib import Path
 import httpx
 import yaml
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, ConfigDict, Field
@@ -171,12 +172,62 @@ async def search(
     return JSONResponse(content=legacy_body, status_code=200)
 
 
-# --- error handlers ------------------------------------------------------
+# --- error handlers (A4: legacy error contract) -------------------------
+#
+# FastAPI's default error envelope is `{"detail": "..."}` with status
+# 422 for validation. The legacy contract is `{message, details, timestamp}`
+# with status 400 for input validation. We reshape every error path so
+# next-gen callers see the legacy envelope verbatim — no stack traces,
+# no internal hostnames, bounded shape per spec §3.1.
+
+def _legacy_validation_details(errors: list[dict]) -> list[str]:
+    """Convert Pydantic ValidationError items into the legacy
+    `{field, message}` shape, JSON-serialised. Pydantic emits
+    `{loc: ('body', 'searchArticlesBy'), msg: '...', type: 'enum'}`;
+    the legacy schema declares `details` as a string array (per
+    `acl/openapi.yaml:Error.details`), so we serialise each pair as
+    a `field=path, message=msg` string."""
+    out: list[str] = []
+    for e in errors:
+        # `loc` is a tuple like ('body', 'searchArticlesBy') — drop the
+        # 'body' / 'query' top-level segment, dot-join the rest.
+        loc = e.get("loc") or ()
+        path = ".".join(str(p) for p in loc if p not in ("body", "query"))
+        msg = str(e.get("msg") or "")
+        out.append(f"field={path}: {msg}")
+    return out
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(
+    _request: Request, exc: RequestValidationError,
+) -> JSONResponse:
+    """Pydantic-side validation failures — bad JSON shape, missing
+    required field, constraint violation, enum mismatch (including
+    the §2.1 dropped values like `searchArticlesBy: ARTICLE_NUMBER`).
+    Map every one to the legacy 400 envelope per §3.1."""
+    return _error(
+        status=400,
+        message="Validation failure",
+        details=_legacy_validation_details(exc.errors()),
+    )
+
 
 @app.exception_handler(HTTPException)
-async def http_error_handler(_request, exc: HTTPException) -> JSONResponse:
-    """Wrap every HTTPException in the legacy error envelope. A4 will
-    layer richer error categorisation (validation vs upstream vs
-    timeout)."""
+async def http_error_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+    """Wrap explicit HTTPException raises (e.g. from upstream-failure
+    handlers) in the legacy envelope. The handler in `search()` for
+    httpx errors uses `_error` directly — this catches anything that
+    bubbles up via `raise HTTPException(...)`."""
     detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
     return _error(status=exc.status_code, message=detail)
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(_request: Request, _exc: Exception) -> JSONResponse:
+    """Last-resort 500 handler — any unexpected exception (programming
+    bug, third-party library crash) returns the legacy envelope with
+    NO details. We deliberately don't include the exception message
+    or traceback in the response — operators read those from the
+    server logs, not from the wire."""
+    return _error(status=500, message="Internal server error")

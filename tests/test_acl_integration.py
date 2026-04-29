@@ -174,7 +174,8 @@ def test_search_articles_by_other_than_standard_rejected(
     r = client.post(
         "/article-features/search", params={"page": 1, "pageSize": 10}, json=body,
     )
-    assert r.status_code == 422  # Pydantic validation
+    # A4 reshaped Pydantic 422 into the legacy 400 envelope.
+    assert r.status_code == 400
 
 
 def test_unknown_field_rejected(client_with_stub_ftsearch) -> None:
@@ -186,7 +187,8 @@ def test_unknown_field_rejected(client_with_stub_ftsearch) -> None:
     r = client.post(
         "/article-features/search", params={"page": 1, "pageSize": 10}, json=body,
     )
-    assert r.status_code == 422
+    # A4 reshaped Pydantic 422 into the legacy 400 envelope.
+    assert r.status_code == 400
 
 
 def test_pagesize_above_500_rejected(client_with_stub_ftsearch) -> None:
@@ -196,7 +198,8 @@ def test_pagesize_above_500_rejected(client_with_stub_ftsearch) -> None:
         params={"page": 1, "pageSize": 501},
         json=_request_body(),
     )
-    assert r.status_code == 422
+    # A4 reshaped Pydantic 422 into the legacy 400 envelope.
+    assert r.status_code == 400
 
 
 # ---------- upstream error handling --------------------------------------

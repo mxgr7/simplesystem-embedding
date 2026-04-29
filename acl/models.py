@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _Strict(BaseModel):
@@ -84,12 +84,26 @@ class FeatureFilter(_Strict):
 class PriceFilter(_Strict):
     """Per §3 "Currency fields — two roles": `currencyCode` here drives
     bound-decoding (decimal places per ISO 4217) only, not match. The
-    top-level `currency` on the request governs the match."""
+    top-level `currency` on the request governs the match.
+
+    Cross-field rule (§3): `currencyCode` is required (non-null)
+    whenever `min` or `max` is set — without it ftsearch can't decode
+    the integer minor units into a decimal amount."""
     min: int | None = None
     max: int | None = None
     currency_code: str | None = Field(
         default=None, alias="currencyCode", pattern=r"^[A-Z]{3}$",
     )
+
+    @model_validator(mode="after")
+    def _currency_code_required_when_bound_set(self) -> "PriceFilter":
+        if (self.min is not None or self.max is not None) and self.currency_code is None:
+            raise ValueError(
+                "priceFilter.currencyCode is required when priceFilter.min "
+                "or priceFilter.max is set (per spec §3 — drives bound-decoding "
+                "via that currency's ISO 4217 fraction-digit count)"
+            )
+        return self
 
 
 class BlockedEClassGroup(_Strict):
