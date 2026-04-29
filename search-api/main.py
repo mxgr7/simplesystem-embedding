@@ -502,13 +502,15 @@ async def _search_dedup(
         hitcount_cap=request.app.state.hitcount_cap,
     )
 
-    # SUMMARIES_ONLY: empty articles[] but real hitCount (F5 fills in
-    # summaries; this packet wires the mode flag).
+    # SUMMARIES_ONLY: empty articles[] but real hitCount + summaries.
+    # HITS_ONLY: empty summaries.
+    # BOTH: both populated.
     skip_articles = body.search_mode is SearchMode.SUMMARIES_ONLY
     articles = (
         [] if skip_articles
         else [Article(articleId=h.id, score=h.score) for h in result.hits]
     )
+    summaries = result.summaries if result.summaries is not None else Summaries()
 
     page_count = (
         (result.hit_count + page_size - 1) // page_size
@@ -517,7 +519,7 @@ async def _search_dedup(
 
     return SearchResponse(
         articles=articles,
-        summaries=Summaries(),
+        summaries=summaries,
         metadata=Metadata(
             page=page,
             pageSize=page_size,

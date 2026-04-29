@@ -791,3 +791,197 @@ def test_debug_envelope_carries_path_and_exprs() -> None:
     assert res.debug["path"] == "B"
     assert res.debug["offer_expr"] == 'vendor_id in ["v1"]'
     assert res.debug["article_expr"] is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# F5 — summaries
+# ──────────────────────────────────────────────────────────────────────
+
+def _req_summaries(*kinds, **overrides) -> SearchRequest:
+    from models import SummaryKind
+    base = {
+        "search_mode": SearchMode.BOTH,
+        "selected_article_sources": SelectedArticleSources(),
+        "currency": "EUR",
+        "summaries": list(kinds),
+    }
+    base.update(overrides)
+    return SearchRequest(**base)
+
+
+def test_hits_only_mode_omits_summaries() -> None:
+    """HITS_ONLY → result.summaries is None even when summaries
+    requested. (The mode flag wins over the kinds list.)"""
+    from models import SummaryKind
+    c = MockClient()
+    c.search_results = [[_ann_hit("h1", 0.9)], [_ann_hit("h1", 0.8)]]
+    c.query_by_collection["offers"] = [[_offer("o1", "h1")]]
+    c.query_by_collection["articles"] = [[{"article_hash": "h1"}]]
+    req = _req(query="x", search_mode=SearchMode.HITS_ONLY,
+               summaries=[SummaryKind.MANUFACTURERS])
+    res = _dispatch(
+        req, page_size=10, overfetch_n=10,
+        client=c, embed=_embed_dummy,
+        articles_collection="articles", offers_collection="offers",
+    )
+    assert res.summaries is None
+
+
+def test_both_mode_with_no_kinds_skips_summaries() -> None:
+    """BOTH but empty summaries list → still no summary fetch (nothing
+    requested)."""
+    c = MockClient()
+    c.search_results = [[_ann_hit("h1", 0.9)], [_ann_hit("h1", 0.8)]]
+    c.query_by_collection["offers"] = [[_offer("o1", "h1")]]
+    c.query_by_collection["articles"] = [[{"article_hash": "h1"}]]
+    req = _req(query="x", search_mode=SearchMode.BOTH, summaries=[])
+    res = _dispatch(
+        req, page_size=10, overfetch_n=10,
+        client=c, embed=_embed_dummy,
+        articles_collection="articles", offers_collection="offers",
+    )
+    assert res.summaries is None
+
+
+def test_both_mode_path_a_fetches_articles_for_summaries() -> None:
+    from models import SummaryKind
+    c = MockClient()
+    c.search_results = [[_ann_hit("h1", 0.9)], [_ann_hit("h1", 0.8)]]
+    c.query_by_collection["offers"] = [[_offer("o1", "h1")]]
+    # Disambiguate by filter pattern: count uses sentinel, summaries
+    # query uses sentinel too — same pattern. Use per-collection FIFO
+    # ordered as: count first, then summary fetch.
+    c.query_by_collection["articles"] = [
+        [{"article_hash": "h1"}],                                  # count
+        [{"article_hash": "h1", "manufacturerName": "Bosch"}],     # summaries
+    ]
+    req = _req_summaries(SummaryKind.MANUFACTURERS, query="x")
+    res = _dispatch(
+        req, page_size=10, overfetch_n=10,
+        client=c, embed=_embed_dummy,
+        articles_collection="articles", offers_collection="offers",
+    )
+    assert res.summaries is not None
+    assert len(res.summaries.manufacturer_summaries) == 1
+    assert res.summaries.manufacturer_summaries[0].name == "Bosch"
+
+
+def test_both_mode_path_b_fetches_offers_for_vendor_summary() -> None:
+    """Path B with VENDORS summary refetches offers via offer_expr (the
+    summary fetch may need fields the probe didn't request)."""
+    from models import SummaryKind
+    c = MockClient()
+    c.query_by_collection["offers"] = [
+        [_offer("o1", "h1", vendor_id="v1"), _offer("o2", "h2", vendor_id="v1")],   # probe
+        [_offer("o1", "h1", vendor_id="v1"), _offer("o2", "h2", vendor_id="v1")],   # summary refetch
+    ]
+    req = _req_summaries(SummaryKind.VENDORS, vendor_ids_filter=["v1"])
+    res = _dispatch(
+        req, page_size=10, overfetch_n=10,
+        client=c, embed=_embed_dummy,
+        articles_collection="articles", offers_collection="offers",
+    )
+    assert res.summaries is not None
+    by_v = {s.vendor_id: s.count for s in res.summaries.vendor_summaries}
+    # 2 distinct articles for v1.
+    assert by_v == {"v1": 2}
+
+
+def test_summaries_only_mode_skips_rank_and_returns_empty_hits() -> None:
+    """SUMMARIES_ONLY: no ANN/BM25, no representative pick, no sort/page.
+    Just count + summary fetch. Empty hits, populated summaries."""
+    from models import SummaryKind
+    c = MockClient()
+    # No search calls expected. Count + summary fetch only.
+    c.query_by_collection["articles"] = [
+        [{"article_hash": "h1"}, {"article_hash": "h2"}],   # count
+        [
+            {"article_hash": "h1", "manufacturerName": "Bosch"},
+            {"article_hash": "h2", "manufacturerName": "Makita"},
+        ],   # summary fetch
+    ]
+    req = _req_summaries(SummaryKind.MANUFACTURERS,
+                         query="x", search_mode=SearchMode.SUMMARIES_ONLY,
+                         manufacturers_filter=["Bosch", "Makita"])
+    res = _dispatch(
+        req, page_size=10, overfetch_n=10,
+        client=c, embed=_embed_dummy,
+        articles_collection="articles", offers_collection="offers",
+    )
+    assert res.hits == []
+    assert res.hit_count == 2
+    assert res.summaries is not None
+    assert {s.name for s in res.summaries.manufacturer_summaries} == {"Bosch", "Makita"}
+    # No ANN/BM25 ran.
+    methods = [m for m, _ in c.calls]
+    assert methods.count("search") == 0
+
+
+def test_summaries_only_path_b_uses_probe_for_distinct_hashes() -> None:
+    """SUMMARIES_ONLY in Path B: probe → distinct hashes → summaries."""
+    from models import SummaryKind
+    c = MockClient()
+    c.query_by_collection["offers"] = [
+        [_offer("o1", "h1", vendor_id="v1"), _offer("o2", "h2", vendor_id="v1")],   # probe
+        [_offer("o1", "h1", vendor_id="v1"), _offer("o2", "h2", vendor_id="v1")],   # summary fetch
+    ]
+    req = _req_summaries(SummaryKind.VENDORS,
+                         search_mode=SearchMode.SUMMARIES_ONLY,
+                         vendor_ids_filter=["v1"])
+    res = _dispatch(
+        req, page_size=10, overfetch_n=10,
+        client=c, embed=_embed_dummy,
+        articles_collection="articles", offers_collection="offers",
+    )
+    assert res.hits == []
+    # hit_count = distinct hashes from probe.
+    assert res.hit_count == 2
+    assert res.summaries is not None
+    by_v = {s.vendor_id: s.count for s in res.summaries.vendor_summaries}
+    assert by_v == {"v1": 2}
+
+
+def test_summaries_only_probe_overflow_marks_clipped_and_skips_summary_compute() -> None:
+    """Probe overflow in SUMMARIES_ONLY: hit count is the lower bound,
+    recall_clipped + hit_count_clipped both true, summaries not
+    computed (the truncated set would mislead aggregation counts)."""
+    from models import SummaryKind
+    c = MockClient()
+    overflow = [_offer(f"o{i}", f"h{i}") for i in range(5)]
+    c.query_by_collection["offers"] = [overflow]
+    req = _req_summaries(SummaryKind.VENDORS,
+                         search_mode=SearchMode.SUMMARIES_ONLY,
+                         vendor_ids_filter=["v1"])
+    res = _dispatch(
+        req, page_size=10, overfetch_n=10,
+        client=c, embed=_embed_dummy,
+        articles_collection="articles", offers_collection="offers",
+        path_b_hash_limit=2,
+    )
+    assert res.hits == []
+    assert res.recall_clipped is True
+    assert res.hit_count == 2
+    assert res.hit_count_clipped is True
+    assert res.summaries is None  # skipped to avoid misleading counts
+
+
+def test_field_set_planner_avoids_unneeded_offer_fetch() -> None:
+    """Article-only kinds (MANUFACTURERS) must not trigger an offers
+    summary refetch in Path A. Verify by counting offers queries."""
+    from models import SummaryKind
+    c = MockClient()
+    c.search_results = [[_ann_hit("h1", 0.9)], [_ann_hit("h1", 0.8)]]
+    c.query_by_collection["offers"] = [[_offer("o1", "h1")]]   # only resolve
+    c.query_by_collection["articles"] = [
+        [{"article_hash": "h1"}],
+        [{"article_hash": "h1", "manufacturerName": "Bosch"}],
+    ]
+    req = _req_summaries(SummaryKind.MANUFACTURERS, query="x")
+    _dispatch(
+        req, page_size=10, overfetch_n=10,
+        client=c, embed=_embed_dummy,
+        articles_collection="articles", offers_collection="offers",
+    )
+    offer_queries = [kw for m, kw in c.calls
+                     if m == "query" and kw.get("collection_name") == "offers"]
+    assert len(offer_queries) == 1   # only the resolve, no summary refetch

@@ -57,17 +57,21 @@ from typing import Awaitable, Callable, Sequence
 import numpy as np
 from pymilvus import MilvusClient
 
+import aggregations
 from filters import (
     build_article_expr,
     build_offer_expr,
     has_per_vendor_blocked_eclass,
 )
 from hybrid import Hit, is_strict_identifier, rrf_merge
-from models import EClassVersion, SearchRequest, SortDirection
+from models import (
+    EClassVersion,
+    SearchMode,
+    SearchRequest,
+    SortDirection,
+    Summaries,
+)
 from prices import resolve_price
-
-
-_DEFAULT_DIRECTION = SortDirection.DESC
 from sorting import (
     SortField,
     SortPlan,
@@ -76,6 +80,9 @@ from sorting import (
     pick_representative,
     sort_items,
 )
+
+
+_DEFAULT_DIRECTION = SortDirection.DESC
 
 EmbedFn = Callable[[str], Awaitable[list[float]]]
 
@@ -110,6 +117,7 @@ class DispatchResult:
     recall_clipped: bool = False
     hit_count: int = 0
     hit_count_clipped: bool = False
+    summaries: Summaries | None = None
 
 
 @dataclass(slots=True)
@@ -164,6 +172,20 @@ async def dispatch_dedup(
     )
     query_text = (req.query or "").strip()
 
+    # F5: SUMMARIES_ONLY skips the rank/materialise/sort/page work entirely
+    # and just fetches summary data + count. Returns empty hits.
+    if req.search_mode is SearchMode.SUMMARIES_ONLY:
+        return await _dispatch_summaries_only(
+            req,
+            article_expr=article_expr, offer_expr=offer_expr,
+            client=client,
+            articles_collection=articles_collection,
+            offers_collection=offers_collection,
+            path_b_hash_limit=path_b_hash_limit,
+            hitcount_cap=hitcount_cap,
+            timings=timings,
+        )
+
     price_active = _price_active(req)
     rank_limit = _rank_limit(
         sort_plan, query_text, page=page, page_size=page_size,
@@ -172,6 +194,10 @@ async def dispatch_dedup(
         hitcount_cap=hitcount_cap,
         dense_pool=dense_pool,
     )
+
+    # Captured here so the F5 summary fetch can constrain by the
+    # probe-distinct hashes when in Path B.
+    path_b_distinct_hashes: list[str] | None = None
 
     # Path selection (F9 deterministic rule).
     if offer_expr is None:
@@ -235,6 +261,7 @@ async def dispatch_dedup(
             recall_clipped = True
         else:
             timings.path = "B"
+            path_b_distinct_hashes = distinct_hashes
             materialised, hit_count, hit_count_clipped = await _path_b(
                 req, query_text, article_expr, distinct_hashes, probe_rows,
                 sort_plan=sort_plan,
@@ -259,12 +286,28 @@ async def dispatch_dedup(
     page_slice = sorted_items[page_offset:page_offset + page_size]
     hits = _to_hits(page_slice, sort_plan)
 
+    # F5: BOTH mode runs aggregations over the full filtered hit set
+    # (independent of the page slice). HITS_ONLY skips. SUMMARIES_ONLY
+    # returned at the top.
+    summaries: Summaries | None = None
+    if req.search_mode is SearchMode.BOTH and req.summaries:
+        summaries = await _compute_summaries(
+            req,
+            article_expr=article_expr, offer_expr=offer_expr,
+            path_b_distinct_hashes=path_b_distinct_hashes,
+            client=client,
+            articles_collection=articles_collection,
+            offers_collection=offers_collection,
+            hitcount_cap=hitcount_cap,
+        )
+
     return DispatchResult(
         hits=hits,
         debug=_debug(timings),
         recall_clipped=recall_clipped,
         hit_count=hit_count,
         hit_count_clipped=hit_count_clipped,
+        summaries=summaries,
     )
 
 
@@ -879,6 +922,170 @@ async def _fetch_article_meta(
         limit=len(hashes),
     )
     return {str(r["article_hash"]): r for r in rows}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# F5 — summary fetch + compute
+# ──────────────────────────────────────────────────────────────────────
+
+async def _dispatch_summaries_only(
+    req: SearchRequest,
+    *,
+    article_expr: str | None,
+    offer_expr: str | None,
+    client: MilvusClient,
+    articles_collection: str,
+    offers_collection: str,
+    path_b_hash_limit: int,
+    hitcount_cap: int,
+    timings: _Timings,
+) -> DispatchResult:
+    """SUMMARIES_ONLY fast path: skip ANN/BM25, ranking, materialise,
+    sort, page. Just identify the filtered hit set, fetch the summary
+    columns, compute aggregations, return."""
+    distinct_hashes: list[str] | None = None
+    hit_count = 0
+    hit_count_clipped = False
+    recall_clipped = False
+
+    if offer_expr is None:
+        # Path A — count articles matching article_expr.
+        timings.path = "A_summaries_only"
+        hit_count, hit_count_clipped = await _count_articles(
+            client, articles_collection,
+            article_expr=article_expr, hashes=None, cap=hitcount_cap,
+            timings=timings,
+        )
+    else:
+        # Path B — bounded probe for distinct hashes.
+        timings.path = "B_summaries_only"
+        t0 = time.perf_counter()
+        probe_rows = await asyncio.to_thread(
+            _offer_probe, client, offers_collection,
+            offer_expr=offer_expr, limit=path_b_hash_limit + 1,
+        )
+        timings.offer_resolve_ms = (time.perf_counter() - t0) * 1000
+        timings.probe_hits = len(probe_rows)
+        distinct_hashes = sorted({r["article_hash"] for r in probe_rows})
+        timings.distinct_hashes = len(distinct_hashes)
+
+        if len(distinct_hashes) > path_b_hash_limit:
+            # Probe overflow: summaries computed on the truncated set
+            # are necessarily incomplete. Return clipped counts.
+            timings.probe_overflowed = True
+            recall_clipped = True
+            hit_count = path_b_hash_limit
+            hit_count_clipped = True
+        elif article_expr is None:
+            hit_count = len(distinct_hashes)
+        else:
+            hit_count, hit_count_clipped = await _count_articles(
+                client, articles_collection,
+                article_expr=article_expr, hashes=distinct_hashes,
+                cap=hitcount_cap, timings=timings,
+            )
+
+    summaries: Summaries | None = None
+    if req.summaries and not recall_clipped:
+        summaries = await _compute_summaries(
+            req,
+            article_expr=article_expr, offer_expr=offer_expr,
+            path_b_distinct_hashes=distinct_hashes,
+            client=client,
+            articles_collection=articles_collection,
+            offers_collection=offers_collection,
+            hitcount_cap=hitcount_cap,
+        )
+
+    return DispatchResult(
+        hits=[],
+        debug=_debug(timings),
+        recall_clipped=recall_clipped,
+        hit_count=hit_count,
+        hit_count_clipped=hit_count_clipped,
+        summaries=summaries,
+    )
+
+
+async def _compute_summaries(
+    req: SearchRequest,
+    *,
+    article_expr: str | None,
+    offer_expr: str | None,
+    path_b_distinct_hashes: list[str] | None,
+    client: MilvusClient,
+    articles_collection: str,
+    offers_collection: str,
+    hitcount_cap: int,
+) -> Summaries:
+    """Fetch summary fields from articles + offers (only what the
+    requested kinds need) and call into the aggregations module.
+
+    Field-set planning is in `aggregations.{article,offer}_fields_needed`.
+    Fetches are capped at `min(hitcount_cap, _MILVUS_MAX_QUERY_WINDOW)`;
+    when summaries clip, the overall response already carries
+    `hitCountClipped: true`."""
+    article_fields = aggregations.article_fields_needed(req)
+    offer_fields = aggregations.offer_fields_needed(req)
+    needs_articles = aggregations.needs_article_fetch(req)
+    needs_offers = aggregations.needs_offer_fetch(req)
+    fetch_limit = min(hitcount_cap, _MILVUS_MAX_QUERY_WINDOW)
+
+    article_rows: list[dict] = []
+    offer_rows: list[dict] = []
+
+    if needs_articles:
+        if path_b_distinct_hashes is not None:
+            expr = _and_exprs(_hash_in_expr(path_b_distinct_hashes), article_expr)
+        else:
+            expr = article_expr or 'article_hash != ""'
+        article_rows = await asyncio.to_thread(
+            client.query,
+            collection_name=articles_collection,
+            filter=expr,
+            output_fields=sorted(article_fields),
+            limit=fetch_limit,
+        )
+
+    if needs_offers:
+        if offer_expr is not None:
+            # Path B: the same offer_expr that ran in the probe (the
+            # probe might have truncated fields, so we refetch with the
+            # summary-required field set).
+            offer_rows = await asyncio.to_thread(
+                client.query,
+                collection_name=offers_collection,
+                filter=offer_expr,
+                output_fields=sorted(offer_fields),
+                limit=fetch_limit,
+            )
+        else:
+            # Path A: filter by hash IN matched articles. If we already
+            # fetched articles above, reuse those hashes; otherwise
+            # query articles for the hash set first.
+            if not article_rows:
+                seed = await asyncio.to_thread(
+                    client.query,
+                    collection_name=articles_collection,
+                    filter=article_expr or 'article_hash != ""',
+                    output_fields=["article_hash"],
+                    limit=fetch_limit,
+                )
+                hashes = [str(r["article_hash"]) for r in seed]
+            else:
+                hashes = [str(r["article_hash"]) for r in article_rows]
+            if hashes:
+                offer_rows = await asyncio.to_thread(
+                    client.query,
+                    collection_name=offers_collection,
+                    filter=_hash_in_expr(hashes),
+                    output_fields=sorted(offer_fields),
+                    limit=fetch_limit,
+                )
+
+    return aggregations.compute_summaries(
+        req, article_rows=article_rows, offer_rows=offer_rows,
+    )
 
 
 async def _count_articles(

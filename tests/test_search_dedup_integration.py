@@ -406,3 +406,170 @@ def test_sort_name_smoke(
     body = _post_with_sort(client, "name,asc", vendorIdsFilter=[top_vendor])
     assert "articles" in body
     assert body["metadata"]["hitCount"] >= 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# F5 — summaries (live Milvus, through TestClient)
+# ──────────────────────────────────────────────────────────────────────
+
+def _post_summaries(client: TestClient, kinds: list[str], **overrides) -> dict:
+    """POST a BOTH-mode request with the given summary kinds."""
+    body = {
+        **_BASE_BODY,
+        "searchMode": "BOTH",
+        "summaries": kinds,
+        **overrides,
+    }
+    r = client.post(f"/{OFFERS}/_search?pageSize=10", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_summaries_hits_only_returns_empty_summary_envelope(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """HITS_ONLY: summaries envelope is present (default values) but
+    every list/object is empty/null. The mode flag wins over `summaries`."""
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post(client, vendorIdsFilter=[top_vendor],
+                 summaries=["VENDORS", "MANUFACTURERS"])
+    assert body["summaries"]["vendorSummaries"] == []
+    assert body["summaries"]["manufacturerSummaries"] == []
+
+
+def test_summaries_vendors_count_distinct_articles_per_vendor(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    from collections import Counter
+    # Pick two vendors with multiple offers each.
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_two = [v for v, _ in vendor_counts.most_common(2)]
+    body = _post_summaries(client, ["VENDORS"], vendorIdsFilter=top_two)
+    summaries = body["summaries"]
+    by_v = {s["vendorId"]: s["count"] for s in summaries["vendorSummaries"]}
+    # Every requested vendor should appear with a positive count.
+    for v in top_two:
+        assert v in by_v
+        assert by_v[v] >= 1
+    # Sum of counts ≤ hitCount * (number of vendors) — loose invariant
+    # since one article can be counted under multiple vendors.
+    total = sum(by_v.values())
+    assert total >= body["metadata"]["hitCount"]
+
+
+def test_summaries_manufacturers_grouped_by_name(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post_summaries(client, ["MANUFACTURERS"], vendorIdsFilter=[top_vendor])
+    mfrs = body["summaries"]["manufacturerSummaries"]
+    # At least one manufacturer should surface (the sample has them).
+    assert len(mfrs) >= 1
+    # Sum of distinct-article counts across manufacturers ≤ hitCount.
+    total = sum(m["count"] for m in mfrs)
+    assert total <= body["metadata"]["hitCount"]
+
+
+def test_summaries_categories_root_yields_top_level_paths(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """No `currentCategoryPathElements` → sameLevel = top-level
+    categories present in the filtered set."""
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post_summaries(client, ["CATEGORIES"], vendorIdsFilter=[top_vendor])
+    cats = body["summaries"]["categoriesSummary"]
+    assert cats is not None
+    # Every sameLevel bucket should be a depth-1 path (single-element
+    # categoryPathElements).
+    for bucket in cats["sameLevel"]:
+        assert len(bucket["categoryPathElements"]) == 1
+
+
+def test_summaries_eclass5_returns_root_codes_when_no_selection(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post_summaries(client, ["ECLASS5"], vendorIdsFilter=[top_vendor])
+    e5 = body["summaries"]["eClass5Categories"]
+    assert e5 is not None
+    assert e5["selectedEClassGroup"] is None
+    # Each sameLevel bucket is a depth-1 code (1- or 2-digit).
+    for bucket in e5["sameLevel"]:
+        assert 1 <= len(str(bucket["group"])) <= 2
+
+
+def test_summaries_only_mode_returns_empty_articles_with_summaries(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """SUMMARIES_ONLY: skip article hydration entirely."""
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = client.post(
+        f"/{OFFERS}/_search?pageSize=10",
+        json={
+            **_BASE_BODY,
+            "searchMode": "SUMMARIES_ONLY",
+            "summaries": ["VENDORS", "MANUFACTURERS"],
+            "vendorIdsFilter": [top_vendor],
+        },
+    ).json()
+    assert body["articles"] == []
+    assert body["metadata"]["hitCount"] >= 1
+    # Both requested kinds populated.
+    assert len(body["summaries"]["vendorSummaries"]) >= 1
+    assert len(body["summaries"]["manufacturerSummaries"]) >= 1
+
+
+def test_summaries_only_kinds_requested_are_populated(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """Kinds NOT in the request remain at default (empty/null)."""
+    from collections import Counter
+    vendor_counts = Counter(r["vendor_id"] for r in projected_rows)
+    top_vendor, _ = vendor_counts.most_common(1)[0]
+    body = _post_summaries(client, ["MANUFACTURERS"], vendorIdsFilter=[top_vendor])
+    summaries = body["summaries"]
+    # Manufacturers requested → populated.
+    assert len(summaries["manufacturerSummaries"]) >= 1
+    # Vendors NOT requested → empty list.
+    assert summaries["vendorSummaries"] == []
+    # Categories NOT requested → null.
+    assert summaries["categoriesSummary"] is None
+    assert summaries["eClass5Categories"] is None
+
+
+def test_summaries_eclass5set_counts_per_entry(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """`eClassesAggregations` → one count entry per request entry."""
+    from collections import Counter
+    # Find at least one real eclass code in the sample.
+    eclass_counts: Counter[int] = Counter()
+    for r in projected_rows:
+        for code in r.get("eclass5_code") or []:
+            eclass_counts[int(code)] += 1
+    if not eclass_counts:
+        pytest.skip("no eClass5 codes in sample")
+    real_code, _ = eclass_counts.most_common(1)[0]
+
+    body = _post_summaries(
+        client, ["ECLASS5SET"],
+        manufacturersFilter=[],   # no extra constraints
+        eClassesAggregations=[
+            {"id": "real", "eClasses": [real_code]},
+            {"id": "fake", "eClasses": [99999999]},
+        ],
+    )
+    eaggs = body["summaries"]["eClassesAggregations"]
+    by_id = {e["id"]: e["count"] for e in eaggs}
+    assert by_id["real"] >= 1
+    assert by_id["fake"] == 0
