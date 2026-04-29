@@ -254,7 +254,14 @@ def main() -> None:
     p.add_argument("--lm-ckpt", type=Path, default=None)
     p.add_argument("--lm-tokenizer", type=Path, default=None)
     p.add_argument("--lm-beam-width", type=int, default=20)
-    p.add_argument("--lm-device", default="cuda")
+    p.add_argument(
+        "--lm-device", default="auto",
+        help="'auto' (cuda if available, else cpu), 'cuda', or 'cpu'.",
+    )
+    p.add_argument(
+        "--cpu", action="store_true",
+        help="Shortcut for --lm-device cpu.",
+    )
     p.add_argument(
         "--lev-budget", type=int, default=0,
         help="LM beam-search edit budget (0=exact, 1=tolerate 1 typo).",
@@ -273,7 +280,13 @@ def main() -> None:
     if args.model in ("mpc", "hybrid") and args.mpc_path is None:
         p.error("--mpc-path is required for --model mpc/hybrid")
 
-    print(f"loading {args.model} backend…", flush=True)
+    if args.cpu:
+        args.lm_device = "cpu"
+    elif args.lm_device == "auto":
+        import torch
+        args.lm_device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    print(f"loading {args.model} backend on {args.lm_device}…", flush=True)
     if args.model == "lm":
         fn = _build_lm_backend(
             args.lm_ckpt, args.lm_tokenizer,

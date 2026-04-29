@@ -13,6 +13,8 @@ Two training variants:
 
 from __future__ import annotations
 
+import random
+import string
 import time
 from pathlib import Path
 
@@ -20,12 +22,50 @@ import duckdb
 import numpy as np
 import torch
 from lightning import LightningDataModule
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import (
+    ConcatDataset,
+    DataLoader,
+    Dataset,
+    WeightedRandomSampler,
+)
 
 from .data import PAIRS_DIR, TARGETS_DIR, TOKENIZER_DIR
 from .tokenizer import Tokenizer
 
 LABEL_IGNORE = -100
+
+# Operations applied by the synthetic-noise dataset. Calibrated to produce a
+# single edit per call — we want the model to see realistic single-typo
+# perturbations, not garbled strings.
+_NOISE_OPS = ("delete", "insert", "substitute", "swap")
+_NOISE_INSERT_ALPHABET = string.ascii_lowercase + "äöüß "
+_NOISE_SUB_ALPHABET = string.ascii_lowercase + "äöüß"
+
+
+def _perturb_one(s: str, rng: random.Random) -> str:
+    """Apply a single random char-level edit to ``s``. Used for synthetic
+    typo augmentation when the real session-mined corpus is exhausted."""
+    n = len(s)
+    if n == 0:
+        return s
+    candidates = ["insert"]
+    if n >= 1:
+        candidates += ["delete", "substitute"]
+    if n >= 2:
+        candidates.append("swap")
+    op = rng.choice(candidates)
+    if op == "delete":
+        i = rng.randrange(n)
+        return s[:i] + s[i + 1 :]
+    if op == "insert":
+        i = rng.randrange(n + 1)
+        return s[:i] + rng.choice(_NOISE_INSERT_ALPHABET) + s[i:]
+    if op == "substitute":
+        i = rng.randrange(n)
+        return s[:i] + rng.choice(_NOISE_SUB_ALPHABET) + s[i + 1 :]
+    # swap
+    i = rng.randrange(n - 1)
+    return s[:i] + s[i + 1] + s[i] + s[i + 2 :]
 
 
 def _load_targets_table(
@@ -114,35 +154,36 @@ def _load_pairs_table(
     )
 
 
+def _tokenize_one_pair(
+    tokenizer: Tokenizer, prefix: str, target: str, max_seq_len: int
+) -> tuple[list[int], int]:
+    """Encode one (prefix, target) into the variant-b sequence
+    ``[BOS, *prefix_ids, SEP, *target_ids, EOS]``, truncating from the left
+    of the prefix if the budget is tight."""
+    bos, eos, sep = tokenizer.bos_id, tokenizer.eos_id, tokenizer.sep_id
+    p_ids = tokenizer.sp.encode(prefix, out_type=int)
+    t_ids = tokenizer.sp.encode(target, out_type=int)
+    budget = max_seq_len - 3  # BOS + SEP + EOS
+    if len(p_ids) + len(t_ids) > budget:
+        t_keep = min(len(t_ids), max(1, budget - 1))
+        p_keep = max(0, budget - t_keep)
+        p_ids = p_ids[:p_keep]
+        t_ids = t_ids[:t_keep]
+    seq = [bos, *p_ids, sep, *t_ids, eos]
+    return seq, len(p_ids)
+
+
 def _tokenize_pairs(
     tokenizer: Tokenizer,
     prefixes: list[str],
     targets: list[str],
     max_seq_len: int,
 ) -> list[tuple[list[int], int]]:
-    """Tokenize each (prefix, target) into the option-b sequence.
-
-    Returns a list of ``(seq, prefix_token_count)`` pairs where ``seq`` is
-    ``[BOS, *prefix_ids, SEP, *target_ids, EOS]`` truncated to fit
-    ``max_seq_len``. ``prefix_token_count`` is ``len(prefix_ids)``.
-    """
-    bos, eos, sep = tokenizer.bos_id, tokenizer.eos_id, tokenizer.sep_id
-    out: list[tuple[list[int], int]] = []
-    for prefix, target in zip(prefixes, targets):
-        p_ids = tokenizer.sp.encode(prefix, out_type=int)
-        t_ids = tokenizer.sp.encode(target, out_type=int)
-        # Reserve BOS + SEP + EOS = 3 specials; budget rest.
-        budget = max_seq_len - 3
-        if len(p_ids) + len(t_ids) > budget:
-            # Prefer keeping the target whole; truncate prefix from the
-            # left (rare, but possible for very long search strings).
-            t_keep = min(len(t_ids), max(1, budget - 1))
-            p_keep = max(0, budget - t_keep)
-            p_ids = p_ids[:p_keep]
-            t_ids = t_ids[:t_keep]
-        seq = [bos, *p_ids, sep, *t_ids, eos]
-        out.append((seq, len(p_ids)))
-    return out
+    """Tokenize each (prefix, target) into the option-b sequence."""
+    return [
+        _tokenize_one_pair(tokenizer, p, t, max_seq_len)
+        for p, t in zip(prefixes, targets)
+    ]
 
 
 class PairsDataset(Dataset):
@@ -156,6 +197,54 @@ class PairsDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[list[int], int]:
         return self.encoded[idx]
+
+
+class NoisyPrefixDataset(Dataset):
+    """Variant-b dataset that perturbs the prefix at sample time.
+
+    We hold raw (prefix, target) strings and re-tokenize on every call so
+    each access can apply a different random edit. Re-tokenization adds a
+    few microseconds per sample but only fires for the synthetic-noise
+    fraction of training (typically 10%), so the cost is negligible.
+
+    The rng is initialized lazily per worker so multi-worker DataLoaders
+    don't all see the same noise sequence."""
+
+    def __init__(
+        self,
+        prefixes: list[str],
+        targets: list[str],
+        tokenizer: Tokenizer,
+        max_seq_len: int,
+        seed: int = 0,
+    ) -> None:
+        if len(prefixes) != len(targets):
+            raise ValueError("prefixes/targets length mismatch")
+        self.prefixes = prefixes
+        self.targets = targets
+        self.tokenizer = tokenizer
+        self.max_seq_len = int(max_seq_len)
+        self._seed_base = int(seed)
+        self._rng: random.Random | None = None
+
+    def _rng_local(self) -> random.Random:
+        if self._rng is None:
+            wid = torch.utils.data.get_worker_info()
+            wid_n = wid.id if wid else 0
+            # Mix worker id with the configured seed so each worker sees a
+            # different but reproducible noise sequence.
+            self._rng = random.Random(self._seed_base + wid_n * 7919 + 1)
+        return self._rng
+
+    def __len__(self) -> int:
+        return len(self.prefixes)
+
+    def __getitem__(self, idx: int) -> tuple[list[int], int]:
+        rng = self._rng_local()
+        prefix = _perturb_one(self.prefixes[idx], rng)
+        return _tokenize_one_pair(
+            self.tokenizer, prefix, self.targets[idx], self.max_seq_len
+        )
 
 
 def collate_pairs(
@@ -198,10 +287,14 @@ class SuggestLMDataModule(LightningDataModule):
         seed: int = 0,
         variant: str = "a",
         pairs_dir: Path = PAIRS_DIR,
+        typo_pairs_dir: Path | None = None,
+        p_typo: float = 0.0,
+        p_synthetic: float = 0.0,
     ) -> None:
         super().__init__()
         self.targets_dir = Path(targets_dir)
         self.pairs_dir = Path(pairs_dir)
+        self.typo_pairs_dir = Path(typo_pairs_dir) if typo_pairs_dir else None
         self.tokenizer_dir = Path(tokenizer_dir)
         self.max_seq_len = int(max_seq_len)
         self.batch_size = int(batch_size)
@@ -213,6 +306,26 @@ class SuggestLMDataModule(LightningDataModule):
         self.variant = str(variant).lower()
         if self.variant not in ("a", "b"):
             raise ValueError(f"Unknown variant {self.variant!r}, expected a/b.")
+
+        # Source-mix probabilities for variant 'b'. Together with the
+        # implicit clean fraction (1 - p_typo - p_synthetic) they describe
+        # the probability that a sampled training row comes from each
+        # source. Validated below.
+        self.p_typo = float(p_typo)
+        self.p_synthetic = float(p_synthetic)
+        if self.p_typo < 0 or self.p_synthetic < 0:
+            raise ValueError("p_typo and p_synthetic must be >= 0")
+        if self.p_typo + self.p_synthetic > 1.0 + 1e-6:
+            raise ValueError(
+                f"p_typo + p_synthetic must be <= 1.0; got "
+                f"{self.p_typo + self.p_synthetic}"
+            )
+        if self.variant == "a" and (self.p_typo > 0 or self.p_synthetic > 0):
+            raise ValueError(
+                "p_typo / p_synthetic only apply to variant='b'"
+            )
+        if self.p_typo > 0 and self.typo_pairs_dir is None:
+            raise ValueError("p_typo > 0 requires typo_pairs_dir")
 
         self.tokenizer: Tokenizer | None = None
         self.train_dataset: Dataset | None = None
@@ -252,21 +365,85 @@ class SuggestLMDataModule(LightningDataModule):
         )
 
     def _setup_b(self) -> None:
+        # 1) Clean (prefix, target) pairs — always loaded.
         t0 = time.time()
-        train_pref, train_tgt, train_counts = _load_pairs_table(
+        clean_pref, clean_tgt, clean_counts = _load_pairs_table(
             self.pairs_dir, "train"
         )
-        train_encoded = _tokenize_pairs(
-            self.tokenizer, train_pref, train_tgt, self.max_seq_len
+        clean_encoded = _tokenize_pairs(
+            self.tokenizer, clean_pref, clean_tgt, self.max_seq_len
         )
-        self.train_dataset = PairsDataset(train_encoded)
-        self.train_weights = train_counts.astype(np.float64)
+        clean_ds = PairsDataset(clean_encoded)
         print(
-            f"[lit_data] train: {len(train_encoded):,} unique pairs, "
-            f"{int(train_counts.sum()):,} weighted events "
-            f"({time.time()-t0:.1f}s)",
+            f"[lit_data] clean train: {len(clean_encoded):,} pairs, "
+            f"{int(clean_counts.sum()):,} weighted events "
+            f"({time.time() - t0:.1f}s)",
             flush=True,
         )
+
+        # 2) Real typo→correction pairs — optional.
+        typo_ds: Dataset | None = None
+        typo_counts: np.ndarray | None = None
+        if self.typo_pairs_dir is not None and self.p_typo > 0:
+            t0 = time.time()
+            typo_pref, typo_tgt, typo_counts = _load_pairs_table(
+                self.typo_pairs_dir, "train"
+            )
+            typo_encoded = _tokenize_pairs(
+                self.tokenizer, typo_pref, typo_tgt, self.max_seq_len
+            )
+            typo_ds = PairsDataset(typo_encoded)
+            print(
+                f"[lit_data] typo  train: {len(typo_encoded):,} pairs, "
+                f"{int(typo_counts.sum()):,} weighted events "
+                f"({time.time() - t0:.1f}s)",
+                flush=True,
+            )
+
+        # 3) Synthetic-noise wrapper over the clean strings — optional.
+        noise_ds: NoisyPrefixDataset | None = None
+        if self.p_synthetic > 0:
+            noise_ds = NoisyPrefixDataset(
+                prefixes=clean_pref,
+                targets=clean_tgt,
+                tokenizer=self.tokenizer,
+                max_seq_len=self.max_seq_len,
+                seed=self.seed,
+            )
+
+        # Combine into one dataset + per-row weights normalized so each
+        # source contributes its target probability mass.
+        sources: list[Dataset] = [clean_ds]
+        weight_blocks: list[np.ndarray] = []
+
+        p_clean = max(0.0, 1.0 - self.p_typo - self.p_synthetic)
+        clean_w = clean_counts.astype(np.float64)
+        clean_total = float(clean_w.sum()) or 1.0
+        weight_blocks.append(clean_w * (p_clean / clean_total))
+
+        if typo_ds is not None and typo_counts is not None:
+            sources.append(typo_ds)
+            typo_w = typo_counts.astype(np.float64)
+            typo_total = float(typo_w.sum()) or 1.0
+            weight_blocks.append(typo_w * (self.p_typo / typo_total))
+
+        if noise_ds is not None:
+            sources.append(noise_ds)
+            # Reuse clean count distribution so noise lands on popular rows
+            # in proportion to the clean signal — same shape, same seeding.
+            weight_blocks.append(clean_w * (self.p_synthetic / clean_total))
+
+        if len(sources) == 1:
+            self.train_dataset = clean_ds
+        else:
+            self.train_dataset = ConcatDataset(sources)
+        self.train_weights = np.concatenate(weight_blocks).astype(np.float64)
+        self._train_source_lens = tuple(len(s) for s in sources)
+        self._train_source_p = (p_clean, self.p_typo, self.p_synthetic)
+
+        # Eval: clean pairs only. Typo eval gets its own slice if/when we
+        # want a dedicated metric — wire it in once the eval harness exposes
+        # a hook for it.
         t0 = time.time()
         val_pref, val_tgt, val_counts = _load_pairs_table(
             self.pairs_dir, "eval"
@@ -278,7 +455,7 @@ class SuggestLMDataModule(LightningDataModule):
         print(
             f"[lit_data] val:   {len(val_encoded):,} unique pairs, "
             f"{int(val_counts.sum()):,} events "
-            f"({time.time()-t0:.1f}s)",
+            f"({time.time() - t0:.1f}s)",
             flush=True,
         )
 
@@ -293,15 +470,16 @@ class SuggestLMDataModule(LightningDataModule):
                 self._setup_b()
 
         if self.variant == "a":
-            token_lens = np.array(
-                [len(seq) for seq in self.train_dataset.encoded],
-                dtype=np.int64,
-            )
+            seq_lens = [len(seq) for seq in self.train_dataset.encoded]
         else:
-            token_lens = np.array(
-                [len(seq) for seq, _ in self.train_dataset.encoded],
-                dtype=np.int64,
-            )
+            # The clean PairsDataset is always the first source. Use its
+            # encoded list as the basis for length stats — typo / noise
+            # rows sit alongside it under the same max_seq_len budget.
+            base_ds = self.train_dataset
+            if isinstance(base_ds, ConcatDataset):
+                base_ds = base_ds.datasets[0]
+            seq_lens = [len(seq) for seq, _ in base_ds.encoded]
+        token_lens = np.array(seq_lens, dtype=np.int64)
         self.dataset_stats = {
             f"train_unique_{'targets' if self.variant=='a' else 'pairs'}":
                 float(len(self.train_dataset)),
@@ -312,6 +490,14 @@ class SuggestLMDataModule(LightningDataModule):
             "train_seq_len_p95": float(np.percentile(token_lens, 95)),
             "train_seq_len_max": float(token_lens.max()),
         }
+        if self.variant == "b":
+            (p_clean, p_typo, p_synth) = self._train_source_p
+            self.dataset_stats.update({
+                "p_clean": p_clean,
+                "p_typo": p_typo,
+                "p_synthetic": p_synth,
+                "train_n_sources": float(len(self._train_source_lens)),
+            })
 
     def _collate(self):
         pad_id = self.tokenizer.pad_id

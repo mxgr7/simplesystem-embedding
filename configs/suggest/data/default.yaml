@@ -8,3 +8,10 @@ num_workers: 4
 pin_memory: true
 # When null, an "epoch" is len(train_dataset) weighted draws.
 train_samples_per_epoch: null
+
+# Typo-aware training (variant 'b' only). Probabilities sum to <= 1; the
+# remainder is the clean (prefix, target) source. With both at 0 the loader
+# behaves exactly like the original variant-b setup.
+typo_pairs_dir: null   # e.g. ${oc.env:SUGGEST_DATA_ROOT}/typo_pairs.parquet
+p_typo: 0.0            # mass on real session-mined typo→correction pairs
+p_synthetic: 0.0       # mass on clean rows with a single random char edit

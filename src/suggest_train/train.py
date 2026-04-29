@@ -218,9 +218,13 @@ def run(cfg: DictConfig) -> None:
     L.seed_everything(int(cfg.seed), workers=True)
     print(OmegaConf.to_yaml(cfg, resolve=True))
 
+    typo_dir = cfg.data.get("typo_pairs_dir")
     datamodule = SuggestLMDataModule(
         targets_dir=Path(cfg.data.targets_dir),
         pairs_dir=Path(cfg.data.get("pairs_dir") or cfg.data.targets_dir),
+        typo_pairs_dir=Path(typo_dir) if typo_dir else None,
+        p_typo=float(cfg.data.get("p_typo", 0.0)),
+        p_synthetic=float(cfg.data.get("p_synthetic", 0.0)),
         tokenizer_dir=Path(cfg.data.tokenizer_dir),
         max_seq_len=int(cfg.model.max_seq_len),
         batch_size=int(cfg.data.batch_size),
