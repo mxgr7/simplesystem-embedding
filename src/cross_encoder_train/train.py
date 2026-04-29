@@ -147,6 +147,7 @@ def fit_from_cfg(cfg):
         limit_train_batches=cfg.trainer.limit_train_batches,
         limit_val_batches=cfg.trainer.limit_val_batches,
         val_check_interval=cfg.trainer.val_check_interval,
+        gradient_clip_val=getattr(cfg.trainer, "gradient_clip_val", None),
         enable_checkpointing=bool(
             getattr(cfg.trainer, "enable_checkpointing", True)
         ),
