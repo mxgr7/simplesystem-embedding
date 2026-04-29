@@ -1,0 +1,473 @@
+openapi: 3.0.3
+info:
+  title: article-search-acl
+  description: |
+    Narrowed derivative of the legacy article-search OpenAPI. Exposes
+    a single endpoint, `POST /article-features/search`, that next-gen
+    callers used previously. The ACL service maps each request into
+    one or more ftsearch calls and assembles the response.
+
+    Differences from legacy (encoded as schema-level changes per
+    `issues/article-search-replacement-spec.md` §2):
+
+      - **§2.1** `searchArticlesBy` is a single-value enum: `[STANDARD]`.
+      - **§2.2** `explain` field shape unchanged on the wire, but the
+        `articles[].explanation` payload is the literal string `"N/A"`
+        when `explain=true` (no scoring breakdown).
+      - **§2.3** non-relevance sorts (price, name, articleId) operate
+        on a relevance-bounded candidate pool when a queryString is
+        present. The wire shape is unchanged; documented as a
+        deviation in this comment so operators see it during integration.
+
+    Authoritative version is this YAML; subsequent ACL packets (A2-A5)
+    implement against the schemas defined here.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8081
+    description: Local docker-compose deployment (see playground-app/compose.yaml).
+
+# §9 #7 — internal service, no per-request auth.
+security: []
+
+paths:
+  /article-features/search:
+    post:
+      operationId: articleFeaturesSearch
+      summary: Search articles
+      tags: [search]
+      parameters:
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 500, default: 10 }
+        - in: query
+          name: sort
+          required: false
+          description: |
+            Repeatable. Each value is `<field>,<asc|desc>`. Allowed
+            fields: `articleId`, `name`, `price`. Multi-key sorts apply
+            only the first key per spec §4.5.
+          schema:
+            type: array
+            items: { type: string, pattern: "^(articleId|name|price),(asc|desc)$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SearchRequest" }
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResponse" }
+        "400":
+          description: Bad request — validation or malformed payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "501":
+          description: Stub response (A1 only — A2/A3 implement)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe
+      tags: [ops]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+
+components:
+  schemas:
+    # --- request ----------------------------------------------------------
+    SearchRequest:
+      type: object
+      required:
+        - searchMode
+        - searchArticlesBy
+        - selectedArticleSources
+        - maxDeliveryTime
+        - coreSortimentOnly
+        - closedMarketplaceOnly
+        - currency
+        - explain
+      additionalProperties: false
+      properties:
+        searchMode:
+          type: string
+          enum: [HITS_ONLY, SUMMARIES_ONLY, BOTH]
+        # §2.1 deviation — single-value enum.
+        searchArticlesBy:
+          type: string
+          enum: [STANDARD]
+        selectedArticleSources:
+          $ref: "#/components/schemas/SelectedArticleSources"
+        queryString:
+          type: string
+          nullable: true
+        articleIdsFilter:
+          type: array
+          items: { type: string }
+        vendorIdsFilter:
+          type: array
+          items: { type: string, format: uuid }
+        manufacturersFilter:
+          type: array
+          items: { type: string }
+        maxDeliveryTime: { type: integer, minimum: 0 }
+        requiredFeatures:
+          type: array
+          items: { $ref: "#/components/schemas/FeatureFilter" }
+        priceFilter:
+          $ref: "#/components/schemas/PriceFilter"
+          nullable: true
+        accessoriesForArticleNumber:
+          type: string
+          nullable: true
+        sparePartsForArticleNumber:
+          type: string
+          nullable: true
+        similarToArticleNumber:
+          type: string
+          nullable: true
+        currentCategoryPathElements:
+          type: array
+          items: { type: string }
+        currentEClass5Code:
+          type: integer
+          nullable: true
+        currentEClass7Code:
+          type: integer
+          nullable: true
+        currentS2ClassCode:
+          type: integer
+          nullable: true
+        coreSortimentOnly: { type: boolean }
+        closedMarketplaceOnly: { type: boolean }
+        summaries:
+          type: array
+          items: { $ref: "#/components/schemas/SummaryKind" }
+        coreArticlesVendorsFilter:
+          type: array
+          items: { type: string, format: uuid }
+        blockedEClassVendorsFilters:
+          type: array
+          items: { $ref: "#/components/schemas/BlockedEClassVendorsFilter" }
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+        # §2.2 deviation — accepted but the response stub is "N/A".
+        explain: { type: boolean }
+        eClassesFilter:
+          type: array
+          items: { type: integer }
+        eClassesAggregations:
+          type: array
+          items: { $ref: "#/components/schemas/EClassesAggregation" }
+        s2ClassForProductCategories:
+          type: boolean
+          default: false
+
+    SelectedArticleSources:
+      type: object
+      additionalProperties: false
+      required: [closedCatalogVersionIds]
+      properties:
+        closedCatalogVersionIds:
+          type: array
+          items: { type: string, format: uuid }
+        catalogVersionIdsOrderedByPreference:
+          type: array
+          items: { type: string, format: uuid }
+        sourcePriceListIds:
+          type: array
+          items: { type: string, format: uuid }
+        customerArticleNumbersIndexingSourceIds:
+          type: array
+          items: { type: string, format: uuid }
+        customerUploadedCoreArticleListSourceIds:
+          type: array
+          items: { type: string, format: uuid }
+        customerManagedArticleNumberListId:
+          type: string
+          format: uuid
+          nullable: true
+        uiCustomerArticleNumberSourceId:
+          type: string
+          format: uuid
+          nullable: true
+
+    FeatureFilter:
+      type: object
+      additionalProperties: false
+      required: [name, values]
+      properties:
+        name: { type: string }
+        values:
+          type: array
+          items: { type: string }
+
+    PriceFilter:
+      type: object
+      additionalProperties: false
+      properties:
+        min: { type: integer, nullable: true }
+        max: { type: integer, nullable: true }
+        # Per §3 "Currency fields — two roles": this drives bound-decoding
+        # only (decimal places per ISO 4217), NOT price-row matching.
+        # Required when min or max set.
+        currencyCode:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          nullable: true
+
+    SummaryKind:
+      type: string
+      enum:
+        - CATEGORIES
+        - ECLASS5
+        - ECLASS7
+        - S2CLASS
+        - VENDORS
+        - MANUFACTURERS
+        - FEATURES
+        - PRICES
+        - PLATFORM_CATEGORIES
+        - ECLASS5SET
+
+    EClassVersion:
+      type: string
+      enum: [ECLASS_5_1, ECLASS_7_1, S2CLASS]
+
+    BlockedEClassGroup:
+      type: object
+      additionalProperties: false
+      required: [eClassGroupCode, value]
+      properties:
+        eClassGroupCode: { type: integer }
+        value: { type: boolean }
+
+    BlockedEClassVendorsFilter:
+      type: object
+      additionalProperties: false
+      required: [vendorIds, eClassVersion, blockedEClassGroups]
+      properties:
+        vendorIds:
+          type: array
+          items: { type: string, format: uuid }
+        eClassVersion: { $ref: "#/components/schemas/EClassVersion" }
+        blockedEClassGroups:
+          type: array
+          items: { $ref: "#/components/schemas/BlockedEClassGroup" }
+
+    EClassesAggregation:
+      type: object
+      additionalProperties: false
+      required: [id, eClasses]
+      properties:
+        id: { type: string }
+        eClasses:
+          type: array
+          items: { type: integer }
+
+    # --- response ---------------------------------------------------------
+
+    SearchResponse:
+      type: object
+      additionalProperties: false
+      required: [articles, summaries, metadata]
+      properties:
+        articles:
+          type: array
+          items: { $ref: "#/components/schemas/Article" }
+        summaries: { $ref: "#/components/schemas/Summaries" }
+        metadata: { $ref: "#/components/schemas/Metadata" }
+
+    Article:
+      type: object
+      additionalProperties: false
+      required: [articleId]
+      properties:
+        articleId:
+          type: string
+          description: |
+            Format `{friendlyId}:{base64UrlEncodedArticleNumber}` —
+            wire value matches legacy exactly.
+        # §2.2 deviation — stubbed to "N/A" when explain=true.
+        explanation:
+          type: string
+          nullable: true
+
+    Summaries:
+      type: object
+      additionalProperties: false
+      properties:
+        vendorSummaries:
+          type: array
+          items: { $ref: "#/components/schemas/VendorSummary" }
+        manufacturerSummaries:
+          type: array
+          items: { $ref: "#/components/schemas/NameCount" }
+        featureSummaries:
+          type: array
+          items: { $ref: "#/components/schemas/FeatureSummary" }
+        pricesSummary:
+          type: array
+          items: { $ref: "#/components/schemas/PricesBucket" }
+        categoriesSummary:
+          $ref: "#/components/schemas/CategoriesSummary"
+          nullable: true
+        eClass5Categories:
+          $ref: "#/components/schemas/EClassCategories"
+          nullable: true
+        eClass7Categories:
+          $ref: "#/components/schemas/EClassCategories"
+          nullable: true
+        s2ClassCategories:
+          $ref: "#/components/schemas/EClassCategories"
+          nullable: true
+        eClassesAggregations:
+          type: array
+          items: { $ref: "#/components/schemas/NameCount" }
+
+    VendorSummary:
+      type: object
+      additionalProperties: false
+      required: [vendorId, count]
+      properties:
+        vendorId: { type: string, format: uuid }
+        count: { type: integer, minimum: 0 }
+
+    NameCount:
+      type: object
+      additionalProperties: false
+      required: [name, count]
+      properties:
+        # Reused for both `manufacturerSummaries[].name` and
+        # `eClassesAggregations[].id` — second case sends "id" in the
+        # name slot. ACL response mapper handles the rename.
+        name: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    FeatureValueCount:
+      type: object
+      additionalProperties: false
+      required: [value, count]
+      properties:
+        value: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    FeatureSummary:
+      type: object
+      additionalProperties: false
+      required: [name, count, values]
+      properties:
+        name: { type: string }
+        count: { type: integer, minimum: 0 }
+        values:
+          type: array
+          items: { $ref: "#/components/schemas/FeatureValueCount" }
+
+    PricesBucket:
+      type: object
+      additionalProperties: false
+      required: [min, max, currencyCode]
+      properties:
+        min: { type: number }
+        max: { type: number }
+        currencyCode: { type: string, pattern: "^[A-Z]{3}$" }
+
+    CategoryBucket:
+      type: object
+      additionalProperties: false
+      required: [categoryPathElements, count]
+      properties:
+        categoryPathElements:
+          type: array
+          items: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    CategoriesSummary:
+      type: object
+      additionalProperties: false
+      properties:
+        currentCategoryPathElements:
+          type: array
+          items: { type: string }
+        sameLevel:
+          type: array
+          items: { $ref: "#/components/schemas/CategoryBucket" }
+        children:
+          type: array
+          items: { $ref: "#/components/schemas/CategoryBucket" }
+
+    EClassBucket:
+      type: object
+      additionalProperties: false
+      required: [group, count]
+      properties:
+        group: { type: integer }
+        count: { type: integer, minimum: 0 }
+
+    EClassCategories:
+      type: object
+      additionalProperties: false
+      properties:
+        selectedEClassGroup:
+          type: integer
+          nullable: true
+        sameLevel:
+          type: array
+          items: { $ref: "#/components/schemas/EClassBucket" }
+        children:
+          type: array
+          items: { $ref: "#/components/schemas/EClassBucket" }
+
+    Metadata:
+      type: object
+      additionalProperties: false
+      required: [page, pageSize, pageCount, hitCount]
+      properties:
+        page: { type: integer, minimum: 0 }
+        pageSize: { type: integer, minimum: 0 }
+        pageCount: { type: integer, minimum: 0 }
+        term:
+          type: string
+          nullable: true
+        hitCount: { type: integer, minimum: 0 }
+
+    # --- error envelope (§3.1) -------------------------------------------
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [message, details, timestamp]
+      properties:
+        message: { type: string }
+        details:
+          type: array
+          items: { type: string }
+        timestamp:
+          type: string
+          format: date-time

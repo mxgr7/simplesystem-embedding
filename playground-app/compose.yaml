@@ -52,5 +52,21 @@ services:
       - redis
     restart: unless-stopped
 
+  acl:
+    # F9-followon ACL service (packet A1 skeleton). Exposes the
+    # narrowed legacy `/article-features/search` contract on port 8081
+    # and translates each request into one or more search-api calls.
+    # A2/A3/A4 fill in the actual mapping; right now this serves a
+    # 501 stub + the OpenAPI doc.
+    build:
+      context: ..
+      dockerfile: acl/Dockerfile
+    environment:
+      FTSEARCH_URL: http://localhost:8001
+    network_mode: host
+    depends_on:
+      - search-api
+    restart: unless-stopped
+
 volumes:
   redis-data:
