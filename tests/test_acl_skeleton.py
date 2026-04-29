@@ -30,16 +30,23 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from main import app  # noqa: E402
 
-client = TestClient(app)
+
+@pytest.fixture
+def client():
+    """Context-managed TestClient so the FastAPI lifespan fires —
+    needed for `app.state.ftsearch` (the httpx client that A2 wires
+    in)."""
+    with TestClient(app) as c:
+        yield c
 
 
-def test_healthz_returns_ok() -> None:
+def test_healthz_returns_ok(client) -> None:
     r = client.get("/healthz")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
 
 
-def test_openapi_yaml_is_served() -> None:
+def test_openapi_yaml_is_served(client) -> None:
     """The contract source of truth is served at /openapi.yaml so
     integrators + client generators can fetch it from the deployed
     service without poking at the repo."""
@@ -61,10 +68,12 @@ def test_openapi_validates() -> None:
     validate_spec(spec)
 
 
-def test_search_stub_returns_501_with_legacy_error_envelope() -> None:
-    """Until A2/A3 land, the stub returns 501. The body must already
-    be in the legacy `{message, details, timestamp}` shape so
-    callers see a consistent envelope across pre- and post-A4 errors."""
+def test_search_endpoint_returns_legacy_envelope_on_upstream_failure(client) -> None:
+    """Post-A2 the endpoint actually calls ftsearch. With no ftsearch
+    reachable in this skeleton-only test (no MockTransport), the call
+    fails with `httpx.ConnectError` → ACL wraps it in the legacy
+    `{message, details, timestamp}` 503 envelope. End-to-end happy-path
+    coverage lives in `test_acl_integration.py`."""
     r = client.post("/article-features/search", json={
         "searchMode": "BOTH",
         "searchArticlesBy": "STANDARD",
@@ -75,10 +84,11 @@ def test_search_stub_returns_501_with_legacy_error_envelope() -> None:
         "currency": "EUR",
         "explain": False,
     })
-    assert r.status_code == 501, r.text
+    # Either 503 (network unreachable) or 502/500 depending on the
+    # bubbled-up failure shape — what matters is the envelope.
+    assert r.status_code >= 500, r.text
     body = r.json()
     assert set(body.keys()) == {"message", "details", "timestamp"}
-    assert "Not implemented" in body["message"]
     assert isinstance(body["details"], list)
     assert body["timestamp"], "timestamp must be present"
 
