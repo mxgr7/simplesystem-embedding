@@ -40,9 +40,11 @@ embedding-index-build = "embedding_train.index_build:main"
 embedding-index-search = "embedding_train.index_search:main"
 embedding-mine-hard-negatives = "embedding_train.hard_negatives:main"
 cross-encoder-train = "cross_encoder_train.train:main"
+suggest-eda = "suggest_train.eda:main"
+suggest-preprocess = "suggest_train.preprocess:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/embedding_train", "src/cross_encoder_train"]
+packages = ["src/embedding_train", "src/cross_encoder_train", "src/suggest_train"]
 
 [tool.uv]
 package = true
