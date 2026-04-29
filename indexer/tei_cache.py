@@ -128,13 +128,24 @@ class TEICache:
         """One TEI call. Returns shape (n, dim) fp32 array — caller
         casts to fp16 for storage. Splits into `_tei_batch` chunks so
         the request payload stays bounded for TEI's per-request memory
-        ceiling."""
+        ceiling.
+
+        `truncate: true` is set per-request because the production
+        model checkpoint (`useful-cub-58-st`) was trained with a
+        ~32-token max_input_length. Article texts (`embedding_text.py`)
+        can run longer when an article carries multiple categories or
+        eclass codes; truncating right-side keeps the higher-signal
+        prefix (`name`, `manufacturerName`) intact. Without this flag
+        TEI returns 413 + 'inputs must have less than 32 tokens'."""
         if not texts:
             return np.empty((0, _VECTOR_DIM), dtype=np.float32)
         chunks: list[np.ndarray] = []
         for i in range(0, len(texts), self._tei_batch):
             chunk = texts[i : i + self._tei_batch]
-            resp = self._http.post(f"{self._tei_url}/embed", json={"inputs": chunk})
+            resp = self._http.post(
+                f"{self._tei_url}/embed",
+                json={"inputs": chunk, "truncate": True},
+            )
             resp.raise_for_status()
             arr = np.asarray(resp.json(), dtype=np.float32)
             if arr.ndim != 2 or arr.shape[1] != _VECTOR_DIM:

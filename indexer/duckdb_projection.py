@@ -751,7 +751,7 @@ offer_ccy_envelope AS (
     FROM offer_prices_exploded
     GROUP BY id
 ),
-offers AS (
+offers_pre_dedup AS (
     SELECT
         wh.id,
         wh.article_hash,
@@ -798,6 +798,23 @@ offers AS (
         )}
     FROM with_hash wh
     LEFT JOIN offer_ccy_envelope oe USING (id)
+),
+-- Atlas snapshots can carry duplicate (vendorId, articleNumber) tuples
+-- for the same offer when multiple shards or staging variants overlap.
+-- Milvus rejects upserts that contain duplicate primary keys within a
+-- single batch, so we collapse to one row per `id` here. The choice of
+-- representative is non-deterministic (no `updated_at` column on the
+-- offer schema); for two snapshots taken simultaneously this is
+-- well-defined enough — operators wanting "latest" semantics need to
+-- carry an explicit timestamp through. Per-row parity (sample_10k)
+-- explicitly tested via multi-set comparison since the dedup happens
+-- at this CTE boundary, not in the upstream projection.
+offers AS (
+    SELECT * EXCLUDE (_rn) FROM (
+        SELECT *, row_number() OVER (PARTITION BY id) AS _rn
+        FROM offers_pre_dedup
+    )
+    WHERE _rn = 1
 )"""
 
 
