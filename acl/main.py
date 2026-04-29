@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from acl.clients.ftsearch import FtsearchClient
 from acl.mapping.request import map_request
+from acl.mapping.response import map_response
 from acl.models import LegacySearchRequest
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -147,7 +148,7 @@ async def search(
     )
     client: FtsearchClient = request.app.state.ftsearch
     try:
-        response_body = await client.search(
+        ftsearch_body = await client.search(
             ftsearch_request.body, params=ftsearch_request.params,
         )
     except httpx.HTTPStatusError as exc:
@@ -166,7 +167,8 @@ async def search(
             message="ftsearch unreachable",
             details=[type(exc).__name__],
         )
-    return JSONResponse(content=response_body, status_code=200)
+    legacy_body = map_response(ftsearch_body, explain=body.explain)
+    return JSONResponse(content=legacy_body, status_code=200)
 
 
 # --- error handlers ------------------------------------------------------

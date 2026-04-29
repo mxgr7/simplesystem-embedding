@@ -92,6 +92,8 @@ def client_with_stub_ftsearch(stub_ftsearch_request_handler):
 # ---------- happy path ---------------------------------------------------
 
 def test_full_round_trip(client_with_stub_ftsearch, stub_ftsearch_request_handler) -> None:
+    """Happy path: legacy request → mapper → ftsearch (mocked) →
+    response mapper → legacy envelope on the way back."""
     client = client_with_stub_ftsearch
     _handler, captured = stub_ftsearch_request_handler
 
@@ -102,17 +104,21 @@ def test_full_round_trip(client_with_stub_ftsearch, stub_ftsearch_request_handle
     )
     assert r.status_code == 200, r.text
 
-    # Response forwarded through.
+    # Response in legacy shape — A3 mapping applied.
     body = r.json()
     assert len(body["articles"]) == 2
     assert body["articles"][0]["articleId"] == "abcdefg:MTIzNA"
+    # `explain=true` in the request → `explanation = "N/A"` per §2.2.
+    assert body["articles"][0]["explanation"] == "N/A"
+    # `score` from ftsearch is dropped on the way out (legacy doesn't carry).
+    assert "score" not in body["articles"][0]
     assert body["metadata"]["hitCount"] == 2
 
     # ftsearch was called correctly.
     assert captured["method"] == "POST"
     assert captured["url"].endswith("/articles/_search?page=1&pageSize=10")
     sent_body = captured["body"]
-    # Renames + drops applied.
+    # Renames + drops applied (request side, A2).
     assert sent_body["query"] == "schraube"
     assert "queryString" not in sent_body
     assert "searchArticlesBy" not in sent_body
@@ -120,6 +126,22 @@ def test_full_round_trip(client_with_stub_ftsearch, stub_ftsearch_request_handle
     # Fields preserved.
     assert sent_body["currency"] == "EUR"
     assert sent_body["summaries"] == ["VENDORS", "MANUFACTURERS"]
+
+
+def test_explain_false_omits_explanation_in_response(
+    client_with_stub_ftsearch,
+) -> None:
+    client = client_with_stub_ftsearch
+    body = _request_body()
+    body["explain"] = False
+    r = client.post(
+        "/article-features/search",
+        params={"page": 1, "pageSize": 10},
+        json=body,
+    )
+    assert r.status_code == 200
+    for art in r.json()["articles"]:
+        assert "explanation" not in art
 
 
 def test_pagination_and_sort_query_params_forwarded(
