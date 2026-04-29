@@ -97,11 +97,24 @@ MAX_PRICE_SENTINEL = 3.4028234e38
 
 # Article-level fields per the F9 topology block. Used by the row
 # splitter below (offer rows = projected row minus these) and by the
-# article aggregator (these fields are invariant across the hash group).
+# article aggregator (these fields are invariant across the hash group,
+# OR are aggregated by it — see `customer_article_numbers` below).
+#
+# `customer_article_numbers` is the only entry here that's NOT invariant
+# by hash construction: it's per-offer source data that the article
+# aggregator UNIONs across the dedup group keyed by value. We carry it
+# on the flat row so `aggregate_article` can read it uniformly via
+# `r["customer_article_numbers"]` instead of receiving the raw Mongo
+# joined rows again — same pattern as `prices` (per-offer source, lives
+# on offers_v{N}, but read by `aggregate_article` to derive the
+# article-side envelope columns). `to_offer_row` strips it because the
+# offer collection has no column to receive it (article-level only per
+# F9; `articles_v{N}` carries it as JSON).
 _ARTICLE_LEVEL_KEYS: tuple[str, ...] = (
     "name", "manufacturerName",
     "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",
     "eclass5_code", "eclass7_code", "s2class_code",
+    "customer_article_numbers",
 )
 
 
@@ -231,6 +244,51 @@ def _project_eclass(eclass_groups: dict[str, Any] | None, key: str) -> list[int]
     return [int(c) for c in eclass_groups.get(key) or []]
 
 
+def _project_customer_numbers(
+    joined_rows: list[dict[str, Any]] | None,
+    *,
+    catalog_value: str | None,
+    catalog_version_id: uuid.UUID | None,
+) -> list[dict[str, Any]]:
+    """Per-offer customer-supplied SKU aliases in the inverted-by-value
+    shape that mirrors the legacy ES `SearchArticleDocument.customerArticleNumbers`
+    Nested field.
+
+    Two sources fold into the same field per legacy
+    `SearchArticleDocumentMapper.java:101-137`:
+
+      - Joined `customerArticleNumbers` Mongo rows: each row carries
+        `customerArticleNumber` (value) + `customerArticleNumbersListVersionId`
+        (version_id from a customer's price-list / article-list upload).
+      - The offer's own `offerParams.customerArticleNumber` (catalog-supplied),
+        paired with the offer's `catalogVersionId` as version_id (per
+        `OfferSourceId.asCustomerArticleNumberSourceId()` — a pure
+        type-cast wrapping the same UUID).
+
+    The inversion (one entry per distinct value, version_ids set) is
+    load-bearing for entitlement filtering: ftsearch scopes a value
+    match to only those version_ids the requesting customer is entitled
+    to. A flat parallel-arrays encoding would silently match a value
+    when only an unrelated value's version_id is allowed."""
+    by_value: dict[str, set[str]] = {}
+    for r in joined_rows or []:
+        value = r.get("customerArticleNumber")
+        if not value:
+            continue
+        version_raw = r.get("customerArticleNumbersListVersionId")
+        if not version_raw:
+            continue
+        by_value.setdefault(value, set()).add(str(_decode_uuid(version_raw)))
+    if catalog_value and catalog_version_id is not None:
+        by_value.setdefault(catalog_value, set()).add(str(catalog_version_id))
+    # Sort entries by value and version_ids within each entry — bulk-rerun
+    # stability and easier diffing.
+    return [
+        {"value": v, "version_ids": sorted(by_value[v])}
+        for v in sorted(by_value)
+    ]
+
+
 def _project_markers(
     markers: list[dict[str, Any]] | None,
 ) -> tuple[list[str], list[str]]:
@@ -285,7 +343,14 @@ def project(record: dict[str, Any]) -> ProjectionResult:
     related = inner.get("relatedArticleNumbers") or {}
 
     catalog_version_id = outer.get("catalogVersionId")
-    catalog_version_ids = [str(_decode_uuid(catalog_version_id))] if catalog_version_id else []
+    catalog_version_uuid = _decode_uuid(catalog_version_id) if catalog_version_id else None
+    catalog_version_ids = [str(catalog_version_uuid)] if catalog_version_uuid else []
+
+    customer_numbers = _project_customer_numbers(
+        record.get("customerArticleNumbers"),
+        catalog_value=params.get("customerArticleNumber"),
+        catalog_version_id=catalog_version_uuid,
+    )
 
     row: dict[str, Any] = {
         "id": pk,
@@ -307,6 +372,7 @@ def project(record: dict[str, Any]) -> ProjectionResult:
         "relationship_accessory_for": list(related.get("accessoryFor") or []),
         "relationship_spare_part_for": list(related.get("sparePartFor") or []),
         "relationship_similar_to": list(related.get("similarTo") or []),
+        "customer_article_numbers": customer_numbers,
     }
     return ProjectionResult(row=row, dropped_features=dropped)
 
@@ -474,6 +540,23 @@ def aggregate_article(
     nums = sorted({r["article_number"] for r in rows if r.get("article_number")})
     text_pieces = [article["name"], article["manufacturerName"], *eans, *nums]
     article["text_codes"] = " ".join(p for p in text_pieces if p)
+
+    # UNION customer_article_numbers across the dedup group keyed by
+    # value: when two offers in the same hash group have the same
+    # customer-supplied SKU under different version_ids (e.g., catalog A
+    # and price-list B both expose "BOLT-001" for the same physical
+    # article), the article row's entry merges both version_ids.
+    cans_union: dict[str, set[str]] = {}
+    for r in rows:
+        for entry in r.get("customer_article_numbers") or []:
+            value = entry.get("value")
+            if not value:
+                continue
+            cans_union.setdefault(value, set()).update(entry.get("version_ids") or [])
+    article["customer_article_numbers"] = [
+        {"value": v, "version_ids": sorted(cans_union[v])}
+        for v in sorted(cans_union)
+    ]
 
     by_ccy: dict[str, list[float]] = {c: [] for c in currencies}
     for r in rows:

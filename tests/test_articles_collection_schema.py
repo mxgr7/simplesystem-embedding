@@ -14,7 +14,7 @@ collection against a live Milvus:
      parse and execute. ANN smoke against `offer_embedding` returns a
      well-formed result.
 
-Skipped if Milvus is not reachable or `articles_v1` is not present.
+Skipped if Milvus is not reachable or `articles_v4` is not present.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from pymilvus import MilvusClient
 from pymilvus.exceptions import MilvusException
 
 MILVUS_URI = "http://localhost:19530"
-COLLECTION = "articles_v1"
+COLLECTION = "articles_v4"
 DIM = 128
 
 # Mirror of `CATALOG_CURRENCIES` in `scripts/create_articles_collection.py`.
@@ -41,7 +41,8 @@ SCALAR_FIELDS = {
 }
 VECTOR_FIELDS = {"offer_embedding", "sparse_codes"}
 ENVELOPE_FIELDS = {f"{c}_price_{s}" for c in CATALOG_CURRENCIES for s in ("min", "max")}
-EXPECTED_FIELDS = {"article_hash"} | SCALAR_FIELDS | VECTOR_FIELDS | ENVELOPE_FIELDS
+JSON_FIELDS = {"customer_article_numbers"}  # F9 PR2b — see projection.py
+EXPECTED_FIELDS = {"article_hash"} | SCALAR_FIELDS | VECTOR_FIELDS | ENVELOPE_FIELDS | JSON_FIELDS
 
 EXPECTED_INVERTED_INDEXES = {
     "category_l1", "category_l2", "category_l3", "category_l4", "category_l5",

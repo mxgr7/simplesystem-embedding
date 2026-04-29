@@ -8,8 +8,14 @@ Two collections, two aliases (post-F9 topology):
 
 | Collection family | Versioned name      | Public alias | Builder script                       |
 | ----------------- | ------------------- | ------------ | ------------------------------------ |
-| Articles          | `articles_v1`, `…2` | `articles`   | `scripts/create_articles_collection.py` |
-| Offers            | `offers_v3`, `…4`   | `offers`     | `scripts/create_offers_collection.py`   |
+| Articles          | `articles_v4`, `…5` | `articles`   | `scripts/create_articles_collection.py` |
+| Offers            | `offers_v5`, `…6`   | `offers`     | `scripts/create_offers_collection.py`   |
+
+Versions are intentionally numerically aligned past the F9 PR2b cutover —
+articles jumped from v1 to v4 to pair with the post-F8 `offers_v4 → v5`
+bump, so a single integer N picks out the consistent pair (`articles_v{N}`,
+`offers_v{N+1}`). Pre-cutover history (articles_v1..v3, offers_v3..v4) is
+defunct and not referenced by any current script or test.
 
 The version number is operator-supplied (`--version N`); each script
 refuses to overwrite an existing collection.
@@ -27,9 +33,10 @@ swing" section below.
 ## Bring up a new collection version
 
 ```bash
-# Pick N = (current version) + 1.
-uv run python scripts/create_articles_collection.py --version 2 --alias articles
-uv run python scripts/create_offers_collection.py   --version 4 --alias offers
+# Pick N higher than the current version on each. Steady-state pairs
+# articles_v{N} with offers_v{N+1}.
+uv run python scripts/create_articles_collection.py --version 4 --alias articles
+uv run python scripts/create_offers_collection.py   --version 5 --alias offers
 ```
 
 Each script creates the versioned collection, builds the vector + scalar
@@ -39,8 +46,8 @@ atomically swings the alias to point at it.
 For a pre-population staging run, suppress the alias on both:
 
 ```bash
-uv run python scripts/create_articles_collection.py --version 2 --no-alias
-uv run python scripts/create_offers_collection.py   --version 4 --no-alias
+uv run python scripts/create_articles_collection.py --version 4 --no-alias
+uv run python scripts/create_offers_collection.py   --version 5 --no-alias
 # ... populate both via the F9 indexer two-stream emitter ...
 # ... validate end-to-end ...
 # Then perform the paired alias swing (see below).
@@ -57,7 +64,7 @@ is renamed or dropped.
 
 Sequence at first cutover:
 
-1. Build `articles_v1` and `offers_v3` with `--no-alias` and populate
+1. Build `articles_v4` and `offers_v5` with `--no-alias` and populate
    them via the F9 indexer (the same bulk run emits both row streams).
 2. Validate end-to-end against the versioned names (e.g. via temporary
    aliases like `articles_staging` / `offers_staging` that ftsearch can
@@ -145,7 +152,7 @@ embedded-field set, or canonicalisation must be a paired swing.
 from pymilvus import MilvusClient
 c = MilvusClient(uri="http://localhost:19530")
 c.list_collections()                            # all collections
-c.list_aliases(collection_name="articles_v2")   # aliases pointing at it
+c.list_aliases(collection_name="articles_v4")   # aliases pointing at it
 c.describe_alias(alias="articles")              # which collection 'articles' resolves to
 c.describe_alias(alias="offers")                # which collection 'offers' resolves to
 ```

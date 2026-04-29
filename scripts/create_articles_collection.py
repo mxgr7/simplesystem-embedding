@@ -78,10 +78,6 @@ BM25_ANALYZER_PARAMS = {
 #
 # `manufacturerName` is INVERTED so the F9 dedup path's article-side
 # `manufacturers_filter` can push down without a full collection scan.
-# Existing `articles_v1` was created without this index (PR1) — to pick
-# it up, build articles_v2 via `scripts/create_articles_collection.py
-# --version 2` and swing the alias (paired with the corresponding
-# offers_v{N+1}; see `scripts/MILVUS_ALIAS_WORKFLOW.md`).
 SCALAR_INDEX_FIELDS = (
     "manufacturerName",
     "category_l1",
@@ -141,6 +137,21 @@ def build_schema(client: MilvusClient):
     schema.add_field("eclass5_code", DataType.ARRAY, element_type=DataType.INT32, max_capacity=16)
     schema.add_field("eclass7_code", DataType.ARRAY, element_type=DataType.INT32, max_capacity=16)
     schema.add_field("s2class_code", DataType.ARRAY, element_type=DataType.INT32, max_capacity=16)
+
+    # Customer-supplied SKU aliases (legacy `customerArticleNumbers` Mongo
+    # collection + the catalog-supplied `offer.offerParams.customerArticleNumber`
+    # folded in with the offer's `catalogVersionId` as version_id).
+    # Inverted-by-value shape mirroring the legacy ES Nested:
+    #   [{"value": "BOLT-001", "version_ids": ["uuid-A", "uuid-C"]}, ...]
+    # The per-value→version_ids mapping is load-bearing for entitlement —
+    # ftsearch scopes matches to only those version_ids the requesting
+    # customer is entitled to, and a flat parallel-arrays encoding loses
+    # that relation. JSON is the only Milvus 2.6 shape that preserves it
+    # without a multi-row flatten that breaks the one-row-per-hash
+    # invariant. Filtering will use the JSON predicate family in PR3 — no
+    # scalar index here. See F9 PR2b notes / `aggregate_article` for the
+    # UNION-by-value rule across the dedup group.
+    schema.add_field("customer_article_numbers", DataType.JSON)
 
     # Per-currency envelope across all the article's offers. Two FLOAT
     # columns per currency; NaN sentinel for "no price in this currency

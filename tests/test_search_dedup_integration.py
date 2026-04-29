@@ -1,5 +1,5 @@
 """F9 PR3 integration test — dedup-topology dispatch through the
-in-process FastAPI app against live `articles_v1` + `offers_v4`.
+in-process FastAPI app against live `articles_v4` + `offers_v5`.
 
 Loads sample_200 with a `pr3:` offer-id namespace, then exercises the
 `USE_DEDUP_TOPOLOGY=1` flag through the search endpoint. Coverage:
@@ -39,8 +39,8 @@ from indexer.projection import compute_article_hash, group_by_hash, project  # n
 from indexer.test_loader import load_split  # noqa: E402
 
 MILVUS_URI = "http://localhost:19530"
-ARTICLES = "articles_v1"
-OFFERS = "offers_v4"
+ARTICLES = "articles_v4"
+OFFERS = "offers_v5"
 FIXTURE_PATH = REPO_ROOT / "tests/fixtures/mongo_sample/sample_200.json"
 ID_NAMESPACE = "pr3:"
 

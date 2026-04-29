@@ -28,7 +28,7 @@ from pymilvus import MilvusClient
 from pymilvus.exceptions import MilvusException
 
 MILVUS_URI = "http://localhost:19530"
-COLLECTION = "offers_v3"
+COLLECTION = "offers_v5"
 ALIAS = "offers_v_alias"
 
 # Per-offer scope after the F9 split. Article-level fields (name,
