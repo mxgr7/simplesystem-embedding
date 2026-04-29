@@ -27,6 +27,7 @@ from models import (  # noqa: E402
     BlockedEClassVendorsFilter,
     EClassVersion,
     FeatureFilter,
+    PriceFilter,
     SearchMode,
     SearchRequest,
     SelectedArticleSources,
@@ -542,3 +543,148 @@ def test_has_per_vendor_blocked_eclass_false_when_only_block_false() -> None:
         ),
     ])
     assert has_per_vendor_blocked_eclass(req) is False
+
+
+# ---------- F8 price-scope pre-filter ------------------------------------
+#
+# Both atoms gate on `priceFilter` being set — preserves the F3
+# post-pass-only path's behaviour when there's no priceFilter (offers
+# without a resolvable price are kept with `resolved_price=None`,
+# representative-pick still proceeds). When priceFilter IS set, the
+# clauses are conservative supersets of the precise post-pass.
+
+def test_price_band_skipped_without_price_filter() -> None:
+    """No priceFilter → no band clause (preserves F3 parity)."""
+    assert build_offer_expr(_req()) is None
+
+
+def test_price_band_emits_both_bounds_when_present() -> None:
+    """`{ccy}_price_min <= decoded_max AND {ccy}_price_max >= decoded_min`."""
+    req = _req(price_filter=PriceFilter(min=1525, max=10000, currencyCode="EUR"))
+    # 1525 minor → 15.25; 10000 minor → 100. Top-level currency=EUR → eur_*.
+    assert build_offer_expr(req) == (
+        "(eur_price_min <= 100) and (eur_price_max >= 15.25)"
+    )
+
+
+def test_price_band_min_only_emits_max_column_only() -> None:
+    """Only `min` set → only `{ccy}_price_max >= decoded_min` (the `_max`
+    column captures the upper end of the offer's range; if it's below
+    the requested floor the offer is out)."""
+    req = _req(price_filter=PriceFilter(min=2000, currencyCode="EUR"))
+    assert build_offer_expr(req) == "eur_price_max >= 20"
+
+
+def test_price_band_max_only_emits_min_column_only() -> None:
+    """Only `max` set → only `{ccy}_price_min <= decoded_max`."""
+    req = _req(price_filter=PriceFilter(max=5000, currencyCode="EUR"))
+    assert build_offer_expr(req) == "eur_price_min <= 50"
+
+
+def test_price_band_uses_top_level_currency_lowercased() -> None:
+    """Spec §3 currency two-roles: top-level `currency` selects the
+    column, NOT `priceFilter.currencyCode` (which only decodes bounds)."""
+    req = _req(
+        currency="CHF",
+        price_filter=PriceFilter(min=1000, max=2000, currencyCode="CHF"),
+    )
+    assert build_offer_expr(req) == (
+        "(chf_price_min <= 20) and (chf_price_max >= 10)"
+    )
+
+
+def test_price_band_decodes_via_priceFilter_currency_code() -> None:
+    """Spec §3: `priceFilter.currencyCode` drives bound decoding via
+    ISO-4217 fraction digits. JPY has 0 digits → minor units == decimal."""
+    req = _req(
+        currency="EUR",
+        price_filter=PriceFilter(min=1500, max=10000, currencyCode="JPY"),
+    )
+    # Decoded via JPY (0 digits) → 1500/10000 verbatim.
+    assert build_offer_expr(req) == (
+        "(eur_price_min <= 10000) and (eur_price_max >= 1500)"
+    )
+
+
+def test_price_band_skipped_when_currency_not_in_catalog() -> None:
+    """Out-of-catalogue top-level currency (e.g., USD) has no
+    `usd_price_*` column on offers_v{N} — clause is omitted, post-pass
+    handles the precise check alone."""
+    req = _req(
+        currency="USD",
+        price_filter=PriceFilter(min=1500, max=10000, currencyCode="USD"),
+    )
+    assert build_offer_expr(req) is None
+
+
+def test_price_list_scope_skipped_without_price_filter() -> None:
+    """sourcePriceListIds alone (no priceFilter) → no clause. Routing.py's
+    resolver only drops on price-list mismatch when price_filter_active —
+    emitting this clause without priceFilter would break parity."""
+    req = _req(selected_article_sources=SelectedArticleSources(
+        sourcePriceListIds=["pl-1", "pl-2"],
+    ))
+    assert build_offer_expr(req) is None
+
+
+def test_price_list_scope_skipped_when_source_ids_empty() -> None:
+    """priceFilter alone, empty sourcePriceListIds → no list clause
+    (band clause may still emit)."""
+    req = _req(price_filter=PriceFilter(min=1000, currencyCode="EUR"))
+    expr = build_offer_expr(req)
+    assert expr is not None
+    assert "price_list_ids" not in expr
+
+
+def test_price_list_scope_emits_when_priceFilter_and_ids_set() -> None:
+    """Both priceFilter and sourcePriceListIds set → list clause +
+    band clause AND-composed."""
+    req = _req(
+        selected_article_sources=SelectedArticleSources(
+            sourcePriceListIds=["pl-1", "pl-2"],
+        ),
+        price_filter=PriceFilter(min=1000, max=5000, currencyCode="EUR"),
+    )
+    expr = build_offer_expr(req)
+    assert expr is not None
+    assert 'array_contains_any(price_list_ids, ["pl-1", "pl-2"])' in expr
+    assert "eur_price_min <= 50" in expr
+    assert "eur_price_max >= 10" in expr
+
+
+def test_price_clauses_compose_with_other_offer_atoms() -> None:
+    """F8 clauses AND-compose with vendor / delivery / etc."""
+    req = _req(
+        vendor_ids_filter=["v1"],
+        max_delivery_time=5,
+        selected_article_sources=SelectedArticleSources(
+            sourcePriceListIds=["pl-1"],
+        ),
+        price_filter=PriceFilter(max=10000, currencyCode="EUR"),
+    )
+    expr = build_offer_expr(req)
+    assert expr is not None
+    assert 'vendor_id in ["v1"]' in expr
+    assert "delivery_time_days_max <= 5" in expr
+    assert 'array_contains_any(price_list_ids, ["pl-1"])' in expr
+    assert "eur_price_min <= 100" in expr
+
+
+def test_price_clauses_are_offer_side_only() -> None:
+    """F8 envelope columns live on offers_v{N} — never article side."""
+    req = _req(
+        selected_article_sources=SelectedArticleSources(
+            sourcePriceListIds=["pl-1"],
+        ),
+        price_filter=PriceFilter(min=1000, max=5000, currencyCode="EUR"),
+    )
+    assert build_article_expr(req) is None
+
+
+def test_price_band_skipped_when_no_bounds() -> None:
+    """priceFilter present but min and max both None → no band clause
+    (no actual bound to apply)."""
+    req = _req(price_filter=PriceFilter(currencyCode="EUR"))
+    expr = build_offer_expr(req)
+    # No sourcePriceListIds either → both atoms skip → None.
+    assert expr is None

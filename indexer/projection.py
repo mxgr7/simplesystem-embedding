@@ -365,15 +365,72 @@ def compute_article_hash(row: dict[str, Any]) -> str:
     return digest[:16].hex()
 
 
-def to_offer_row(row: dict[str, Any], *, article_hash: str) -> dict[str, Any]:
+def to_offer_row(
+    row: dict[str, Any],
+    *,
+    article_hash: str,
+    currencies: tuple[str, ...] = CATALOG_CURRENCIES,
+) -> dict[str, Any]:
     """Project a flat row into the `offers_v{N}` shape: drop article-level
     fields, attach `article_hash` (join key) and `_placeholder_vector`
     (Milvus 2.6 requires every collection to declare at least one
-    indexed vector field — see `scripts/create_offers_collection.py`)."""
+    indexed vector field — see `scripts/create_offers_collection.py`).
+
+    Also attaches F8 per-offer envelope columns derived from this row's
+    `prices` JSON:
+
+      - `price_list_ids` — sorted union of `prices[].sourcePriceListId`.
+      - `currencies` — sorted union of `prices[].currency`. Restricted
+        to known catalogue currencies (a currency outside `currencies`
+        has no envelope column to land in, so its row in `prices` is
+        kept on the JSON column for the post-pass to resolve).
+      - `{ccy}_price_min/max` — min/max across this offer's prices in
+        each known currency. `MAX_PRICE_SENTINEL` / `-MAX_PRICE_SENTINEL`
+        when absent (range predicates naturally exclude — see
+        `MAX_PRICE_SENTINEL` for the rejected-NaN-and-Inf deviation).
+    """
     out = {k: v for k, v in row.items() if k not in _ARTICLE_LEVEL_KEYS}
     out["article_hash"] = article_hash
     out["_placeholder_vector"] = [0.0, 0.0]
+    out.update(_offer_envelope(row.get("prices") or [], currencies=currencies))
     return out
+
+
+def _offer_envelope(
+    prices: list[dict[str, Any]],
+    *,
+    currencies: tuple[str, ...],
+) -> dict[str, Any]:
+    """Derive the F8 per-offer envelope columns from a single offer's
+    `prices` list. `currencies` is the lowercased catalogue tuple."""
+    price_list_ids = sorted({
+        p["sourcePriceListId"] for p in prices
+        if p.get("sourcePriceListId")
+    })
+    # `currencies` array column carries every currency the offer prices
+    # in (lowercased to match the column tuple). We keep all observed
+    # currencies, not just the catalogue subset — narrow filters on
+    # rare currencies still need the array_contains pre-filter to drop
+    # this row when its currency isn't requested. Range columns below
+    # are still catalogue-restricted (one per declared `{ccy}_*` column).
+    seen_currencies = sorted({
+        (p.get("currency") or "").lower() for p in prices
+        if p.get("currency")
+    })
+
+    envelope: dict[str, Any] = {
+        "price_list_ids": price_list_ids,
+        "currencies": seen_currencies,
+    }
+    by_ccy: dict[str, list[float]] = {c: [] for c in currencies}
+    for p in prices:
+        ccy = (p.get("currency") or "").lower()
+        if ccy in by_ccy:
+            by_ccy[ccy].append(float(p["price"]))
+    for ccy, vals in by_ccy.items():
+        envelope[f"{ccy}_price_min"] = min(vals) if vals else MAX_PRICE_SENTINEL
+        envelope[f"{ccy}_price_max"] = max(vals) if vals else -MAX_PRICE_SENTINEL
+    return envelope
 
 
 def aggregate_article(

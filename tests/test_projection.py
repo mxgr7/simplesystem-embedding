@@ -387,19 +387,32 @@ def test_hash_version_constant_present() -> None:
 
 
 def test_catalog_currencies_match_script() -> None:
-    """The script-side constant in scripts/create_articles_collection.py
-    must match the projection-side constant — they define the same set
-    of envelope columns. Kept in sync by inspection because scripts/
-    isn't on the test path; this test assertion documents the contract."""
-    from pathlib import Path
-    script = (REPO_ROOT / "scripts/create_articles_collection.py").read_text()
-    # Lift the literal tuple line out of the script and eval it.
-    line = next(
-        ln for ln in script.splitlines()
-        if ln.strip().startswith("CATALOG_CURRENCIES =")
-    )
-    script_currencies = eval(line.split("=", 1)[1].strip())  # noqa: S307 - controlled input
-    assert script_currencies == CATALOG_CURRENCIES
+    """All four `CATALOG_CURRENCIES` declarations must agree:
+
+      * `indexer/projection.py` — envelope projection
+      * `scripts/create_articles_collection.py` — articles_v{N} schema
+      * `scripts/create_offers_collection.py` — offers_v{N} schema (F8)
+      * `search-api/prices.py` — filter translator catalogue check (F8)
+
+    Kept in sync by inspection because the script files aren't on the
+    test import path; this test documents the contract."""
+    import re
+
+    paths = [
+        REPO_ROOT / "scripts/create_articles_collection.py",
+        REPO_ROOT / "scripts/create_offers_collection.py",
+        REPO_ROOT / "search-api/prices.py",
+    ]
+    pattern = re.compile(r"^CATALOG_CURRENCIES(?:\s*:\s*[^=]+)?\s*=\s*(\(.+\))\s*$")
+    for p in paths:
+        line = next(
+            (ln for ln in p.read_text().splitlines() if pattern.match(ln.strip())),
+            None,
+        )
+        assert line is not None, f"no CATALOG_CURRENCIES literal found in {p.name}"
+        rhs = pattern.match(line.strip()).group(1)
+        ccys = eval(rhs)  # noqa: S307 - controlled input from repo files
+        assert ccys == CATALOG_CURRENCIES, f"{p.name} CATALOG_CURRENCIES mismatch"
 
 
 # ---- split: to_offer_row ------------------------------------------------
@@ -426,6 +439,151 @@ def test_to_offer_row_keeps_per_offer_fields(records: list[dict]) -> None:
         assert k in offer, f"per-offer field {k!r} missing from offer row"
     assert offer["article_hash"] == h
     assert offer["_placeholder_vector"] == [0.0, 0.0]
+
+
+# ---- F8: per-offer envelope on to_offer_row -----------------------------
+
+def _b64_uuid_of(hex_byte: str) -> dict:
+    """Build a UUID-shaped EJSON binary from a single repeated hex byte
+    (e.g. `_b64_uuid_of("11")` → all-`0x11` UUID)."""
+    raw = bytes.fromhex(hex_byte * 16)
+    return {"$binary": {"base64": base64.b64encode(raw).decode("ascii"), "subType": "04"}}
+
+
+def _pricing_with_id(currency: str, price: str, *, source_id: dict) -> dict:
+    """Variant of `_pricing` that lets the test pin a specific
+    sourcePriceListId — needed to verify `price_list_ids` deduplication
+    and union semantics."""
+    return {
+        "open": {
+            "sourcePriceListId": source_id,
+            "type": "OPEN",
+            "prices": {"staggeredPrices": [{"minQuantity": "1", "price": price}], "currencyCode": currency},
+            "priceQuantity": "1",
+        },
+    }
+
+
+def test_offer_envelope_price_list_ids_dedup_and_sorted() -> None:
+    """`price_list_ids` is the sorted dedup'd union of all
+    `prices[].sourcePriceListId` on this offer."""
+    rec = _minimal_record()
+    pl_a = _b64_uuid_of("11")
+    pl_b = _b64_uuid_of("22")
+    rec["offer"]["offer"]["pricings"] = _pricing_with_id("EUR", "10.00", source_id=pl_a)
+    rec["pricings"] = [
+        # Repeat pl_a once (dedup target) + add pl_b.
+        {"pricingDetails": {
+            "sourcePriceListId": pl_a, "type": "GROUP",
+            "prices": {"staggeredPrices": [{"minQuantity": "1", "price": "12.00"}], "currencyCode": "EUR"},
+            "priceQuantity": "1",
+        }},
+        {"pricingDetails": {
+            "sourcePriceListId": pl_b, "type": "DEDICATED",
+            "prices": {"staggeredPrices": [{"minQuantity": "1", "price": "9.00"}], "currencyCode": "EUR"},
+            "priceQuantity": "1",
+        }},
+    ]
+    row = project(rec).row
+    offer = to_offer_row(row, article_hash="dummyhash")
+    assert offer["price_list_ids"] == sorted(
+        {str(uuid.UUID(bytes=base64.b64decode(pl_a["$binary"]["base64"]))),
+         str(uuid.UUID(bytes=base64.b64decode(pl_b["$binary"]["base64"])))}
+    )
+
+
+def test_offer_envelope_price_list_ids_empty_when_no_prices() -> None:
+    rec = _minimal_record()  # no pricings
+    row = project(rec).row
+    offer = to_offer_row(row, article_hash="h")
+    assert offer["price_list_ids"] == []
+
+
+def test_offer_envelope_currencies_sorted_dedup() -> None:
+    rec = _minimal_record()
+    pl = _b64_uuid_of("11")
+    rec["offer"]["offer"]["pricings"] = _pricing_with_id("EUR", "10.00", source_id=pl)
+    rec["pricings"] = [{
+        "pricingDetails": {
+            "sourcePriceListId": pl, "type": "DEDICATED",
+            "prices": {"staggeredPrices": [{"minQuantity": "1", "price": "9.50"}], "currencyCode": "CHF"},
+            "priceQuantity": "1",
+        },
+    }]
+    row = project(rec).row
+    offer = to_offer_row(row, article_hash="h")
+    # Lowercased + sorted.
+    assert offer["currencies"] == ["chf", "eur"]
+
+
+def test_offer_envelope_per_currency_min_max_across_offer_prices() -> None:
+    """For each catalogue currency present on the offer, `_min/_max` span
+    every price entry in that currency (regardless of priceList /
+    priority)."""
+    rec = _minimal_record()
+    pl = _b64_uuid_of("11")
+    rec["offer"]["offer"]["pricings"] = _pricing_with_id("EUR", "5.00", source_id=pl)
+    rec["pricings"] = [
+        # Two more EUR entries — envelope spans 5..50.
+        {"pricingDetails": {
+            "sourcePriceListId": pl, "type": "GROUP",
+            "prices": {"staggeredPrices": [{"minQuantity": "1", "price": "20.00"}], "currencyCode": "EUR"},
+            "priceQuantity": "1",
+        }},
+        {"pricingDetails": {
+            "sourcePriceListId": pl, "type": "DEDICATED",
+            "prices": {"staggeredPrices": [{"minQuantity": "1", "price": "50.00"}], "currencyCode": "EUR"},
+            "priceQuantity": "1",
+        }},
+    ]
+    row = project(rec).row
+    offer = to_offer_row(row, article_hash="h")
+    assert offer["eur_price_min"] == 5.0
+    assert offer["eur_price_max"] == 50.0
+
+
+def test_offer_envelope_missing_currency_uses_max_sentinel() -> None:
+    """Catalogue currencies the offer has no price in get the sentinel
+    pair. Range predicates `_min <= X` / `_max >= Y` are unsatisfiable
+    against the sentinels — the row is naturally excluded."""
+    rec = _minimal_record()
+    rec["offer"]["offer"]["pricings"] = _pricing("EUR", "10.00")
+    row = project(rec).row
+    offer = to_offer_row(row, article_hash="h")
+    assert offer["eur_price_min"] == 10.0
+    assert offer["eur_price_max"] == 10.0
+    for ccy in ("chf", "huf", "pln", "gbp", "czk", "cny"):
+        assert offer[f"{ccy}_price_min"] == MAX_PRICE_SENTINEL
+        assert offer[f"{ccy}_price_max"] == -MAX_PRICE_SENTINEL
+
+
+def test_offer_envelope_unknown_currency_kept_in_currencies_array_dropped_from_min_max() -> None:
+    """An out-of-catalogue currency (e.g. USD) shows up in the
+    `currencies` array (the array column accepts any observed currency),
+    but has no `usd_price_*` column to land in (those are catalogue-only).
+    The post-pass on the JSON `prices` column still resolves USD."""
+    rec = _minimal_record()
+    rec["offer"]["offer"]["pricings"] = _pricing("USD", "5.00")
+    row = project(rec).row
+    offer = to_offer_row(row, article_hash="h")
+    assert offer["currencies"] == ["usd"]
+    assert "usd_price_min" not in offer
+    # No EUR price → EUR carries sentinel (filter pre-pass would drop).
+    assert offer["eur_price_min"] == MAX_PRICE_SENTINEL
+
+
+def test_offer_envelope_no_prices_row_still_emits_envelope_columns() -> None:
+    """A pricings-empty record still gets every catalogue
+    `{ccy}_price_*` column (sentinel-filled) so Path B's probe doesn't
+    trip on schema-missing fields."""
+    rec = _minimal_record()
+    row = project(rec).row
+    offer = to_offer_row(row, article_hash="h")
+    for ccy in CATALOG_CURRENCIES:
+        assert f"{ccy}_price_min" in offer
+        assert f"{ccy}_price_max" in offer
+        assert offer[f"{ccy}_price_min"] == MAX_PRICE_SENTINEL
+        assert offer[f"{ccy}_price_max"] == -MAX_PRICE_SENTINEL
 
 
 # ---- aggregate ----------------------------------------------------------

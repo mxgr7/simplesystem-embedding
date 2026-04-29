@@ -60,6 +60,7 @@ layer (see `routing.py`).
 from __future__ import annotations
 
 from models import EClassVersion, SearchRequest
+from prices import CATALOG_CURRENCIES, decode_minor_units
 
 # CategoryPath encoding mirrors `commons/CategoryPath.asStringPath`: per
 # element, replace U+00A6 (¦) with U+007C (|), then join with U+00A6.
@@ -281,6 +282,69 @@ def _blocked_eclass_vendors(req: SearchRequest, *, mode: str = "all") -> str | N
     return _and(parts)
 
 
+# ---------- F8 price-scope pre-filter atoms ------------------------------
+#
+# Both clauses fire only when `priceFilter` is set. Rationale: routing.py's
+# resolver only drops offers (currency mismatch, price-list mismatch,
+# out-of-band) when `price_filter_active` is true; otherwise such offers
+# are kept with `resolved_price=None`. Emitting these clauses in the
+# no-priceFilter case would break the F8 acceptance criterion
+# (recall parity vs the F3 post-pass-only path).
+#
+# When `priceFilter` is set, both clauses are conservative supersets of
+# the precise post-pass: any row the post-pass would keep is also kept
+# here. False positives flow into the post-pass and are dropped there.
+# The win is pruning the ANN bitset before the graph walk on narrow
+# scopes (sparse price-list scope, narrow currency, tight range).
+#
+# Standalone `array_contains(currencies, currency)` is omitted: when
+# `_price_band` fires, its sentinel-based comparison already drops
+# currency-mismatch rows (`{ccy}_price_min = +MAX_PRICE_SENTINEL` for
+# absent currencies, so the predicate is unsatisfiable). Adding it
+# separately would be redundant.
+
+def _price_list_scope(req: SearchRequest) -> str | None:
+    """`array_contains_any(price_list_ids, [scope])` — drops offers
+    holding no price entry under any of the customer's contracted price
+    lists. Gated on `priceFilter` being set (see module note above)."""
+    if req.price_filter is None:
+        return None
+    ids = req.selected_article_sources.source_price_list_ids
+    if not ids:
+        return None
+    return f"array_contains_any(price_list_ids, {_str_array(list(ids))})"
+
+
+def _price_band(req: SearchRequest) -> str | None:
+    """`{ccy}_price_min <= decoded_max AND {ccy}_price_max >= decoded_min`
+    — drops offers whose entire price range in the request currency is
+    outside the requested band. The envelope ignores `priceList` scope
+    and `priority` selection (those are post-pass concerns) so it can
+    only widen, never narrow, the precise filter.
+
+    Skipped when:
+      - no priceFilter, or both bounds null;
+      - the top-level currency has no envelope column on
+        `offers_v{N}` (catalogue currency set is data-driven; a request
+        in an out-of-catalogue currency falls through to the post-pass).
+    """
+    pf = req.price_filter
+    if pf is None or (pf.min is None and pf.max is None):
+        return None
+    ccy = req.currency.lower()
+    if ccy not in CATALOG_CURRENCIES:
+        return None
+    parts: list[str] = []
+    bound_currency = pf.currency_code
+    if pf.max is not None:
+        decoded_max = decode_minor_units(pf.max, bound_currency)
+        parts.append(f"{ccy}_price_min <= {decoded_max}")
+    if pf.min is not None:
+        decoded_min = decode_minor_units(pf.min, bound_currency)
+        parts.append(f"{ccy}_price_max >= {decoded_min}")
+    return _and(parts)
+
+
 def has_per_vendor_blocked_eclass(req: SearchRequest) -> bool:
     """Whether any `blocked_eclass_vendors_filters` entry restricts by
     vendor (and so requires the routing.py Python post-pass under the
@@ -339,7 +403,9 @@ def build_offer_expr(req: SearchRequest) -> str | None:
 
     Composes only atoms whose fields live on `offers_v{N}`: vendor,
     legacy articleIds (offer PK), delivery, features, closed
-    marketplace, relationships, core sortiment, core-articles vendors.
+    marketplace, relationships, core sortiment, core-articles vendors,
+    F8 price-scope envelopes (`price_list_ids`, `currencies`,
+    `{ccy}_price_min/max`).
 
     NB: `articleIdsFilter` stays on the offer side (filters by legacy
     `id`, the offer PK) — preserves the spec semantic that the user
@@ -347,6 +413,11 @@ def build_offer_expr(req: SearchRequest) -> str | None:
     Per-vendor `blocked_eclass_vendors_filters` entries are not
     expressible here (they correlate offer-vendor with article-eclass);
     routing.py applies them as a Python post-pass.
+
+    Note on F8: each price-scope clause widens (never narrows) the
+    precise post-pass — the post-pass in `prices.py` is still required
+    to apply priority resolution and the precise min/max bound. The
+    pre-filter shrinks the page the post-pass operates on.
     """
     return _and([
         _vendor_ids(req),
@@ -357,4 +428,6 @@ def build_offer_expr(req: SearchRequest) -> str | None:
         _relationships(req),
         _core_sortiment(req),
         _core_articles_vendors(req),
+        _price_list_scope(req),
+        _price_band(req),
     ])

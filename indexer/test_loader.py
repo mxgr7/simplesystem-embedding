@@ -102,7 +102,7 @@ def load_split(
     for r in materialised:
         h = compute_article_hash(r)
         by_hash.setdefault(h, []).append(r)
-        offer_rows.append(to_offer_row(r, article_hash=h))
+        offer_rows.append(to_offer_row(r, article_hash=h, currencies=currencies))
 
     article_rows = []
     for group in by_hash.values():

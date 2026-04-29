@@ -30,13 +30,31 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Iterable, Mapping
 
+# ISO-4217 default fraction digits for every currency the catalogue
+# carries (see `CATALOG_CURRENCIES`). USD/JPY are out-of-catalogue but
+# kept for legacy callers. To add a currency: extend here, the
+# CATALOG_CURRENCIES tuple, and the matching constants in
+# `scripts/create_{articles,offers}_collection.py` and
+# `indexer/projection.py` (see `test_catalog_currencies_match_script`).
 _FRACTION_DIGITS: Mapping[str, int] = {
     "EUR": 2,
     "USD": 2,
     "GBP": 2,
     "CHF": 2,
+    "HUF": 2,
+    "PLN": 2,
+    "CZK": 2,
+    "CNY": 2,
     "JPY": 0,
 }
+
+# Lowercased currencies that have a `{ccy}_price_min/max` envelope column
+# on `offers_v{N}` (per F8). Mirror of `scripts/create_offers_collection.py`
+# and `indexer/projection.py`. Filter translation consults this set
+# before emitting a price-band clause: if the top-level currency isn't
+# in the catalogue, the clause is skipped (no envelope column to compare
+# against) and the post-pass alone enforces the price filter.
+CATALOG_CURRENCIES: tuple[str, ...] = ("eur", "chf", "huf", "pln", "gbp", "czk", "cny")
 
 
 def decode_minor_units(value: int, currency_code: str) -> Decimal:

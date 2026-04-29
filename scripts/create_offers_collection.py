@@ -20,9 +20,12 @@ per-offer scope:
   - `id` PK as before (legacy `{friendlyId}:{base64Url(articleNumber)}`).
   - `article_hash` VARCHAR(32), INVERTED — join key into `articles_v{N}`.
   - Per-offer scalars (vendor, catalog, prices JSON, delivery, core
-    markers, relationships, ean, article_number, features). F8 adds the
-    per-offer envelope columns (`price_list_ids`, `currencies`,
-    `{ccy}_price_min/max`); those land in F8's PR.
+    markers, relationships, ean, article_number, features).
+  - F8 per-offer price-scope envelope (`price_list_ids`, `currencies`,
+    `{ccy}_price_min/max`) — Path B's bounded probe pushes price-list /
+    currency / range pre-filters down via these columns instead of a
+    full-collection scan + JSON post-pass. Recall is preserved exactly
+    (the envelope is a superset of the precise filter).
   - NO `offer_embedding`, NO sparse codes — the dense vector and BM25
     index live on `articles_v{N}` keyed by hash.
 
@@ -38,6 +41,13 @@ import argparse
 import sys
 
 from pymilvus import DataType, MilvusClient
+
+# Catalogue currencies that get per-offer envelope columns (F8). Mirror
+# of the same constant in `scripts/create_articles_collection.py` and
+# `indexer/projection.py`; `test_catalog_currencies_match_script` keeps
+# all three in sync. Add a new currency: append here, in the other two
+# spots, and bump the collection version.
+CATALOG_CURRENCIES = ("eur", "chf", "huf", "pln", "gbp", "czk", "cny")
 
 # Each field listed here gets an INVERTED scalar index. Picked to cover
 # every filter / group_by / aggregation path called out in spec §4.3-§4.4
@@ -70,6 +80,11 @@ SCALAR_INDEX_FIELDS = (
     # Identifier-level filters used by routed strict path
     "ean",
     "article_number",
+    # F8 price-scope pre-filter — INVERTED handles array_contains[_any]
+    # on both columns at array scope. Per-currency price ranges are
+    # STL_SORT (added separately in build_index_params for range queries).
+    "price_list_ids",
+    "currencies",
 )
 
 
@@ -133,6 +148,33 @@ def build_schema(client: MilvusClient):
         "relationship_similar_to", DataType.ARRAY,
         element_type=DataType.VARCHAR, max_capacity=128, max_length=256,
     )
+
+    # F8 price-scope pre-filter columns. The envelope is per-offer (the
+    # F9 article-side envelope on `articles_v{N}` powers the sort-by-price
+    # browse path; this one powers Path B's bounded probe).
+    #
+    # `price_list_ids`: union of every `prices[].sourcePriceListId` on
+    # this offer. Median 4 entries, max ~470 in sampled prod data.
+    # `currencies`: union of every `prices[].currency` on this offer.
+    # Catalogue carries 7 currencies today.
+    schema.add_field(
+        "price_list_ids", DataType.ARRAY,
+        element_type=DataType.VARCHAR, max_capacity=512, max_length=64,
+    )
+    schema.add_field(
+        "currencies", DataType.ARRAY,
+        element_type=DataType.VARCHAR, max_capacity=8, max_length=8,
+    )
+    # Per-currency (min, max) FLOAT envelope. Sentinel for "no price in
+    # this currency on this offer": +MAX_PRICE_SENTINEL on _min,
+    # -MAX_PRICE_SENTINEL on _max — Milvus 2.6 rejects NaN/±Inf so a
+    # large finite value is the working substitute (see
+    # `indexer/projection.py:MAX_PRICE_SENTINEL`). Range predicates
+    # (`{ccy}_price_min <= X AND {ccy}_price_max >= Y`) naturally
+    # exclude sentinel rows.
+    for ccy in CATALOG_CURRENCIES:
+        schema.add_field(f"{ccy}_price_min", DataType.FLOAT)
+        schema.add_field(f"{ccy}_price_max", DataType.FLOAT)
     return schema
 
 
@@ -146,6 +188,16 @@ def build_index_params(client: MilvusClient):
     )
     for field in SCALAR_INDEX_FIELDS:
         params.add_index(field_name=field, index_type="INVERTED", index_name=field)
+
+    # F8: STL_SORT on every per-currency envelope column. Path B's probe
+    # composes `{ccy}_price_min <= decoded_max AND {ccy}_price_max >=
+    # decoded_min` against these — STL_SORT is the right index for range
+    # queries on FLOAT scalars (Milvus 2.6 §"Scalar indexes" capability
+    # matrix).
+    for ccy in CATALOG_CURRENCIES:
+        for suffix in ("min", "max"):
+            field = f"{ccy}_price_{suffix}"
+            params.add_index(field_name=field, index_type="STL_SORT", index_name=field)
     return params
 
 
@@ -179,7 +231,8 @@ def main() -> None:
     print(f"Target collection: {name}")
     print(f"Alias:             {'(skipped)' if args.no_alias else args.alias}")
     print(f"Milvus URI:        {args.uri}")
-    print(f"Scalar indexes:    {len(SCALAR_INDEX_FIELDS)}")
+    print(f"Currencies:        {len(CATALOG_CURRENCIES)} ({', '.join(CATALOG_CURRENCIES)})")
+    print(f"Scalar indexes:    {len(SCALAR_INDEX_FIELDS)} + {len(CATALOG_CURRENCIES) * 2} STL_SORT")
     if args.dry_run:
         print("(dry-run — no Milvus calls made)")
         return

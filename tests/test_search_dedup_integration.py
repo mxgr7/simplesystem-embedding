@@ -1,5 +1,5 @@
 """F9 PR3 integration test — dedup-topology dispatch through the
-in-process FastAPI app against live `articles_v1` + `offers_v3`.
+in-process FastAPI app against live `articles_v1` + `offers_v4`.
 
 Loads sample_200 with a `pr3:` offer-id namespace, then exercises the
 `USE_DEDUP_TOPOLOGY=1` flag through the search endpoint. Coverage:
@@ -40,7 +40,7 @@ from indexer.test_loader import load_split  # noqa: E402
 
 MILVUS_URI = "http://localhost:19530"
 ARTICLES = "articles_v1"
-OFFERS = "offers_v3"
+OFFERS = "offers_v4"
 FIXTURE_PATH = REPO_ROOT / "tests/fixtures/mongo_sample/sample_200.json"
 ID_NAMESPACE = "pr3:"
 
@@ -573,3 +573,291 @@ def test_summaries_eclass5set_counts_per_entry(
     by_id = {e["id"]: e["count"] for e in eaggs}
     assert by_id["real"] >= 1
     assert by_id["fake"] == 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# F8 — price-scope pre-filter (offers_v{N} envelope columns)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Sample_200 stats: 200 offers, all priced. ~16 prices/offer on average.
+# Currency mix: EUR=3236 entries, HUF=7, PLN=2, CZK=3. EUR price range
+# 0.006..99999.99, p50≈85.66.
+#
+# These tests verify recall parity vs the post-pass-only path: the F8
+# pre-filter is a strict superset of the precise filter, so the set of
+# representatives Milvus returns must equal the set computed by running
+# the post-pass logic in Python over the same projected rows.
+
+from decimal import Decimal
+
+
+def _expected_path_b_representatives(
+    rows: list[dict],
+    *,
+    currency: str,
+    source_price_list_ids: list[str],
+    pf_min: int | None,
+    pf_max: int | None,
+    pf_currency_code: str,
+    vendor_filter: list[str] | None = None,
+) -> set[str]:
+    """Compute the representative offer IDs we expect a Path B no-query
+    request to return, by mirroring routing.py's `_materialise` semantics:
+
+      1. Optionally drop offers not matching `vendor_filter`.
+      2. For each hash, drop offers whose `_resolver` returns None
+         (no currency/priceList match, or price out of band).
+      3. From each hash's survivors, pick the alphabetically-lowest id.
+    """
+    from indexer.projection import compute_article_hash
+
+    pf_active = pf_min is not None or pf_max is not None
+    decoded_min = decode_minor_units(pf_min, pf_currency_code) if pf_min is not None else None
+    decoded_max = decode_minor_units(pf_max, pf_currency_code) if pf_max is not None else None
+    allowed_lists = set(source_price_list_ids)
+
+    by_hash: dict[str, list[dict]] = {}
+    for r in rows:
+        if vendor_filter is not None and r["vendor_id"] not in vendor_filter:
+            continue
+        by_hash.setdefault(compute_article_hash(r), []).append(r)
+
+    reps: set[str] = set()
+    for hash_, offers in by_hash.items():
+        survivors: list[dict] = []
+        for o in offers:
+            resolved = _resolve_one(
+                o.get("prices") or [],
+                currency=currency,
+                allowed_price_lists=allowed_lists,
+            )
+            if resolved is None:
+                if pf_active:
+                    continue
+                survivors.append(o)
+                continue
+            if decoded_min is not None and resolved < decoded_min:
+                continue
+            if decoded_max is not None and resolved > decoded_max:
+                continue
+            survivors.append(o)
+        if not survivors:
+            continue
+        rep = min(survivors, key=lambda o: str(o["id"]))
+        reps.add(rep["id"])
+    return reps
+
+
+def _resolve_one(
+    prices: list[dict], *, currency: str, allowed_price_lists: set[str],
+) -> Decimal | None:
+    """Mirror of `prices.resolve_price`: filter by currency + allowed
+    price lists (empty allowed_price_lists matches NOTHING, per legacy
+    `PriceListFilterBuilder.terms = []` semantics), pick highest-priority
+    entry."""
+    if not allowed_price_lists:
+        return None
+    cur = currency.upper()
+    best: dict | None = None
+    for entry in prices:
+        if str(entry.get("currency", "")).upper() != cur:
+            continue
+        if str(entry.get("sourcePriceListId", "")) not in allowed_price_lists:
+            continue
+        if best is None or int(entry.get("priority", 0)) > int(best.get("priority", 0)):
+            best = entry
+    if best is None or best.get("price") is None:
+        return None
+    return Decimal(str(best["price"]))
+
+
+def decode_minor_units(value: int, currency_code: str) -> Decimal:
+    """Local mirror — keeps the test self-contained instead of re-importing."""
+    from decimal import Decimal
+    digits = {"EUR": 2, "USD": 2, "GBP": 2, "CHF": 2, "HUF": 2, "PLN": 2, "CZK": 2, "CNY": 2, "JPY": 0}
+    d = digits[currency_code.upper()]
+    if d == 0:
+        return Decimal(int(value))
+    return Decimal(int(value)) / (Decimal(10) ** d)
+
+
+def _our_namespace_offers(rows: list[dict]) -> list[dict]:
+    """Filter projected_rows to only offers loaded under our `pr3:`
+    namespace — keeps assertions clean against shared collections that
+    other tests may have populated."""
+    return [r for r in rows if r["id"].startswith(ID_NAMESPACE)]
+
+
+def _all_eur_pricelists(rows: list[dict]) -> list[str]:
+    """Sorted union of every EUR-priced sourcePriceListId across the
+    given rows. Used to populate `sourcePriceListIds` in tests where
+    the band semantic, not the priceList scope, is what's under test —
+    `priceFilter` requires `sourcePriceListIds` per legacy
+    `PriceListFilterBuilder.terms = []` semantics (resolve_price returns
+    None when allowed price-list set is empty)."""
+    ids: set[str] = set()
+    for r in rows:
+        for p in r.get("prices") or []:
+            if p.get("currency") == "EUR" and p.get("sourcePriceListId"):
+                ids.add(str(p["sourcePriceListId"]))
+    return sorted(ids)
+
+
+def test_price_filter_narrows_to_articles_with_in_band_offers(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """A modest EUR band [10.00, 50.00] returns articles whose offers
+    have at least one EUR price in that range AND in the contracted
+    priceList scope. Recall parity: the returned representative-ID
+    set equals the Python post-pass result."""
+    ours = _our_namespace_offers(projected_rows)
+    all_pls = _all_eur_pricelists(ours)
+    if not all_pls:
+        pytest.skip("no EUR priceLists in sample")
+    body = _post(
+        client,
+        selectedArticleSources={"sourcePriceListIds": all_pls},
+        priceFilter={"min": 1000, "max": 5000, "currencyCode": "EUR"},
+    )
+    returned_ours = {r for r in _ids(body) if r.startswith(ID_NAMESPACE)}
+    expected = _expected_path_b_representatives(
+        ours,
+        currency="EUR",
+        source_price_list_ids=all_pls,
+        pf_min=1000, pf_max=5000, pf_currency_code="EUR",
+    )
+    assert returned_ours == expected, (
+        f"recall mismatch:\n"
+        f"  only in returned: {returned_ours - expected}\n"
+        f"  only in expected: {expected - returned_ours}"
+    )
+    # Sanity: with a band this narrow, the result must be a strict
+    # subset of all our offers (the pre-filter actually narrowed).
+    assert 0 < len(returned_ours) < len(ours)
+
+
+def test_price_filter_unsatisfiable_band_returns_empty(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """An EUR band above every offer's max price → no offer passes →
+    empty result. Verifies the band clause prunes ANN before materialise
+    rather than starving via the no-default-browse rule."""
+    all_pls = _all_eur_pricelists(_our_namespace_offers(projected_rows))
+    if not all_pls:
+        pytest.skip("no EUR priceLists in sample")
+    body = _post(
+        client,
+        selectedArticleSources={"sourcePriceListIds": all_pls},
+        priceFilter={"min": 100_000_00, "max": 200_000_00, "currencyCode": "EUR"},
+    )
+    returned_ours = {r for r in _ids(body) if r.startswith(ID_NAMESPACE)}
+    assert returned_ours == set()
+
+
+def test_price_filter_with_single_pricelist_intersects(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """Pick a single priceList from real offers; submit it as the only
+    contracted scope alongside a broad band. Recall parity must hold."""
+    ours = _our_namespace_offers(projected_rows)
+    from collections import Counter
+    pl_counter: Counter[str] = Counter()
+    for r in ours:
+        for p in r.get("prices") or []:
+            sid = p.get("sourcePriceListId")
+            if sid and p.get("currency") == "EUR":
+                pl_counter[str(sid)] += 1
+    if not pl_counter:
+        pytest.skip("no EUR priceLists in sample")
+    top_pl, _ = pl_counter.most_common(1)[0]
+
+    body = _post(
+        client,
+        selectedArticleSources={"sourcePriceListIds": [top_pl]},
+        priceFilter={"min": 0, "max": 99_999_99, "currencyCode": "EUR"},
+    )
+    returned_ours = {r for r in _ids(body) if r.startswith(ID_NAMESPACE)}
+    expected = _expected_path_b_representatives(
+        ours,
+        currency="EUR",
+        source_price_list_ids=[top_pl],
+        pf_min=0, pf_max=99_999_99, pf_currency_code="EUR",
+    )
+    assert returned_ours == expected
+
+
+def test_price_filter_with_unknown_pricelist_returns_empty(
+    client: TestClient,
+) -> None:
+    """A scope of one fictional priceList ID + band → no offer has a
+    contracted price → empty. Catches a regression where
+    `array_contains_any(price_list_ids, [...])` would silently misroute."""
+    body = _post(
+        client,
+        selectedArticleSources={"sourcePriceListIds": ["00000000-dead-beef-0000-000000000000"]},
+        priceFilter={"min": 1000, "max": 5000, "currencyCode": "EUR"},
+    )
+    returned_ours = {r for r in _ids(body) if r.startswith(ID_NAMESPACE)}
+    assert returned_ours == set()
+    assert body["metadata"]["hitCount"] == 0
+
+
+def test_price_filter_min_only_emits_lower_bound_clause(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """`max=null` emits only the `{ccy}_price_max >= decoded_min`
+    predicate. Recall parity vs Python post-pass."""
+    ours = _our_namespace_offers(projected_rows)
+    all_pls = _all_eur_pricelists(ours)
+    if not all_pls:
+        pytest.skip("no EUR priceLists in sample")
+    body = _post(
+        client,
+        selectedArticleSources={"sourcePriceListIds": all_pls},
+        priceFilter={"min": 50_000, "currencyCode": "EUR"},  # ≥500€
+    )
+    returned_ours = {r for r in _ids(body) if r.startswith(ID_NAMESPACE)}
+    expected = _expected_path_b_representatives(
+        ours,
+        currency="EUR",
+        source_price_list_ids=all_pls,
+        pf_min=50_000, pf_max=None, pf_currency_code="EUR",
+    )
+    assert returned_ours == expected
+
+
+def test_price_filter_currency_mismatch_returns_empty(
+    client: TestClient, projected_rows: list[dict],
+) -> None:
+    """A request with `currency=PLN` + a band above PLN's two real
+    prices in the sample → no PLN offer in band → empty result. The
+    chf_*/pln_* envelope columns work the same as eur_*."""
+    ours = _our_namespace_offers(projected_rows)
+    pln_pls = sorted({
+        str(p["sourcePriceListId"]) for r in ours
+        for p in r.get("prices") or []
+        if p.get("currency") == "PLN" and p.get("sourcePriceListId")
+    })
+    pln_prices = [
+        float(p["price"]) for r in ours
+        for p in r.get("prices") or []
+        if p.get("currency") == "PLN"
+    ]
+    if not pln_prices or not pln_pls:
+        pytest.skip("no PLN prices/priceLists in sample")
+    above_max = int((max(pln_prices) + 1) * 100)
+    body = _post(
+        client,
+        currency="PLN",
+        selectedArticleSources={"sourcePriceListIds": pln_pls},
+        priceFilter={"min": above_max, "max": above_max + 1000, "currencyCode": "PLN"},
+    )
+    returned_ours = {r for r in _ids(body) if r.startswith(ID_NAMESPACE)}
+    expected = _expected_path_b_representatives(
+        ours,
+        currency="PLN",
+        source_price_list_ids=pln_pls,
+        pf_min=above_max, pf_max=above_max + 1000, pf_currency_code="PLN",
+    )
+    assert returned_ours == expected
+    assert returned_ours == set()

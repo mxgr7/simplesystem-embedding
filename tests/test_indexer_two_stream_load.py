@@ -19,7 +19,7 @@ the indexer projection writes both collections correctly; the search-api
 routing rewrite is PR3.
 
 Skipped if Milvus is not reachable, or either collection is missing.
-The test reuses the live `articles_v1` / `offers_v3` collections that
+The test reuses the live `articles_v1` / `offers_v4` collections that
 PR1's schema-smoke tests rely on; it inserts under a temporary
 `article_hash` namespace (a synthetic prefix) so it doesn't collide with
 those tests' fixture rows. Cleanup at module teardown.
@@ -50,7 +50,7 @@ from indexer.test_loader import load_split, stub_vector  # noqa: E402
 
 MILVUS_URI = "http://localhost:19530"
 ARTICLES = "articles_v1"
-OFFERS = "offers_v3"
+OFFERS = "offers_v4"
 FIXTURE_PATH = REPO_ROOT / "tests/fixtures/mongo_sample/sample_200.json"
 
 # Tag inserted rows with a synthetic offer-id prefix so we can cleanly
