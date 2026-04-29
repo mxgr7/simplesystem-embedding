@@ -8,12 +8,36 @@ fast SQL aggregations during EDA).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import duckdb
 import pyarrow.dataset as ds
 
-RAW_DIR = Path("/data/datasets/suggest/raw_search_events.parquet")
+
+def _resolve_data_root() -> Path:
+    """Pick the suggest data root.
+
+    Order of precedence:
+      1. ``SUGGEST_DATA_ROOT`` env var (explicit override).
+      2. ``/data/datasets/suggest`` (vast.ai-style pre-baked path).
+      3. ``<repo>/../data/suggest`` (developer machine layout).
+    """
+    env = os.environ.get("SUGGEST_DATA_ROOT")
+    if env:
+        return Path(env)
+    canonical = Path("/data/datasets/suggest")
+    if canonical.exists():
+        return canonical
+    repo_local = Path(__file__).resolve().parents[3] / "data" / "suggest"
+    return repo_local
+
+
+DATA_ROOT = _resolve_data_root()
+RAW_DIR = DATA_ROOT / "raw_search_events.parquet"
+PAIRS_DIR = DATA_ROOT / "training_pairs.parquet"
+TARGETS_DIR = DATA_ROOT / "targets.parquet"
+TOKENIZER_DIR = DATA_ROOT / "tokenizer"
 
 
 def open_dataset(path: Path | str = RAW_DIR) -> ds.Dataset:

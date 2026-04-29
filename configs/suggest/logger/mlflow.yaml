@@ -1,0 +1,8 @@
+enabled: true
+experiment_name: suggest-lm
+tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,file:./mlruns}
+run_name: ${run_name}
+log_model: false
+tags:
+  task: suggest
+  variant: targets-only

@@ -42,6 +42,13 @@ embedding-mine-hard-negatives = "embedding_train.hard_negatives:main"
 cross-encoder-train = "cross_encoder_train.train:main"
 suggest-eda = "suggest_train.eda:main"
 suggest-preprocess = "suggest_train.preprocess:main"
+suggest-mpc = "suggest_train.mpc:main"
+suggest-eval = "suggest_train.eval:main"
+suggest-tokenizer = "suggest_train.tokenizer:main"
+suggest-train = "suggest_train.train:main"
+suggest-infer = "suggest_train.infer:main"
+suggest-hybrid-eval = "suggest_train.hybrid:main"
+suggest-demo = "suggest_train.demo:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/embedding_train", "src/cross_encoder_train", "src/suggest_train"]

@@ -1,0 +1,10 @@
+variant: a  # 'a' = targets-only; 'b' = prefix-conditioned pairs
+targets_dir: ${oc.env:SUGGEST_DATA_ROOT}/targets.parquet
+pairs_dir: ${oc.env:SUGGEST_DATA_ROOT}/training_pairs.parquet
+tokenizer_dir: ${oc.env:SUGGEST_DATA_ROOT}/tokenizer
+batch_size: 256
+val_batch_size: 256
+num_workers: 4
+pin_memory: true
+# When null, an "epoch" is len(train_dataset) weighted draws.
+train_samples_per_epoch: null

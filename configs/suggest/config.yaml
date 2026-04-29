@@ -1,0 +1,11 @@
+defaults:
+  - data: default
+  - model: small
+  - optimizer: adamw
+  - trainer: default
+  - logger: mlflow
+  - _self_
+
+seed: 0
+log_level: INFO
+run_name: suggest-lm-${now:%Y%m%d-%H%M%S}
