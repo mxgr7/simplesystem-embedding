@@ -67,6 +67,10 @@ def parse_args():
                    help="Absolute path to the labeled parquet (overrides cfg.data.path).")
     p.add_argument("--device", default=None, help="cuda|cpu (default: auto).")
     p.add_argument("--autocast", default="bf16", choices=list(AUTOCAST_DTYPES.keys()))
+    p.add_argument("--weights-dtype", default="fp32",
+                   choices=["fp32", "bf16", "fp16"],
+                   help="Cast model weights to this dtype after load. fp32 = baseline "
+                        "(weights as saved), bf16/fp16 mirrors serve-side weight cast.")
     p.add_argument("--batch-size", type=int, default=64,
                    help="Eval batch size (default: 64; larger than train default since no grads).")
     p.add_argument("--num-workers", type=int, default=4)
@@ -82,12 +86,22 @@ def parse_args():
     return p.parse_args()
 
 
-def load_model(ckpt_path: str, cfg, device: str) -> CrossEncoderModule:
+_WEIGHTS_DTYPE = {
+    "fp32": None, "bf16": torch.bfloat16, "fp16": torch.float16,
+}
+
+
+def load_model(ckpt_path: str, cfg, device: str,
+               weights_dtype: str = "fp32") -> CrossEncoderModule:
     """Load a Lightning .ckpt into a CrossEncoderModule on `device`.
 
     Mirrors `Reranker.__init__` in src/cross_encoder_serve/inference.py:
     forces model.compile=false at load time and strips the `_orig_mod.`
     prefix the wrapped encoder added when the ckpt was saved.
+
+    `weights_dtype` mirrors the serve-side weight cast (fp32 keeps baseline,
+    bf16/fp16 quantizes weights to that dtype). Activation autocast is
+    independent and configured by the caller.
     """
     serve_cfg = OmegaConf.merge(cfg, OmegaConf.create({"model": {"compile": False}}))
     model = CrossEncoderModule(cfg=serve_cfg)
@@ -95,6 +109,9 @@ def load_model(ckpt_path: str, cfg, device: str) -> CrossEncoderModule:
     state_dict = {k.replace("._orig_mod.", "."): v for k, v in ckpt["state_dict"].items()}
     model.load_state_dict(state_dict, strict=True)
     model.to(device).eval()
+    cast_dtype = _WEIGHTS_DTYPE[weights_dtype]
+    if cast_dtype is not None and device == "cuda":
+        model.to(cast_dtype)
     return model
 
 
@@ -144,7 +161,8 @@ def main():
     print(f"[eval] val_rows={len(dm.val_dataset)} "
           f"val_queries_full={dm.dataset_stats.get('val_queries', '?')}", file=sys.stderr)
 
-    model = load_model(args.ckpt, cfg, device)
+    model = load_model(args.ckpt, cfg, device, weights_dtype=args.weights_dtype)
+    print(f"[eval] weights_dtype={args.weights_dtype}", file=sys.stderr)
 
     preds: list[int] = []
     targets: list[int] = []
