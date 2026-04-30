@@ -72,7 +72,9 @@ class RerankerConfig:
     compile: bool = True  # torch.compile the encoder. Works best when chunk
     # size evenly divides 2000 (one shape for compile cache). ~-700 ms p95 on
     # 4090 over the eager baseline. Toggle off via SERVE_COMPILE=0 if needed.
-    compile_mode: str = "default"  # "default" | "reduce-overhead" | "max-autotune"
+    compile_mode: str = "max-autotune"  # "default" | "reduce-overhead" | "max-autotune"
+    # max-autotune adds ~75s to first-request compile (kernel-tuning Triton matmul
+    # configs) but shaves ~140 ms p95 vs "default" on this model.
 
 
 _AUTOCAST_ALIASES = {

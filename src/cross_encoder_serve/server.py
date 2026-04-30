@@ -180,7 +180,7 @@ def _load_model():
         autocast_dtype=os.environ.get("SERVE_DTYPE"),
         max_forward_batch=int(os.environ.get("SERVE_MAX_BATCH", "256")),
         compile=os.environ.get("SERVE_COMPILE", "1") == "1",
-        compile_mode=os.environ.get("SERVE_COMPILE_MODE", "default"),
+        compile_mode=os.environ.get("SERVE_COMPILE_MODE", "max-autotune"),
     )
     logger.info(
         "Loading Reranker: ckpt=%s lgbm=%s T=%.4f w=%.2f",
