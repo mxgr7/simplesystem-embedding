@@ -179,7 +179,7 @@ def _load_model():
         device=os.environ.get("DEVICE"),
         autocast_dtype=os.environ.get("SERVE_DTYPE"),
         max_forward_batch=int(os.environ.get("SERVE_MAX_BATCH", "256")),
-        compile=os.environ.get("SERVE_COMPILE", "0") == "1",
+        compile=os.environ.get("SERVE_COMPILE", "1") == "1",
     )
     logger.info(
         "Loading Reranker: ckpt=%s lgbm=%s T=%.4f w=%.2f",
