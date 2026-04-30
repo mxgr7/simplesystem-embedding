@@ -38,7 +38,6 @@ from pymilvus import MilvusClient
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "search-api"))
-sys.path.insert(0, str(REPO_ROOT / "acl"))
 
 from indexer.projection import project  # noqa: E402
 from indexer.test_loader import load_split  # noqa: E402
@@ -172,17 +171,19 @@ def collections_loaded(milvus_client: MilvusClient, projected_rows):
             milvus_client.drop_collection(name)
 
 
-def _load_module_from_file(module_name: str, path: Path):
-    """Load a module from a specific file path, bypassing sys.path
-    resolution. Both `acl/main.py` and `search-api/main.py` are
-    named `main`, so a plain `import main` collides — sys.modules
-    caches the first one loaded and returns it for every subsequent
-    import. Path-based loading gives us distinct module objects."""
+def _load_search_api_main():
+    """Load `search-api/main.py` under a unique module name. The
+    bare-name `main` would normally be cached in sys.modules across
+    test files, so we always load it fresh via the file path to keep
+    the e2e test independent of the per-file env setup."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location(module_name, path)
+    spec = importlib.util.spec_from_file_location(
+        "search_api_main_for_e2e",
+        REPO_ROOT / "search-api/main.py",
+    )
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = mod
+    sys.modules["search_api_main_for_e2e"] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -205,20 +206,13 @@ def search_api_test_client(collections_loaded):
     mp.setenv("EMBED_URL", "http://embed.invalid")
     mp.setenv("MILVUS_URI", MILVUS_URI)
     mp.setenv("API_KEY", "")
-    # Load search-api's main.py under a unique module name so it
-    # doesn't collide with acl/main.py (both are named `main`).
     sys.path.insert(0, str(REPO_ROOT / "search-api"))
-    search_api_main = _load_module_from_file(
-        "search_api_main_for_e2e",
-        REPO_ROOT / "search-api/main.py",
-    )
+    search_api_main = _load_search_api_main()
     try:
         with TestClient(search_api_main.app) as client:
             yield client
     finally:
         mp.undo()
-        # Restore the cached `main` to the ACL's main if any test
-        # downstream does `import main`.
         sys.modules.pop("search_api_main_for_e2e", None)
 
 
@@ -233,20 +227,14 @@ def acl_client(search_api_test_client) -> Iterator:
     `app.state` is shared across requests on the same app instance,
     forwarded calls see the populated state."""
     from fastapi.testclient import TestClient
-    acl_main = _load_module_from_file(
-        "acl_main_for_e2e",
-        REPO_ROOT / "acl/main.py",
-    )
-    try:
-        with TestClient(acl_main.app, raise_server_exceptions=False) as c:
-            c.app.state.ftsearch._client = httpx.AsyncClient(  # type: ignore[attr-defined]
-                transport=httpx.ASGITransport(app=search_api_test_client.app),
-                base_url="http://search-api-stub",
-            )
-            c.app.state.ftsearch._default_collection = OFFERS  # type: ignore[attr-defined]
-            yield c
-    finally:
-        sys.modules.pop("acl_main_for_e2e", None)
+    from acl.app import app as acl_app
+    with TestClient(acl_app, raise_server_exceptions=False) as c:
+        c.app.state.ftsearch._client = httpx.AsyncClient(  # type: ignore[attr-defined]
+            transport=httpx.ASGITransport(app=search_api_test_client.app),
+            base_url="http://search-api-stub",
+        )
+        c.app.state.ftsearch._default_collection = OFFERS  # type: ignore[attr-defined]
+        yield c
 
 
 # ---- helpers ------------------------------------------------------------

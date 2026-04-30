@@ -24,11 +24,11 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "acl"))
+sys.path.insert(0, str(REPO_ROOT))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from main import app  # noqa: E402
+from acl.app import app  # noqa: E402
 
 
 @pytest.fixture

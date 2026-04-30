@@ -24,13 +24,12 @@ import httpx
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "acl"))
 sys.path.insert(0, str(REPO_ROOT))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 from acl.clients.ftsearch import FtsearchClient  # noqa: E402
-from acl.main import app  # noqa: E402
+from acl.app import app  # noqa: E402
 
 
 def _request_body() -> dict:

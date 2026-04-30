@@ -12,7 +12,7 @@ ftsearch side:
   - 4xx responses raise immediately (caller bug — bad input shouldn't
     spend retry attempts).
   - Tracing baggage propagation via the optional `headers=` kwarg
-    populated by `acl/main.py` from the inbound trace context.
+    populated by `acl/app.py` from the inbound trace context.
 
 A4 owns the legacy error envelope; this client just raises typed
 httpx exceptions and lets the FastAPI handler categorise.

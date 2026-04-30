@@ -18,12 +18,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY acl ./acl
 
-WORKDIR /app/acl
-
 # App on 8081 (per spec §3 + packet A1). Metrics on the same port for
 # now via the in-app /metrics route; A1 spec calls for a separate
 # uvicorn instance on 9090 — operators can split via a second process
 # command if needed (see README).
 EXPOSE 8081
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8081"]
+CMD ["uvicorn", "acl.app:app", "--host", "0.0.0.0", "--port", "8081"]

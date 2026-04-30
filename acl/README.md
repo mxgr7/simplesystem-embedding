@@ -41,8 +41,7 @@ The service answers on port 8081:
 Direct invocation outside docker:
 
 ```sh
-cd acl
-uvicorn main:app --host 0.0.0.0 --port 8081
+uvicorn acl.app:app --host 0.0.0.0 --port 8081
 ```
 
 ## Ports

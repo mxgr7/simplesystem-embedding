@@ -113,7 +113,9 @@ async def trace_context(request: Request, call_next):
     """A5 — extract W3C trace context + propagated baggage from the
     inbound request, stash it on `request.state.trace_ctx` so the
     /article-features/search handler can forward it to ftsearch.
-    Same shape as `search-api/main.py:trace_context`."""
+    Same shape as `search-api/main.py:trace_context`. (Search-api
+    keeps the bare `main.py` name; only the ACL was renamed to
+    `app.py` to break the sys.modules collision in the test sweep.)"""
     if request.url.path in {"/healthz", "/openapi.yaml", "/metrics", "/docs", "/redoc"}:
         return await call_next(request)
     ctx = extract_trace_context(dict(request.headers))
