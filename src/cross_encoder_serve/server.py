@@ -172,6 +172,7 @@ def _load_model():
     cfg = RerankerConfig(
         ckpt_path=ckpt_path,
         config_dir=config_dir,
+        config_name=os.environ.get("SERVE_CONFIG_NAME", "cross_encoder"),
         lgbm_path=lgbm_path,
         lgbm_cols_path=lgbm_cols_path,
         temperature=float(os.environ.get("TEMPERATURE", DEFAULT_TEMPERATURE)),
