@@ -42,7 +42,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 | #  | Status | Packet                                                       | Depends on  | File                                                       |
 | -- | ------ | ------------------------------------------------------------ | ----------- | ---------------------------------------------------------- |
 | I1 | ✅ Phase A `81db037`; Phase B absorbed by F9 PR2b (`58a862e`, `04494e2`, `37546ba`) | Bulk rebuild + canonical MongoDB → Milvus projection module  | F1          | `article-search-replacement-indexer-01-bulk-rebuild.md`    |
-| I2 | ⬜ | Kafka-driven incremental upserter                            | I1          | `article-search-replacement-indexer-02-incremental.md`     |
+| I2 | ⬜ design ready | Kafka-driven incremental upserter (consumer + async envelope coalescer + orphan GC) — design landed; implementation blocked on Kafka infra | I1, F9      | `article-search-replacement-indexer-02-incremental.md`     |
 | I3 | 🟡 alias-swing CLI `0ab059f` | Zero-downtime reindex orchestration (alias swap) — paired-swing CLI shipped; full orchestration script + dual-write window pending I2 | F1, I1      | `article-search-replacement-indexer-03-zero-downtime.md`   |
 
 ---
@@ -55,7 +55,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 - **Phase 4 — ACL + operational** (✅ landed): A1 → (A2 ‖ A3 ‖ A4) → A5; F7 ‖ I3-partial in parallel. I2 deferred (no Kafka infra yet).
 - **Phase 5 — acceptance** (🟡 in progress): A6 happy-path landed; per-filter / per-sort / per-aggregation expansion + PostHog-captured-traffic smoke deferred (mechanical work, see `ARTICLE_SEARCH_REPLACEMENT_STATUS.md`).
 
-The longest critical path was F1 → F3 → **F9** → F4 → F5 → A2/A3 → A6. All landed. Remaining open work is **I2** (Kafka incremental — blocked on infra) and the I3 + A6 expansion that I2 unblocks; see `ARTICLE_SEARCH_REPLACEMENT_STATUS.md` for the bird's-eye view + smaller follow-ups (full-catalog GPU TEI run, legacy collection drop, runbooks).
+The longest critical path was F1 → F3 → **F9** → F4 → F5 → A2/A3 → A6. All landed. Remaining open work is **I2** (Kafka incremental — design ready, implementation blocked on infra) and the I3 + A6 expansion that I2 unblocks; see `ARTICLE_SEARCH_REPLACEMENT_STATUS.md` for the bird's-eye view + smaller follow-ups (full-catalog GPU TEI run, legacy collection drop).
 
 ---
 

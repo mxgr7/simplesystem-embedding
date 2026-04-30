@@ -85,9 +85,12 @@ populates the Milvus collections from a Mongo Atlas snapshot in S3.
 
 Major work blocked or scoped out:
 
-  - **I2** — Kafka incremental indexer. Out of scope until Kafka infra
-    + a streaming consumer pattern is decided. F9's article-side
-    envelope columns assume bulk-only refresh today.
+  - **I2** — Kafka incremental indexer. **Design pass landed** in
+    `issues/article-search-replacement-indexer-02-incremental.md`
+    (process architecture, async coalescer with budget math,
+    crash semantics, orphan-article GC, observability metrics,
+    deployment shape). Implementation blocked on Kafka infra +
+    topic provisioning at the target environment.
   - **I3 fully** — reindex orchestration script + dual-write window +
     operator runbook all depend on I2's dual-write knob.
   - **A6 expansion** — per-filter / per-sort / per-aggregation
