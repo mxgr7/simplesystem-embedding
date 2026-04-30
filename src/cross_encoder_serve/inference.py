@@ -65,6 +65,9 @@ class RerankerConfig:
     ensemble_w: float = DEFAULT_ENSEMBLE_W
     device: Optional[str] = None
     autocast_dtype: Optional[str] = None  # "bf16"|"fp16"|"fp32"|None (auto: bf16 on cuda)
+    max_forward_batch: int = 256  # internal chunk size for the encoder forward;
+    # 2000-offer requests at S=512 OOM on 24 GB cards if forwarded as one batch.
+    # Output is bit-identical regardless (torch.cat over chunk logits).
     config_name: str = "cross_encoder"
 
 
@@ -224,20 +227,32 @@ class Reranker:
         return query_text, offer_texts, contexts
 
     def _forward(self, query_text: str, offer_texts: list[str]) -> torch.Tensor:
-        enc = self.tokenizer(
-            [query_text] * len(offer_texts),
-            offer_texts,
-            padding=True,
-            truncation="only_second",
-            max_length=self.max_pair_length,
-            return_tensors="pt",
-            return_token_type_ids=True,
-        )
-        enc = {k: v.to(self.device) for k, v in enc.items()}
-        if self.autocast_dtype is not None and self.device == "cuda":
-            with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):
-                return self.model(enc)
-        return self.model(enc)
+        # Internal chunking — a single forward over 2000 pairs at S=512 OOMs on
+        # 24 GB cards. Chunks are tokenized + forwarded independently; the per-
+        # chunk logits are concatenated. Output is bit-identical to the unchunked
+        # forward (each chunk pads to its own longest seq, but truncation/padding
+        # rules match training-time collate). max_forward_batch is configurable
+        # via SERVE_MAX_BATCH; default 256 fits comfortably in 24 GB at S=512.
+        chunk = max(1, int(self.cfg.max_forward_batch))
+        out_chunks: list[torch.Tensor] = []
+        for start in range(0, len(offer_texts), chunk):
+            sub = offer_texts[start : start + chunk]
+            enc = self.tokenizer(
+                [query_text] * len(sub),
+                sub,
+                padding=True,
+                truncation="only_second",
+                max_length=self.max_pair_length,
+                return_tensors="pt",
+                return_token_type_ids=True,
+            )
+            enc = {k: v.to(self.device) for k, v in enc.items()}
+            if self.autocast_dtype is not None and self.device == "cuda":
+                with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):
+                    out_chunks.append(self.model(enc))
+            else:
+                out_chunks.append(self.model(enc))
+        return torch.cat(out_chunks, dim=0)
 
     def _lgbm_predict(self, ce_probs: np.ndarray, contexts: list[dict],
                       query: str, offers: list[dict]) -> np.ndarray:
