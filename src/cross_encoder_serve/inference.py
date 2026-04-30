@@ -72,6 +72,7 @@ class RerankerConfig:
     compile: bool = True  # torch.compile the encoder. Works best when chunk
     # size evenly divides 2000 (one shape for compile cache). ~-700 ms p95 on
     # 4090 over the eager baseline. Toggle off via SERVE_COMPILE=0 if needed.
+    compile_mode: str = "default"  # "default" | "reduce-overhead" | "max-autotune"
 
 
 _AUTOCAST_ALIASES = {
@@ -145,13 +146,15 @@ class Reranker:
         # over-fp32-weights on this 330M model; floor re-confirmed in bench.
         if self.autocast_dtype is not None and self.device == "cuda":
             self.model.to(self.autocast_dtype)
-        # Optional torch.compile on the encoder. Default mode (no extra args)
-        # gives reliable kernel fusion without CUDA-graph capture; "reduce-
-        # overhead" tries CUDA graphs but trips on dynamic shapes. The first
-        # call for each (B, S) pays a one-time compile cost (~20-30s) that the
-        # bench warmup absorbs.
+        # Optional torch.compile on the encoder. Mode is read from
+        # SERVE_COMPILE_MODE: "default" (kernel fusion, robust to dynamic
+        # shapes) or "reduce-overhead" (adds CUDA-graph capture; faster but
+        # requires a stable forward shape). The first call for each (B, S)
+        # pays a one-time compile cost (~20-30s) the bench warmup absorbs.
         if cfg.compile and self.device == "cuda":
-            self.model.encoder = torch.compile(self.model.encoder)
+            self.model.encoder = torch.compile(
+                self.model.encoder, mode=cfg.compile_mode
+            )
         # SDPA / FlashAttention is HF's default since 4.36; we just record what's
         # active so /health can report it. With transformers 5.x this should be
         # "sdpa" — if it ever flips to "eager" attention memory blows up at large B.
