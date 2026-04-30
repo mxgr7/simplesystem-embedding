@@ -1,0 +1,35 @@
+# Heavy stuff that should not bloat the image.
+checkpoints/
+mlruns/
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Autoresearch artifacts (logs, parquets) — not needed at runtime.
+autoresearch/cross-encoder/lgbm_data/
+autoresearch/cross-encoder/lgbm_data_*/
+autoresearch/cross-encoder/*.log
+autoresearch/cross-encoder/*.tsv
+autoresearch/cross-encoder/*.md
+
+# Data is mounted at runtime, never baked in.
+../data/
+data/
+
+# IDE / editor.
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Python build artifacts.
+*.egg-info/
+build/
+dist/
+
+# Tests not needed at runtime.
+tests/
