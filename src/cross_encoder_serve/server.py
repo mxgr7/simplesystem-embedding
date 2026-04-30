@@ -59,10 +59,15 @@ class RerankRequest(BaseModel):
         None,
         ge=0.0,
         le=1.0,
-        description="Filter results: keep offers with p_exact >= threshold.",
+        description=(
+            "Filter results: keep offers with p_exact_calibrated >= threshold. "
+            "Calibrated p_exact is well-calibrated against held-out NLL — "
+            "threshold≈0.7 ≈ 70% precision on the kept set."
+        ),
     )
     top_k: Optional[int] = Field(
-        None, ge=1, description="Limit results to top-K by p_exact (after threshold)."
+        None, ge=1,
+        description="Limit results to top-K by p_exact_calibrated (after threshold).",
     )
 
 
@@ -72,6 +77,9 @@ class OfferResult(BaseModel):
     p_substitute: float
     p_complement: float
     p_irrelevant: float
+    p_exact_calibrated: float = Field(
+        ..., description="Temperature-scaled p_exact (T=0.534), use for thresholding."
+    )
     predicted_label: str
 
 
@@ -161,13 +169,14 @@ def rerank(req: RerankRequest):
             p_substitute=s.p_substitute,
             p_complement=s.p_complement,
             p_irrelevant=s.p_irrelevant,
+            p_exact_calibrated=s.p_exact_calibrated,
             predicted_label=s.predicted_label,
         )
         for s in scores
     ]
     if req.threshold is not None:
-        results = [r for r in results if r.p_exact >= req.threshold]
-    results.sort(key=lambda r: -r.p_exact)
+        results = [r for r in results if r.p_exact_calibrated >= req.threshold]
+    results.sort(key=lambda r: -r.p_exact_calibrated)
     if req.top_k is not None:
         results = results[: req.top_k]
     return RerankResponse(

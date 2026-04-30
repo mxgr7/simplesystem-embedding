@@ -3,17 +3,22 @@
 Production recipe:
   1. Tokenize (query, offer_text) pairs with the same tokenizer used in training.
   2. Forward through Soup CE → 4-class logits.
-  3. Apply temperature scaling: probs = softmax(logits / T)  (T=0.534 calibrated on val).
+  3. Compute UN-scaled CE probs = softmax(logits). LGBM was trained on these,
+     so we feed them into LGBM exactly as during training.
   4. Optional LGBM stack:
        - compute engineered features (EAN/ART one-hot, lex similarity)
        - compute list features within the request batch (rank/gap/zscore per query)
        - LGBM.predict() → 4-class probs
        - ensemble: w * CE_probs + (1 - w) * LGBM_probs   (w=0.6 default)
-  5. Return per-offer 4-class probs. Caller selects p_exact for "Exact-only" rerank.
+  5. Return per-offer:
+       - 4-class probs (ensemble if LGBM on, else raw CE) — use these for argmax / F1.
+       - p_exact_calibrated = softmax(logits / T)[:, EXACT_IDX] — temperature-scaled
+         (T=0.534), well-calibrated against held-out NLL. Use this for THRESHOLDING
+         in the "Exact-only" rerank: a 0.7 threshold ≈ 70% precision on Exact.
 
 Label order: LABEL_ORDER = ("Irrelevant", "Complement", "Substitute", "Exact")
-  ce_p[:, 0] = P(Irrelevant)
-  ce_p[:, 3] = P(Exact)              ← used for "Exact-only" thresholding/ranking
+  probs[:, 0] = P(Irrelevant)
+  probs[:, 3] = P(Exact)
 """
 from __future__ import annotations
 
@@ -69,6 +74,7 @@ class OfferScore:
     p_complement: float
     p_substitute: float
     p_exact: float
+    p_exact_calibrated: float  # softmax(logits/T)[Exact] — for thresholding
 
     @property
     def predicted_label(self) -> str:
@@ -120,16 +126,25 @@ class Reranker:
         # 1. Build query/offer texts the same way training did.
         query_text, offer_texts, contexts = self._prepare_texts(query, offers)
 
-        # 2. CE forward → logits → calibrated probs.
-        logits = self._forward(query_text, offer_texts)  # (n_offers, 4)
-        probs = F.softmax(logits.float() / self.cfg.temperature, dim=-1).cpu().numpy()
+        # 2. CE forward → logits.
+        logits = self._forward(query_text, offer_texts).float()  # (n_offers, 4)
 
-        # 3. Optional LGBM stack.
+        # 3. Two views of the CE output:
+        #    - probs_raw: softmax(logits) — what LGBM was trained on; used for
+        #      ensembling and argmax/F1.
+        #    - p_exact_cal: softmax(logits / T)[:, EXACT_IDX] — temperature-scaled,
+        #      well-calibrated against val NLL. Use for thresholding.
+        probs_raw = F.softmax(logits, dim=-1).cpu().numpy()
+        p_exact_cal = F.softmax(logits / self.cfg.temperature, dim=-1)[:, EXACT_IDX].cpu().numpy()
+
+        # 4. Optional LGBM stack — feeds LGBM the UN-scaled CE probs (matching training).
         if self.booster is not None:
-            lgbm_probs = self._lgbm_predict(probs, contexts, query, offers)
-            probs = self.cfg.ensemble_w * probs + (1.0 - self.cfg.ensemble_w) * lgbm_probs
+            lgbm_probs = self._lgbm_predict(probs_raw, contexts, query, offers)
+            probs_out = self.cfg.ensemble_w * probs_raw + (1.0 - self.cfg.ensemble_w) * lgbm_probs
+        else:
+            probs_out = probs_raw
 
-        # 4. Return per-offer scores.
+        # 5. Return per-offer scores.
         return [
             OfferScore(
                 offer_id=str(offer.get("offer_id", "")),
@@ -137,8 +152,9 @@ class Reranker:
                 p_complement=float(p[1]),
                 p_substitute=float(p[2]),
                 p_exact=float(p[3]),
+                p_exact_calibrated=float(p_cal),
             )
-            for offer, p in zip(offers, probs)
+            for offer, p, p_cal in zip(offers, probs_out, p_exact_cal)
         ]
 
     def _prepare_texts(self, query: str, offers: list[dict]):
