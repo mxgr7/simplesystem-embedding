@@ -1,3 +1,8 @@
 # Heavy local-only bench fixture; rebuilt deterministically from the labeled
 # parquet on first `bench_rerank.py` run (seed=0).
 fixture_2000x512.json
+
+# Per-run logs and notes — owned by the autoresearch agent, never committed
+# (program.md "Logging results" / "experiment loop" sections).
+results.tsv
+NOTES.md
