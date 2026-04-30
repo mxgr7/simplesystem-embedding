@@ -52,6 +52,7 @@ populates the Milvus collections from a Mongo Atlas snapshot in S3.
 | A4 | Legacy error envelope on every failure path + dropped-enum rejection | `acl/app.py` exception handlers, `acl/models.py` cross-field validators |
 | A5 | ACL retries + timeouts + tracing baggage + RED metrics | `acl/{clients/ftsearch.py,tracing.py,metrics.py}` |
 | A6 (partial) | End-to-end happy-path acceptance (ACL → ftsearch → Milvus) | `tests/test_acl_acceptance_e2e.py` |
+| A6 (partial) | Legacy↔ACL response-shape parity replay harness | `scripts/replay_legacy_parity.py` |
 
 ## Test surface
 
@@ -80,6 +81,7 @@ populates the Milvus collections from a Mongo Atlas snapshot in S3.
 | `test_acl_resilience.py` | 8 | None |
 | `test_acl_integration.py` | 7 | None |
 | `test_acl_acceptance_e2e.py` | 7 | Live Milvus |
+| `test_replay_legacy_parity.py` | 24 | None (httpx.MockTransport) |
 
 ## Deferred
 
@@ -100,7 +102,12 @@ Major work blocked or scoped out:
   - **A6 expansion** — per-filter / per-sort / per-aggregation
     acceptance tests + PostHog captured-traffic smoke. The existing
     integration suite already covers each filter against ftsearch
-    directly; ACL pass-through expansion is mechanical.
+    directly; ACL pass-through expansion is mechanical. The captured-
+    traffic smoke *harness* landed (`scripts/replay_legacy_parity.py`)
+    — what's still missing is a request-body corpus to feed it
+    (PostHog's `search_performed` only carries the query string, not
+    the full request body, so capture needs a sidecar/proxy in front
+    of legacy or an alternative source).
   - **F7 caching** — optional category / eClass hierarchy cache.
     Not on critical path; revisit when profiling shows it.
 

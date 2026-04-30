@@ -16,11 +16,15 @@ Landed in commit `17ddc62`:
   - 7 §10 cases covered: schema compliance, articleId round-trip, explain stub both directions, dropped-enum rejection, score field dropped, ACL-internal metadata fields dropped.
   - Surfaced + fixed one mapper bug (the customer-article-number fields ftsearch rejects but legacy carries — see A2 status update).
 
+Replay harness landed in commit `c56fe9c`:
+  - `scripts/replay_legacy_parity.py` — POSTs each request to legacy + ACL, computes a recursive shape sketch (paths + scalar types, arrays collapsed to a merged element shape), reports `HARD` type mismatches separately from `SOFT` key-presence diffs. Empty arrays on either side are treated as compatible so a small Milvus corpus producing 0 hits doesn't drown out real shape bugs. 24 unit tests in `tests/test_replay_legacy_parity.py`.
+  - This is the *tool* for the captured-traffic smoke; it does not by itself complete A6 — a captured request-body corpus (JSONL of legacy request bodies) is still needed before it can run against prod traffic.
+
 Deferred:
   - Per-filter narrowing tests (each §4.3 filter × one assertion). The existing `test_search_dedup_integration.py` already covers each filter against ftsearch directly; ACL pass-through expansion is mechanical.
   - Per-sort × direction tests (§4.2). Same pattern.
   - Per-aggregation correctness tests (§4.4).
-  - PostHog captured-traffic smoke run (requires PostHog credentials + live recording).
+  - PostHog captured-traffic smoke run — harness exists (`scripts/replay_legacy_parity.py`); blocked on capturing a request-body corpus (PostHog's `search_performed` carries the query string only, not the full request body, so capture needs a sidecar/proxy in front of legacy or an alternative source).
 
 **Fixture corpus** (locked): synthetic deterministic fixtures for §10 contract tests; **PostHog** (via `scripts/fetch_posthog_search_queries.py`) for the captured-traffic smoke run. Reference legacy aggregation fixtures at `next-gen/article/search/query/src/test/resources/articles_aggregations/` for shape/content inspiration where useful.
 
