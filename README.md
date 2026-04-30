@@ -38,8 +38,14 @@ The input text for each side is rendered with configurable Jinja2 templates.
 ## Install
 
 ```bash
-uv sync
+uv sync --extra train --group dev
 ```
+
+`uv sync` with no flags installs only the lean serving runtime (used by
+`Dockerfile.cross-encoder`). Training, evaluation, indexing, and notebook
+tooling — `pandas`, `pyarrow`, `faiss-cpu`, `mlflow`, `jupyter`, `pymilvus`,
+`boto3`, `sentencepiece`, etc. — live under the `train` extra. Add `--group
+dev` for `pytest` and the OpenAPI validator.
 
 ## Train
 

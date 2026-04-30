@@ -7,22 +7,32 @@ Run:
   ENSEMBLE_W=0.6 \
   uvicorn cross_encoder_serve.server:app --host 0.0.0.0 --port 8080
 
+CKPT and LGBM accept either a local path or a Hugging Face Hub spec of the
+form `org/repo[@revision]:filename` (e.g. `acme/ce-soup:apr29-final.ckpt`).
+HF artifacts are downloaded into the standard HF cache on startup; for
+private repos export `HF_TOKEN`. When LGBM is supplied as an HF spec, the
+matching `<basename>.cols.json` sidecar is fetched from the same repo and
+revision.
+
 Environment variables:
-  CKPT          path to Soup CE Lightning checkpoint (required)
+  CKPT          path or HF spec for the Soup CE Lightning checkpoint (required)
   CONFIG_DIR    Hydra config dir (default: <repo>/configs)
-  LGBM          path to saved LGBM booster (.txt). If unset, LGBM stack is disabled.
+  LGBM          path or HF spec for the saved LGBM booster (.txt). Unset = LGBM stack disabled.
   TEMPERATURE   calibration scalar (default 0.534)
   ENSEMBLE_W    CE↔LGBM mixing weight (default 0.6, only used if LGBM is loaded)
   DEVICE        force "cpu" or "cuda" (default: cuda if available)
+  HF_TOKEN      auth for private HF repos (auto-read by huggingface_hub)
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from huggingface_hub import hf_hub_download
 from pydantic import BaseModel, Field
 
 from cross_encoder_serve.inference import (
@@ -31,6 +41,28 @@ from cross_encoder_serve.inference import (
     Reranker,
     RerankerConfig,
 )
+
+
+_HF_SPEC = re.compile(r"^(?P<repo>[^@:/\s]+/[^@:/\s]+)(?:@(?P<rev>[^:\s]+))?:(?P<file>\S+)$")
+
+
+def _parse_hf_spec(spec: str) -> Optional[re.Match]:
+    """Return a regex match if `spec` is an HF spec, else None.
+
+    Local paths (starting with /, ./, ../, ~) are never treated as HF specs.
+    """
+    if spec.startswith(("/", "./", "../", "~")):
+        return None
+    return _HF_SPEC.match(spec)
+
+
+def _resolve_artifact(spec: str) -> str:
+    """Resolve `spec` to a local file path. HF specs are downloaded; paths pass through."""
+    m = _parse_hf_spec(spec)
+    if m is None:
+        return spec
+    logger.info("Resolving HF artifact: repo=%s rev=%s file=%s", m["repo"], m["rev"], m["file"])
+    return hf_hub_download(repo_id=m["repo"], filename=m["file"], revision=m["rev"])
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -111,14 +143,31 @@ _state: dict = {}
 
 @app.on_event("startup")
 def _load_model():
-    ckpt = os.environ.get("CKPT")
-    if not ckpt:
-        raise RuntimeError("CKPT env var is required (path to Soup CE checkpoint).")
+    ckpt_spec = os.environ.get("CKPT")
+    if not ckpt_spec:
+        raise RuntimeError("CKPT env var is required (path or HF spec for Soup CE checkpoint).")
+    ckpt_path = _resolve_artifact(ckpt_spec)
+
+    lgbm_spec = os.environ.get("LGBM")
+    lgbm_path: Optional[str] = None
+    lgbm_cols_path: Optional[str] = None
+    if lgbm_spec:
+        lgbm_path = _resolve_artifact(lgbm_spec)
+        m = _parse_hf_spec(lgbm_spec)
+        if m is not None:
+            # Pull the cols sidecar from the same repo/revision; local paths
+            # let RerankerConfig derive it via with_suffix(".cols.json").
+            cols_filename = str(Path(m["file"]).with_suffix(".cols.json"))
+            lgbm_cols_path = hf_hub_download(
+                repo_id=m["repo"], filename=cols_filename, revision=m["rev"]
+            )
+
     config_dir = os.environ.get("CONFIG_DIR") or str(Path(__file__).resolve().parents[2] / "configs")
     cfg = RerankerConfig(
-        ckpt_path=ckpt,
+        ckpt_path=ckpt_path,
         config_dir=config_dir,
-        lgbm_path=os.environ.get("LGBM"),
+        lgbm_path=lgbm_path,
+        lgbm_cols_path=lgbm_cols_path,
         temperature=float(os.environ.get("TEMPERATURE", DEFAULT_TEMPERATURE)),
         ensemble_w=float(os.environ.get("ENSEMBLE_W", DEFAULT_ENSEMBLE_W)),
         device=os.environ.get("DEVICE"),

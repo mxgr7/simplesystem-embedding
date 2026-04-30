@@ -4,10 +4,9 @@
 
 FROM python:3.13-slim
 
-# System deps for torch / numpy / lightgbm / sentencepiece.
+# System deps for torch / numpy / lightgbm. curl is for the healthcheck.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
-    git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -18,15 +17,18 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 WORKDIR /app
 
 # Copy dependency manifests first to maximize Docker layer cache.
+# Main `dependencies` in pyproject.toml is the lean serve set — training-only
+# deps (pandas/pyarrow/faiss/mlflow/jupyter/...) live under the `train` extra
+# and are NOT installed here.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --no-install-project --frozen
+RUN uv sync --no-install-project --frozen --no-dev
 
 # Copy source.
 COPY src/ ./src/
 COPY configs/ ./configs/
 
 # Install the project itself (after sources are in).
-RUN uv sync --frozen
+RUN uv sync --frozen --no-dev
 
 # Copy small build-time artifacts. The CE checkpoint is multi-GB and is
 # expected to be mounted at runtime under /app/checkpoints (or pulled
