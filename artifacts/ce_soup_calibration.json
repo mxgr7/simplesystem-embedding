@@ -1,0 +1,42 @@
+{
+  "model": "ce_soup",
+  "model_description": "Weight-average (Model Soup) of 3 cosine-2-epoch CE checkpoints (CE-1 warmup=0.33 seed=42, CE-2 warmup=0.1 seed=42, CE-3 warmup=0.33 seed=43). Single forward pass at serve time.",
+  "label_order": ["Irrelevant", "Complement", "Substitute", "Exact"],
+  "positive_class": "Exact",
+  "positive_class_index": 3,
+  "serving_score": "softmax(logits / temperature)[Exact]",
+  "temperature": 0.534,
+  "temperature_fit": {
+    "method": "minimize NLL on val split",
+    "val_nll_before": 0.3985,
+    "val_nll_after": 0.3065,
+    "test_ece_before": 0.1364,
+    "test_ece_after": 0.0179,
+    "note": "T < 1 sharpens; model is under-confident due to focal_gamma=2 push toward uniform"
+  },
+  "operating_point": {
+    "recall_target": 0.95,
+    "threshold": 0.347,
+    "rationale": "just past the PR-curve knee; precision drops sharply above this recall"
+  },
+  "test_set_pr_table": [
+    {"recall": 0.80, "precision": 0.990, "threshold": 0.924},
+    {"recall": 0.85, "precision": 0.983, "threshold": 0.864},
+    {"recall": 0.90, "precision": 0.965, "threshold": 0.708},
+    {"recall": 0.95, "precision": 0.910, "threshold": 0.347},
+    {"recall": 0.97, "precision": 0.869, "threshold": 0.149},
+    {"recall": 0.99, "precision": 0.794, "threshold": 0.028}
+  ],
+  "test_set_stats": {
+    "rows": 75179,
+    "true_exact_count": 38029,
+    "exact_base_rate": 0.5058,
+    "source_parquet": "autoresearch/cross-encoder/lgbm_data_soup/test.parquet"
+  },
+  "caveats": [
+    "Threshold is calibrated on the labeled test split (~50.6% Exact base rate). Production rerank candidates come from hybrid_classified retrieval, which has a different (likely lower) Exact rate. Re-fit on a sample of real top-N retrieval candidates before locking the operating point.",
+    "Threshold is paired to this specific model + temperature. If the CE backbone, the Soup composition, or T is changed, redo the PR sweep.",
+    "Apply temperature first, then threshold: probs = softmax(logits / 0.534); is_relevant = probs[Exact] > 0.347.",
+    "Recall and precision here are over the binary collapse Exact-vs-rest. Substitute and Complement count as negatives, per project convention (DEFAULT_BINARY_RELEVANT_LABELS = ('Exact',))."
+  ]
+}
