@@ -52,6 +52,9 @@ jobs:
         with:
           context: .
           file: Dockerfile.cross-encoder
+          # CUDA torch wheels are x86_64-only on PyPI; aarch64 would resolve to
+          # CPU torch. Pin to amd64 so every published image has GPU support.
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

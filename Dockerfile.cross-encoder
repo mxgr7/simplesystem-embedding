@@ -1,8 +1,12 @@
-# CPU-only inference image. For GPU, swap the base for `nvidia/cuda:12.4.1-runtime-ubuntu22.04`
-# and install Python on top. CPU inference for gelectra-large is slow (~1s per pair on a
-# decent CPU); GPU is recommended for production traffic.
+# GPU-capable inference image (linux/amd64). The torch wheel pulled by uv on
+# linux x86_64 bundles CUDA 12 libs (cublas/cudnn/nccl/triton/...), so this
+# image runs on either CPU or GPU hosts:
+#   - GPU: launch with `--gpus all` (NVIDIA Container Toolkit, host driver >=550).
+#         `torch.cuda.is_available()` returns True and the server uses CUDA.
+#   - CPU: works as-is, but inference for gelectra-large is slow (~1s per pair).
+# CUDA libs come from the torch wheel itself — no `nvidia/cuda` base needed.
 
-FROM python:3.13-slim
+FROM --platform=linux/amd64 python:3.13-slim
 
 # System deps for torch / numpy / lightgbm. curl is for the healthcheck.
 RUN apt-get update && apt-get install -y --no-install-recommends \
