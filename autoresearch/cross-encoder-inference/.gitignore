@@ -1,0 +1,3 @@
+# Heavy local-only bench fixture; rebuilt deterministically from the labeled
+# parquet on first `bench_rerank.py` run (seed=0).
+fixture_2000x512.json
