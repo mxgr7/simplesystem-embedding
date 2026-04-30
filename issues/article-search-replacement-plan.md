@@ -43,7 +43,7 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 | -- | ------ | ------------------------------------------------------------ | ----------- | ---------------------------------------------------------- |
 | I1 | ✅ Phase A `81db037`; Phase B absorbed by F9 PR2b (`58a862e`, `04494e2`, `37546ba`) | Bulk rebuild + canonical MongoDB → Milvus projection module  | F1          | `article-search-replacement-indexer-01-bulk-rebuild.md`    |
 | I2 | ⬜ design ready | Kafka-driven incremental upserter (consumer + async envelope coalescer + orphan GC) — design landed; implementation blocked on Kafka infra | I1, F9      | `article-search-replacement-indexer-02-incremental.md`     |
-| I3 | 🟡 alias-swing CLI `0ab059f` | Zero-downtime reindex orchestration (alias swap) — paired-swing CLI shipped; full orchestration script + dual-write window pending I2 | F1, I1      | `article-search-replacement-indexer-03-zero-downtime.md`   |
+| I3 | 🟡 alias-swing CLI `0ab059f` + design ready | Zero-downtime reindex orchestration (alias swap) — paired-swing CLI shipped; full orchestration design landed (state machine, dual-write via second consumer, validation gates, recovery, runbook outline). Implementation pending I2 | F1, I1, I2  | `article-search-replacement-indexer-03-zero-downtime.md`   |
 
 ---
 

@@ -91,8 +91,12 @@ Major work blocked or scoped out:
     crash semantics, orphan-article GC, observability metrics,
     deployment shape). Implementation blocked on Kafka infra +
     topic provisioning at the target environment.
-  - **I3 fully** — reindex orchestration script + dual-write window +
-    operator runbook all depend on I2's dual-write knob.
+  - **I3 fully** — **Design pass landed** in
+    `issues/article-search-replacement-indexer-03-zero-downtime.md`
+    (state machine, second-consumer dual-write model, validation
+    gates, recovery from each step, rollback paths, CLI shape,
+    runbook outline). Implementation depends on I2 — see I2's design
+    pass for the second-consumer mechanics.
   - **A6 expansion** — per-filter / per-sort / per-aggregation
     acceptance tests + PostHog captured-traffic smoke. The existing
     integration suite already covers each filter against ftsearch
