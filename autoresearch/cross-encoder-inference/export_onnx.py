@@ -68,6 +68,10 @@ def parse_args():
                    help="batch size to use for parity validation (default 2).")
     p.add_argument("--rtol", type=float, default=1e-3)
     p.add_argument("--atol", type=float, default=1e-3)
+    p.add_argument("--dynamic-seq", action="store_true",
+                   help="Also make sequence dim dynamic (slightly slower at runtime "
+                        "but lets eval feed variable-S batches). Default off — bench "
+                        "fixture is always S=512 so a fixed-S graph is faster.")
     return p.parse_args()
 
 
@@ -95,7 +99,21 @@ def main():
     attention_mask = torch.ones((B, SEQ_LEN), dtype=torch.long, device=device)
     token_type_ids = torch.zeros((B, SEQ_LEN), dtype=torch.long, device=device)
 
-    print(f"[export] tracing → {out_path} (opset={args.opset})", file=sys.stderr)
+    if args.dynamic_seq:
+        dynamic_axes = {
+            "input_ids": {0: "batch", 1: "seq"},
+            "attention_mask": {0: "batch", 1: "seq"},
+            "token_type_ids": {0: "batch", 1: "seq"},
+            "logits": {0: "batch"},
+        }
+    else:
+        dynamic_axes = {
+            "input_ids": {0: "batch"},
+            "attention_mask": {0: "batch"},
+            "token_type_ids": {0: "batch"},
+            "logits": {0: "batch"},
+        }
+    print(f"[export] tracing → {out_path} (opset={args.opset}, dynamic_seq={args.dynamic_seq})", file=sys.stderr)
     with torch.no_grad():
         torch.onnx.export(
             head,
@@ -103,12 +121,7 @@ def main():
             str(out_path),
             input_names=["input_ids", "attention_mask", "token_type_ids"],
             output_names=["logits"],
-            dynamic_axes={
-                "input_ids": {0: "batch"},
-                "attention_mask": {0: "batch"},
-                "token_type_ids": {0: "batch"},
-                "logits": {0: "batch"},
-            },
+            dynamic_axes=dynamic_axes,
             opset_version=args.opset,
             do_constant_folding=True,
         )

@@ -161,19 +161,37 @@ def main():
     print(f"[eval] val_rows={len(dm.val_dataset)} "
           f"val_queries_full={dm.dataset_stats.get('val_queries', '?')}", file=sys.stderr)
 
-    model = load_model(args.ckpt, cfg, device, weights_dtype=args.weights_dtype)
-    print(f"[eval] weights_dtype={args.weights_dtype}", file=sys.stderr)
+    is_onnx = args.ckpt.endswith(".onnx")
+    if is_onnx:
+        import onnxruntime as ort
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if device == "cuda" else ["CPUExecutionProvider"]
+        sess = ort.InferenceSession(args.ckpt, providers=providers)
+        model = None
+        print(f"[eval] runtime=onnx providers={sess.get_providers()}", file=sys.stderr)
+    else:
+        model = load_model(args.ckpt, cfg, device, weights_dtype=args.weights_dtype)
+        sess = None
+        print(f"[eval] weights_dtype={args.weights_dtype}", file=sys.stderr)
 
     preds: list[int] = []
     targets: list[int] = []
     with torch.no_grad():
         for n_done, batch in enumerate(val_loader, start=1):
-            inputs = {k: v.to(device, non_blocking=True) for k, v in batch["inputs"].items()}
-            if autocast_dtype is not None and device == "cuda":
-                with torch.autocast(device_type="cuda", dtype=autocast_dtype):
-                    logits = model(inputs)
+            if is_onnx:
+                ort_inputs = {
+                    "input_ids": batch["inputs"]["input_ids"].numpy(),
+                    "attention_mask": batch["inputs"]["attention_mask"].numpy(),
+                    "token_type_ids": batch["inputs"]["token_type_ids"].numpy(),
+                }
+                logits_np = sess.run(["logits"], ort_inputs)[0]
+                logits = torch.from_numpy(logits_np)
             else:
-                logits = model(inputs)
+                inputs = {k: v.to(device, non_blocking=True) for k, v in batch["inputs"].items()}
+                if autocast_dtype is not None and device == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+                        logits = model(inputs)
+                else:
+                    logits = model(inputs)
             preds.extend(logits.float().argmax(dim=-1).cpu().tolist())
             targets.extend(batch["labels"].tolist())
             if n_done % 50 == 0:

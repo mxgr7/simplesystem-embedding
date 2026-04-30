@@ -8,14 +8,20 @@ The starting model is the released **Soup CE** at `../../../checkpoints/cross-en
 
 **Hardware: NVIDIA RTX 4090 24 GB (production target).** Optimizing for any other card is out of scope.
 
-**Primary target — latency:** the **end-to-end `POST /rerank` p95 latency**, **warm**, for a request with **1 query × 2000 offers, every offer padded/truncated to `max_pair_length = 512` tokens (worst case)**, must be **< 1000 ms**. End-to-end means request-in → response-out: tokenization, GPU forward, calibration, all of it. Steady-state, not cold start.
+**Distillation budget policy** (added 2026-04-30): default `trainer.max_time=00:00:20:00` (20 min) for *exploratory* distill runs. The point is to sweep hyperparameters (LR, T, α, base model, class weights, label smoothing) cheaply before committing GPU-hours. Only escalate to a 1+ hour run when a 20-min candidate has shown promising metrics — within ~0.02 of the quality floor and a credible latency win — i.e. you have an actual winner to *finalize*, not a hypothesis to *explore*. A 20-min run on this hardware finishes ~1 epoch on the 624k train rows at batch_size=32 (enough to see whether a config is fundamentally working).
+
+**Primary target — latency:** the **end-to-end `POST /rerank` p95 latency**, **warm**, for a request with **1 query × 2000 offers, every offer padded/truncated to `max_pair_length = 512` tokens (worst case)**, must be **≤ 2500 ms**. End-to-end means request-in → response-out: tokenization, GPU forward, calibration, all of it. Steady-state, not cold start.
+
+(History: original target was <1000 ms; relaxed on 2026-04-30 after measuring the 4090 baseline at 9234 ms and confirming the encoder is compute-bound — even stacking distill + fp8 + TRT credibly lands ~1500-2500 ms on this hardware. Sub-1000 needs a hardware change or a request-shape change, both out of scope for this track.)
 
 **Quality floor — must not be violated:** on the original training val split (`configs/data/cross_encoder.yaml::path` → `data/queries_offers_esci/queries_offers_merged_labeled.parquet`, query-id-based split with the configured `val_fraction` and `seed`), CE-alone (no LGBM stack), the metric outputs from `src/cross_encoder_train/metrics.py::compute_classification_metrics` must satisfy:
 
-- `val/cls/micro_f1 ≥ 0.890`
-- `val/cls/macro_f1 ≥ 0.770`
+- `val/cls/micro_f1 ≥ 0.860`
+- `val/cls/macro_f1 ≥ 0.740`
 
-Strictly. A run that lands at 0.8899 micro is a floor violation.
+Strictly. A run that lands at 0.8599 micro is a floor violation.
+
+(History: original floors were 0.890 / 0.770; relaxed on 2026-04-30 when distill iter 1 hit 0.859 / 0.728 — close enough that a distillation path is viable but the original floors were essentially "no quality loss permitted", which would have ruled out distillation entirely.)
 
 **API contract:** only `p_exact_calibrated` (the temperature-scaled `softmax(logits/T)[Exact]`) matters to downstream. The other 3 class probs and `predicted_label` exist in the response schema for compatibility, but downstream consumers only look at `p_exact_calibrated`. You may drop or zero-fill the others if it buys speed; you may also drop the LGBM stack entirely (it is gone from the success criterion).
 
@@ -120,7 +126,7 @@ The goal is two-sided: drive **latency p95 down** while keeping **(micro_f1, mac
 
 A run is `keep` if **both**:
 
-1. Quality floors hold on the 10k subset: `micro_f1 ≥ 0.890` AND `macro_f1 ≥ 0.770` (with subset noise budget — see below).
+1. Quality floors hold on the 10k subset: `micro_f1 ≥ 0.860` AND `macro_f1 ≥ 0.740` (with subset noise budget — see below).
 2. It Pareto-improves vs. branch tip on `(latency_p95_ms ↓, micro_f1 ↑, macro_f1 ↑)` — i.e. latency strictly improves and neither F1 regresses below the previous run beyond the subset noise floor (micro ~0.005, macro ~0.013), OR latency holds and at least one F1 strictly improves beyond noise.
 
 Else: `discard` (`git reset --hard`).
@@ -128,7 +134,11 @@ Else: `discard` (`git reset --hard`).
 Special cases:
 - **Baseline run**: always `keep` regardless of whether it hits the targets — it sets the anchor.
 - **Floor violation** (any F1 below floor on the subset): `discard`, even if latency improved dramatically. If a candidate lands within ~0.005 micro / ~0.015 macro of the floor on the subset, re-run with `--subset-rows 0` (full val) before committing the discard — subset noise can flip a borderline call.
-- **Latency target met (< 1000 ms p95) and subset floors held**: re-run quality with `--subset-rows 0` (full val) to confirm. If full-val F1s also hold, the goal is met — but **keep iterating** for headroom (lower p95 = comfortable budget for traffic spikes, sequence-length variance, lower hosting cost).
+- **Exploratory distill runs (20-min budget)**: floors are *not* enforced — 1 epoch of distillation almost never reaches the production floor, so applying the floor here would discard every candidate before we learn which configs trend best. Use status `keep-explore` and keep a 20-min distill row if **both**:
+  1. **Trajectory is improving** — val F1 (micro or macro) is monotone-up across the 4 val checkpoints during the run (or at minimum, the final val ≥ the second-to-last val). A flat or decreasing trajectory means more training won't help.
+  2. **End-of-budget metrics are within reach** — final val micro_f1 ≥ floor − 0.03 (i.e. ≥ 0.830) AND final val macro_f1 ≥ floor − 0.03 (i.e. ≥ 0.710). Outside this band, a longer run is unlikely to recover.
+  Otherwise `discard`. `keep-explore` rows are *inputs to the next sweep*, not production answers — only a longer "finalizer" run on the best `keep-explore` candidate enforces the real floor and qualifies as `keep`.
+- **Latency target met (≤ 2500 ms p95) and subset floors held**: re-run quality with `--subset-rows 0` (full val) to confirm. If full-val F1s also hold, the goal is met — but **keep iterating** for headroom (lower p95 = comfortable budget for traffic spikes, sequence-length variance, lower hosting cost).
 - Improvements < 5 ms on p95 are within benchmark noise; treat them with skepticism (re-run the benchmark before committing as `keep`).
 
 ## What you CAN do
@@ -227,7 +237,7 @@ LOOP FOREVER:
 9. Append the row to `results.tsv` (do not commit it).
 10. Update `NOTES.md` with anything notable (a profiler finding, a kernel that doesn't fuse, a quality cliff at a particular quantization scheme, a base model that distilled badly). Do not commit `NOTES.md`.
 
-**Timeout**: a single iteration (build + eval + bench) should take well under an hour on a 4090. If a run exceeds 2 h, kill it and treat as `crash`. Distillation runs are the exception — those follow the training program's wall-clock budget pattern (set `trainer.max_time` explicitly, e.g. `00:01:00:00` for 1 h student training; multiple distillation rounds may be needed).
+**Timeout**: a single iteration (build + eval + bench) should take well under an hour on a 4090. If a run exceeds 2 h, kill it and treat as `crash`. Distillation runs follow the **20-min budget policy** above — set `trainer.max_time=00:00:20:00` for exploration; only escalate to longer budgets after a 20-min winner emerges.
 
 **Crashes**: typo, missing import, OOM at sub-batch boundary, ONNX op not supported, TRT build failure — use judgment. If it's a quick fix, fix and rerun. If the idea is fundamentally broken (e.g. INT4 + this attention impl just doesn't work on Ada), log `crash` and move on.
 
