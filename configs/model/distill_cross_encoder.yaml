@@ -1,0 +1,23 @@
+# Distillation: train a smaller student CE against a frozen teacher CE.
+# `model_name` is the student backbone (used by CrossEncoderDataModule for
+# tokenization — student/teacher must share a tokenizer vocab; gelectra-base
+# and gelectra-large both use the deepset German BERT vocab, so this is fine).
+model_name: deepset/gelectra-base
+student_name: deepset/gelectra-base
+teacher_name: deepset/gelectra-large
+teacher_ckpt: ${oc.env:TEACHER_CKPT,../checkpoints/cross-encoder/releases/v1.0-2026-04-29/soup.ckpt}
+head_dropout: 0.1
+label_smoothing: 0.0
+focal_gamma: 0.0
+use_class_weights: false
+gradient_checkpointing: false
+compile: false
+
+# Distillation hyperparameters.
+# T=2 spreads the teacher distribution enough for the student to learn the
+# wrong-class probabilities (relative ordering of Substitute vs Complement etc.)
+# without flattening it. alpha=0.7 weights KL more than hard-label CE — the
+# teacher's soft targets carry more information than the noisy hard labels for
+# this dataset. Tune if quality lags.
+distill_temperature: 2.0
+distill_alpha: 0.7
