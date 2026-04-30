@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import unicodedata
 from collections import Counter
@@ -91,10 +92,25 @@ class Reranker:
             self.hcfg = compose(config_name=cfg.config_name)
 
         logger.info("Loading CE checkpoint from %s", cfg.ckpt_path)
-        self.model = CrossEncoderModule.load_from_checkpoint(
-            cfg.ckpt_path, cfg=self.hcfg, map_location=self.device
+        # Construct the module with compile disabled so the live state_dict
+        # has no `_orig_mod.` prefix, regardless of training-time compile.
+        # Strip any `_orig_mod.` from the checkpoint (no-op if absent), then
+        # re-wrap encoder in torch.compile after load — which is a passthrough
+        # when TORCHDYNAMO_DISABLE=1, and a real compile otherwise. This makes
+        # the env var a true serve-time toggle.
+        load_hcfg = OmegaConf.merge(
+            self.hcfg, OmegaConf.create({"model": {"compile": False}})
         )
+        self.model = CrossEncoderModule(cfg=load_hcfg)
+        ckpt = torch.load(cfg.ckpt_path, map_location=self.device, weights_only=False)
+        state_dict = {
+            k.replace("._orig_mod.", "."): v for k, v in ckpt["state_dict"].items()
+        }
+        self.model.load_state_dict(state_dict, strict=True)
+        self.model.to(self.device)
         self.model.eval()
+        if not os.environ.get("TORCHDYNAMO_DISABLE"):
+            self.model.encoder = torch.compile(self.model.encoder)
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.hcfg.model.model_name, use_fast=True)
         self.max_pair_length = int(self.hcfg.data.max_pair_length)
