@@ -51,12 +51,28 @@ scrape_configs:
         labels:
           stack: playground
 
-  # ---- sstei (external TEI over HTTPS) ----
+  # ---- sstei (external TEI host over HTTPS) ----
 
   - job_name: tei-sstei
     metrics_path: /metrics
     scheme: https
     static_configs:
       - targets: ["sstei.maxgerer.com"]
+        labels:
+          stack: sstei
+
+  - job_name: node-sstei
+    metrics_path: /metrics
+    scheme: https
+    static_configs:
+      - targets: ["sstei-cpu.maxgerer.com"]
+        labels:
+          stack: sstei
+
+  - job_name: gpu-sstei
+    metrics_path: /metrics
+    scheme: https
+    static_configs:
+      - targets: ["sstei-gpu.maxgerer.com"]
         labels:
           stack: sstei

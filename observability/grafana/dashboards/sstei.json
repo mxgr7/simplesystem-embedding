@@ -1,8 +1,9 @@
 {
+  "id": null,
   "title": "sstei (TEI @ sstei.maxgerer.com)",
   "uid": "sstei-tei",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 0,
   "editable": true,
   "refresh": "1m",
   "time": {"from": "now-1h", "to": "now"},
@@ -128,11 +129,11 @@
     {
       "type": "timeseries",
       "id": 5,
-      "title": "Batch inference size (avg)",
+      "title": "Next-batch size (avg requests)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 7, "w": 8, "x": 8, "y": 24},
       "targets": [
-        {"expr": "rate(te_batch_inference_size_sum{job=\"tei-sstei\"}[5m]) / rate(te_batch_inference_size_count{job=\"tei-sstei\"}[5m])", "refId": "A", "legendFormat": "avg batch", "interval": "1m"}
+        {"expr": "rate(te_batch_next_size_sum{job=\"tei-sstei\"}[5m]) / rate(te_batch_next_size_count{job=\"tei-sstei\"}[5m])", "refId": "A", "legendFormat": "avg batch", "interval": "1m"}
       ],
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "short"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
@@ -140,14 +141,225 @@
     {
       "type": "timeseries",
       "id": 6,
-      "title": "Batch inference duration p95 (s)",
+      "title": "Next-batch tokens (avg)",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 7, "w": 8, "x": 16, "y": 24},
       "targets": [
-        {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_batch_inference_duration_bucket{job=\"tei-sstei\"}[5m])))", "refId": "A", "legendFormat": "p95", "interval": "1m"}
+        {"expr": "rate(te_batch_next_tokens_sum{job=\"tei-sstei\"}[5m]) / rate(te_batch_next_tokens_count{job=\"tei-sstei\"}[5m])", "refId": "A", "legendFormat": "avg tokens", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "short"}, "overrides": []},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "row",
+      "id": 400,
+      "title": "Host (CPU / RAM / Disk / Net)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 31},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "CPU usage by mode (%)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [
+        {"expr": "100 * sum by (mode) (rate(node_cpu_seconds_total{job=\"node-sstei\",mode!=\"idle\"}[5m])) / scalar(count(node_cpu_seconds_total{job=\"node-sstei\",mode=\"idle\"}))", "refId": "A", "legendFormat": "{{mode}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 30, "lineWidth": 1, "stacking": {"mode": "normal"}}, "unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Memory used (%)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [
+        {"expr": "100 * (1 - node_memory_MemAvailable_bytes{job=\"node-sstei\"} / node_memory_MemTotal_bytes{job=\"node-sstei\"})", "refId": "A", "legendFormat": "used %", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 30, "lineWidth": 1}, "unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Memory breakdown (bytes)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "targets": [
+        {"expr": "node_memory_MemTotal_bytes{job=\"node-sstei\"} - node_memory_MemAvailable_bytes{job=\"node-sstei\"}", "refId": "A", "legendFormat": "used", "interval": "1m"},
+        {"expr": "node_memory_Cached_bytes{job=\"node-sstei\"} + node_memory_Buffers_bytes{job=\"node-sstei\"}", "refId": "B", "legendFormat": "cached+buffers", "interval": "1m"},
+        {"expr": "node_memory_MemAvailable_bytes{job=\"node-sstei\"}", "refId": "C", "legendFormat": "available", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 1}, "unit": "bytes"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 23,
+      "title": "Load average",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "targets": [
+        {"expr": "node_load1{job=\"node-sstei\"}", "refId": "A", "legendFormat": "1m", "interval": "1m"},
+        {"expr": "node_load5{job=\"node-sstei\"}", "refId": "B", "legendFormat": "5m", "interval": "1m"},
+        {"expr": "node_load15{job=\"node-sstei\"}", "refId": "C", "legendFormat": "15m", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 1}, "unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Network throughput (bytes/s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
+      "targets": [
+        {"expr": "sum by (device) (rate(node_network_receive_bytes_total{job=\"node-sstei\",device!~\"lo|docker.*|veth.*\"}[5m]))", "refId": "A", "legendFormat": "rx {{device}}", "interval": "1m"},
+        {"expr": "-sum by (device) (rate(node_network_transmit_bytes_total{job=\"node-sstei\",device!~\"lo|docker.*|veth.*\"}[5m]))", "refId": "B", "legendFormat": "tx {{device}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 20, "lineWidth": 1}, "unit": "Bps"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 25,
+      "title": "Disk I/O (bytes/s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48},
+      "targets": [
+        {"expr": "sum by (device) (rate(node_disk_read_bytes_total{job=\"node-sstei\",device!~\"loop.*|dm-.*\"}[5m]))", "refId": "A", "legendFormat": "read {{device}}", "interval": "1m"},
+        {"expr": "-sum by (device) (rate(node_disk_written_bytes_total{job=\"node-sstei\",device!~\"loop.*|dm-.*\"}[5m]))", "refId": "B", "legendFormat": "write {{device}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 20, "lineWidth": 1}, "unit": "Bps"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 26,
+      "title": "Filesystem used (%) by device",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 56},
+      "targets": [
+        {"expr": "100 * (1 - max by (device, fstype) (node_filesystem_avail_bytes{job=\"node-sstei\",fstype!~\"tmpfs|overlay|nsfs|squashfs|ramfs|devtmpfs\"}) / max by (device, fstype) (node_filesystem_size_bytes{job=\"node-sstei\",fstype!~\"tmpfs|overlay|nsfs|squashfs|ramfs|devtmpfs\"}))", "refId": "A", "legendFormat": "{{device}} ({{fstype}})", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 1}, "unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "row",
+      "id": 500,
+      "title": "GPU (NVIDIA)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 63},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 30,
+      "title": "GPU model",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 64},
+      "targets": [
+        {"expr": "nvidia_smi_gpu_info{job=\"gpu-sstei\"}", "refId": "A", "format": "table", "instant": true}
+      ],
+      "fieldConfig": {"defaults": {"mappings": [], "color": {"mode": "thresholds"}}, "overrides": []},
+      "options": {"colorMode": "none", "textMode": "value", "graphMode": "none", "text": {"valueSize": 18}, "reduceOptions": {"calcs": ["lastNotNull"], "fields": "/^name$/", "values": false}}
+    },
+    {
+      "type": "stat",
+      "id": 31,
+      "title": "GPU temperature (°C)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 64},
+      "targets": [
+        {"expr": "nvidia_smi_temperature_gpu{job=\"gpu-sstei\"}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "celsius", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 70}, {"color": "red", "value": 85}]}}, "overrides": []},
+      "options": {"colorMode": "value", "textMode": "auto", "reduceOptions": {"calcs": ["last"]}}
+    },
+    {
+      "type": "stat",
+      "id": 32,
+      "title": "Power draw (W) / limit",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 64},
+      "targets": [
+        {"expr": "nvidia_smi_power_draw_watts{job=\"gpu-sstei\"}", "refId": "A", "legendFormat": "draw"},
+        {"expr": "nvidia_smi_power_limit_watts{job=\"gpu-sstei\"}", "refId": "B", "legendFormat": "limit"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "watt"}, "overrides": []},
+      "options": {"colorMode": "value", "textMode": "value_and_name", "reduceOptions": {"calcs": ["last"]}}
+    },
+    {
+      "type": "timeseries",
+      "id": 33,
+      "title": "GPU utilization (%)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 68},
+      "targets": [
+        {"expr": "100 * nvidia_smi_utilization_gpu_ratio{job=\"gpu-sstei\"}", "refId": "A", "legendFormat": "compute %", "interval": "1m"},
+        {"expr": "100 * nvidia_smi_utilization_memory_ratio{job=\"gpu-sstei\"}", "refId": "B", "legendFormat": "memory bus %", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 1}, "unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 34,
+      "title": "VRAM used (%)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 68},
+      "targets": [
+        {"expr": "100 * nvidia_smi_memory_used_bytes{job=\"gpu-sstei\"} / nvidia_smi_memory_total_bytes{job=\"gpu-sstei\"}", "refId": "A", "legendFormat": "used %", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 1}, "unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 35,
+      "title": "VRAM (bytes)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 76},
+      "targets": [
+        {"expr": "nvidia_smi_memory_used_bytes{job=\"gpu-sstei\"}", "refId": "A", "legendFormat": "used", "interval": "1m"},
+        {"expr": "nvidia_smi_memory_total_bytes{job=\"gpu-sstei\"}", "refId": "B", "legendFormat": "total", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 1}, "unit": "bytes"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 36,
+      "title": "Temperature & power draw",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 76},
+      "targets": [
+        {"expr": "nvidia_smi_temperature_gpu{job=\"gpu-sstei\"}", "refId": "A", "legendFormat": "temp °C", "interval": "1m"},
+        {"expr": "nvidia_smi_power_draw_watts{job=\"gpu-sstei\"}", "refId": "B", "legendFormat": "power W", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 1}, "unit": "short"}, "overrides": [
+        {"matcher": {"id": "byName", "options": "temp °C"}, "properties": [{"id": "unit", "value": "celsius"}]},
+        {"matcher": {"id": "byName", "options": "power W"}, "properties": [{"id": "unit", "value": "watt"}]}
+      ]},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 37,
+      "title": "GPU clocks (MHz)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 84},
+      "targets": [
+        {"expr": "nvidia_smi_clocks_current_sm_clock_hz{job=\"gpu-sstei\"} / 1e6", "refId": "A", "legendFormat": "SM", "interval": "1m"},
+        {"expr": "nvidia_smi_clocks_current_memory_clock_hz{job=\"gpu-sstei\"} / 1e6", "refId": "B", "legendFormat": "memory", "interval": "1m"},
+        {"expr": "nvidia_smi_clocks_current_graphics_clock_hz{job=\"gpu-sstei\"} / 1e6", "refId": "C", "legendFormat": "graphics", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 1}, "unit": "rothz"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
     }
   ]
 }
