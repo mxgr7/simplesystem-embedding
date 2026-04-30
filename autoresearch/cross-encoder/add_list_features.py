@@ -18,6 +18,12 @@ import pandas as pd
 DATA_DIR = Path("/home/max/workspaces/simplesystem/embedding/autoresearch/cross-encoder/lgbm_data")
 
 
+def _resolve_data_dir():
+    if len(sys.argv) > 1:
+        return Path(sys.argv[1])
+    return DATA_DIR
+
+
 def add_list_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     g = out.groupby("query_id", sort=False)
@@ -42,8 +48,10 @@ def add_list_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
+    data_dir = _resolve_data_dir()
+    print(f"Operating on {data_dir}")
     for split in ("val", "test"):
-        path = DATA_DIR / f"{split}.parquet"
+        path = data_dir / f"{split}.parquet"
         df = pd.read_parquet(path)
         print(f"{split}: read {len(df)} rows, {len(df.columns)} cols")
         df2 = add_list_features(df)

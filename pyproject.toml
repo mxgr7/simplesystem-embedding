@@ -43,7 +43,7 @@ embedding-mine-hard-negatives = "embedding_train.hard_negatives:main"
 cross-encoder-train = "cross_encoder_train.train:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/embedding_train", "src/cross_encoder_train"]
+packages = ["src/embedding_train", "src/cross_encoder_train", "src/cross_encoder_serve"]
 
 [tool.uv]
 package = true

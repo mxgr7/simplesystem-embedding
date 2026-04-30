@@ -49,6 +49,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True, help="Dir containing val.parquet and test.parquet")
     parser.add_argument("--output", default=None, help="Optional: path to write metrics JSON")
+    parser.add_argument("--save-model", default=None, help="Optional: path to save LGBM booster (.txt)")
     parser.add_argument("--num-leaves", type=int, default=15)
     parser.add_argument("--lr", type=float, default=0.03)
     parser.add_argument("--min-data-in-leaf", type=int, default=50)
@@ -171,6 +172,21 @@ def main():
         ce_v = metrics_ce_test[f"f1_{c.lower()}"]
         ens_v = metrics_ens_test[f"f1_{c.lower()}"]
         print(f"  f1_{c.lower():<11s}: {ce_v:.4f} -> {ens_v:.4f}  (Δ = {ens_v - ce_v:+.4f})")
+
+    if args.save_model:
+        out_path = Path(args.save_model)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        booster.save_model(str(out_path), num_iteration=booster.best_iteration)
+        # Save the feature column order alongside, so the server can reproduce it.
+        sidecar = out_path.with_suffix(".cols.json")
+        sidecar.write_text(json.dumps({
+            "feature_cols": feature_cols,
+            "best_iteration": int(booster.best_iteration),
+            "ensemble_weight": float(w),
+            "lgbm_params": params,
+        }, indent=2))
+        print(f"Saved LGBM booster to {out_path}")
+        print(f"Saved feature column manifest to {sidecar}")
 
     if args.output:
         out = {
