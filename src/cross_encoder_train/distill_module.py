@@ -80,6 +80,7 @@ class CrossEncoderDistillModule(L.LightningModule):
         self.distill_temperature = float(cfg.model.distill_temperature)
         self.distill_alpha = float(cfg.model.distill_alpha)  # weight on KL
         self.label_smoothing = float(cfg.model.label_smoothing)
+        self.focal_gamma = float(cfg.model.get("focal_gamma", 0.0))
         self.use_class_weights = bool(cfg.model.use_class_weights)
         self.register_buffer(
             "class_weights",
@@ -135,9 +136,21 @@ class CrossEncoderDistillModule(L.LightningModule):
         # KL(student || teacher) — match teacher's distribution
         kl = F.kl_div(student_log_soft, teacher_soft, reduction="batchmean") * (T * T)
 
-        ce = F.cross_entropy(
-            student_logits, batch["labels"], label_smoothing=self.label_smoothing
-        )
+        weight = self.class_weights if self.use_class_weights else None
+        if self.focal_gamma > 0.0:
+            log_probs = F.log_softmax(student_logits, dim=-1)
+            log_pt = log_probs.gather(1, batch["labels"].unsqueeze(1)).squeeze(1)
+            pt = log_pt.exp()
+            focal = (1.0 - pt).pow(self.focal_gamma)
+            ce_per = -focal * log_pt
+            if weight is not None:
+                ce_per = ce_per * weight[batch["labels"]]
+            ce = ce_per.mean()
+        else:
+            ce = F.cross_entropy(
+                student_logits, batch["labels"], weight=weight,
+                label_smoothing=self.label_smoothing,
+            )
 
         loss = self.distill_alpha * kl + (1.0 - self.distill_alpha) * ce
 
