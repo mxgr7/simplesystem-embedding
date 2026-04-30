@@ -133,11 +133,15 @@ class Reranker:
         self.model.to(self.device)
         self.model.eval()
 
-        # bf16 autocast roughly doubles max-batch headroom at S=512 with no
-        # measurable accuracy delta on this 330M model. Weights stay fp32 so
-        # the calibration scalar is unaffected. Default: bf16 on cuda, off on cpu.
+        # Pick autocast dtype first so we can also down-cast weights to match.
         self.autocast_dtype = _resolve_autocast_dtype(cfg.autocast_dtype, self.device)
         self.autocast_label = _DTYPE_LABEL.get(self.autocast_dtype, "fp32")
+        # Cast weights to the autocast dtype. Halves weight memory traffic
+        # (gelectra-large ≈ 1.3 GB fp32 → 0.67 GB bf16/fp16) — biggest win on
+        # bandwidth-bound 4090 inference. Quality is near-identical to autocast-
+        # over-fp32-weights on this 330M model; floor re-confirmed in bench.
+        if self.autocast_dtype is not None and self.device == "cuda":
+            self.model.to(self.autocast_dtype)
         # SDPA / FlashAttention is HF's default since 4.36; we just record what's
         # active so /health can report it. With transformers 5.x this should be
         # "sdpa" — if it ever flips to "eager" attention memory blows up at large B.
