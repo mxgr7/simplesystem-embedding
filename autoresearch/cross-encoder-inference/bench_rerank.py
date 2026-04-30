@@ -176,6 +176,8 @@ def start_server(ckpt: str, port: int, serve_dtype: str,
     env["SERVE_DTYPE"] = serve_dtype
     # We're benchmarking CE-alone; never load LGBM here even if it's set in the shell.
     env.pop("LGBM", None)
+    # SERVE_COMPILE/SERVE_MAX_BATCH inherited from the bench shell so iteration
+    # toggles don't require code edits.
     if extra_env:
         env.update(extra_env)
 

@@ -69,6 +69,8 @@ class RerankerConfig:
     # 2000-offer requests at S=512 OOM on 24 GB cards if forwarded as one batch.
     # Output is bit-identical regardless (torch.cat over chunk logits).
     config_name: str = "cross_encoder"
+    compile: bool = False  # torch.compile the encoder. Works best when chunk
+    # size evenly divides 2000 (one shape for compile cache).
 
 
 _AUTOCAST_ALIASES = {
@@ -142,6 +144,13 @@ class Reranker:
         # over-fp32-weights on this 330M model; floor re-confirmed in bench.
         if self.autocast_dtype is not None and self.device == "cuda":
             self.model.to(self.autocast_dtype)
+        # Optional torch.compile on the encoder. Default mode (no extra args)
+        # gives reliable kernel fusion without CUDA-graph capture; "reduce-
+        # overhead" tries CUDA graphs but trips on dynamic shapes. The first
+        # call for each (B, S) pays a one-time compile cost (~20-30s) that the
+        # bench warmup absorbs.
+        if cfg.compile and self.device == "cuda":
+            self.model.encoder = torch.compile(self.model.encoder)
         # SDPA / FlashAttention is HF's default since 4.36; we just record what's
         # active so /health can report it. With transformers 5.x this should be
         # "sdpa" — if it ever flips to "eager" attention memory blows up at large B.
