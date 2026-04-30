@@ -80,7 +80,12 @@ class CrossEncoderDistillModule(L.LightningModule):
         self.distill_temperature = float(cfg.model.distill_temperature)
         self.distill_alpha = float(cfg.model.distill_alpha)  # weight on KL
         self.label_smoothing = float(cfg.model.label_smoothing)
-
+        self.use_class_weights = bool(cfg.model.use_class_weights)
+        self.register_buffer(
+            "class_weights",
+            torch.ones(NUM_CLASSES, dtype=torch.float32),
+            persistent=False,
+        )
         self.register_buffer(
             "gain_vector",
             torch.tensor(GAIN_VECTOR, dtype=torch.float32),
@@ -91,6 +96,23 @@ class CrossEncoderDistillModule(L.LightningModule):
 
         if getattr(cfg.model, "compile", False):
             self.encoder = torch.compile(self.encoder)
+
+    def on_fit_start(self):
+        self._sync_class_weights()
+
+    def on_validation_start(self):
+        self._sync_class_weights()
+
+    def _sync_class_weights(self):
+        if not self.use_class_weights:
+            return
+        datamodule = getattr(self.trainer, "datamodule", None)
+        if datamodule is None:
+            return
+        weights = getattr(datamodule, "class_weights", None)
+        if not weights:
+            return
+        self.class_weights = torch.tensor(weights, dtype=torch.float32, device=self.device)
 
     def forward(self, inputs):
         outputs = self.encoder(**inputs)
