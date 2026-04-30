@@ -75,6 +75,15 @@ class RerankerConfig:
     compile_mode: str = "max-autotune"  # "default" | "reduce-overhead" | "max-autotune"
     # max-autotune adds ~75s to first-request compile (kernel-tuning Triton matmul
     # configs) but shaves ~140 ms p95 vs "default" on this model.
+    int8: bool = False  # apply torch.ao.quantization.quantize_dynamic to nn.Linear.
+    # Note: quantize_dynamic uses CPU-only int8 matmul kernels; setting this forces
+    # the model onto CPU. Useful for measuring quality drop at int8; for GPU int8
+    # use the ONNX Runtime path (SERVE_RUNTIME=onnx) with an int8-quantized .onnx.
+    runtime: str = "torch"  # "torch" | "onnx" — picks the encoder backend
+    onnx_path: Optional[str] = None  # required when runtime=="onnx"
+    onnx_providers: tuple[str, ...] = ("CUDAExecutionProvider", "CPUExecutionProvider")
+    # Set to ("TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider")
+    # to attempt TRT EP first, falling back gracefully.
 
 
 _AUTOCAST_ALIASES = {
@@ -115,60 +124,25 @@ class OfferScore:
 class Reranker:
     def __init__(self, cfg: RerankerConfig):
         self.cfg = cfg
+        self.runtime = cfg.runtime  # "torch" | "onnx"
         self.device = cfg.device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         with initialize_config_dir(config_dir=cfg.config_dir, version_base="1.3"):
             self.hcfg = compose(config_name=cfg.config_name)
 
-        logger.info("Loading CE checkpoint from %s", cfg.ckpt_path)
-        # Serving runs eager: torch.compile gives ~0% throughput on this model
-        # but eats VRAM headroom (~25% smaller max batch) and pays a ~20s
-        # recompile per new (batch_size, seq_len) shape. Override the training
-        # cfg's `model.compile=true` so the encoder isn't wrapped, then strip
-        # the `_orig_mod.` prefix the wrapped encoder added when the ckpt was
-        # saved (no-op if the ckpt was trained without compile).
-        serve_hcfg = OmegaConf.merge(
-            self.hcfg, OmegaConf.create({"model": {"compile": False}})
-        )
-        self.model = CrossEncoderModule(cfg=serve_hcfg)
-        ckpt = torch.load(cfg.ckpt_path, map_location=self.device, weights_only=False)
-        state_dict = {
-            k.replace("._orig_mod.", "."): v for k, v in ckpt["state_dict"].items()
-        }
-        self.model.load_state_dict(state_dict, strict=True)
-        self.model.to(self.device)
-        self.model.eval()
-
-        # Pick autocast dtype first so we can also down-cast weights to match.
+        # Pick autocast dtype up-front (used by both runtimes for status
+        # reporting; only the torch path actually wraps autocast contexts).
         self.autocast_dtype = _resolve_autocast_dtype(cfg.autocast_dtype, self.device)
         self.autocast_label = _DTYPE_LABEL.get(self.autocast_dtype, "fp32")
-        # Cast weights to the autocast dtype. Halves weight memory traffic
-        # (gelectra-large ≈ 1.3 GB fp32 → 0.67 GB bf16/fp16) — biggest win on
-        # bandwidth-bound 4090 inference. Quality is near-identical to autocast-
-        # over-fp32-weights on this 330M model; floor re-confirmed in bench.
-        if self.autocast_dtype is not None and self.device == "cuda":
-            self.model.to(self.autocast_dtype)
-        # Optional torch.compile on the encoder. Mode is read from
-        # SERVE_COMPILE_MODE: "default" (kernel fusion, robust to dynamic
-        # shapes) or "reduce-overhead" (adds CUDA-graph capture; faster but
-        # requires a stable forward shape). The first call for each (B, S)
-        # pays a one-time compile cost (~20-30s) the bench warmup absorbs.
-        if cfg.compile and self.device == "cuda":
-            self.model.encoder = torch.compile(
-                self.model.encoder, mode=cfg.compile_mode
-            )
-        # SDPA / FlashAttention is HF's default since 4.36; we just record what's
-        # active so /health can report it. With transformers 5.x this should be
-        # "sdpa" — if it ever flips to "eager" attention memory blows up at large B.
-        self.attn_implementation = getattr(
-            getattr(self.model.encoder, "config", None),
-            "_attn_implementation",
-            "?",
-        )
-        logger.info(
-            "Reranker forward config: device=%s autocast=%s attn=%s",
-            self.device, self.autocast_label, self.attn_implementation,
-        )
+
+        self.model: Optional[CrossEncoderModule] = None
+        self.ort_session = None  # set when runtime == "onnx"
+        self.attn_implementation = "?"
+
+        if self.runtime == "onnx":
+            self._init_onnx()
+        else:
+            self._init_torch()
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.hcfg.model.model_name, use_fast=True)
         self.max_pair_length = int(self.hcfg.data.max_pair_length)
@@ -184,6 +158,94 @@ class Reranker:
             cols_path = cfg.lgbm_cols_path or str(Path(cfg.lgbm_path).with_suffix(".cols.json"))
             self.lgbm_feature_cols = json.loads(Path(cols_path).read_text())["feature_cols"]
             logger.info("Loaded LGBM booster (%d features)", len(self.lgbm_feature_cols))
+
+    # ------------------------------------------------------------------
+    # Runtime-specific init paths
+    # ------------------------------------------------------------------
+
+    def _init_torch(self):
+        """Load the Lightning ckpt → torch model with optional weight cast / compile / int8."""
+        cfg = self.cfg
+        logger.info("Loading CE checkpoint from %s", cfg.ckpt_path)
+        # Override training cfg's model.compile=true so the encoder isn't pre-
+        # wrapped, then strip the `_orig_mod.` prefix from the saved state_dict.
+        serve_hcfg = OmegaConf.merge(
+            self.hcfg, OmegaConf.create({"model": {"compile": False}})
+        )
+        self.model = CrossEncoderModule(cfg=serve_hcfg)
+        ckpt = torch.load(cfg.ckpt_path, map_location=self.device, weights_only=False)
+        state_dict = {
+            k.replace("._orig_mod.", "."): v for k, v in ckpt["state_dict"].items()
+        }
+        self.model.load_state_dict(state_dict, strict=True)
+        self.model.to(self.device)
+        self.model.eval()
+
+        # Cast weights to the autocast dtype. Halves weight memory traffic
+        # (gelectra-large ≈ 1.3 GB fp32 → 0.67 GB bf16/fp16).
+        if self.autocast_dtype is not None and self.device == "cuda":
+            self.model.to(self.autocast_dtype)
+
+        if cfg.int8:
+            from torch.ao.quantization import quantize_dynamic
+            logger.warning("SERVE_INT8=1: dynamic-quantizing nn.Linear; "
+                           "forcing device=cpu (no CUDA kernels for qint8 mm).")
+            self.model.to("cpu")
+            self.model = quantize_dynamic(
+                self.model, {torch.nn.Linear}, dtype=torch.qint8
+            )
+            self.device = "cpu"
+            self.autocast_dtype = None
+            self.autocast_label = "int8"
+
+        if cfg.compile and self.device == "cuda" and not cfg.int8:
+            self.model.encoder = torch.compile(
+                self.model.encoder, mode=cfg.compile_mode
+            )
+
+        self.attn_implementation = getattr(
+            getattr(self.model.encoder, "config", None),
+            "_attn_implementation",
+            "?",
+        )
+        logger.info(
+            "Reranker (torch) device=%s autocast=%s attn=%s",
+            self.device, self.autocast_label, self.attn_implementation,
+        )
+
+    def _init_onnx(self):
+        """Load ONNX session via onnxruntime-gpu. Tries the configured providers in order."""
+        cfg = self.cfg
+        if not cfg.onnx_path or not Path(cfg.onnx_path).exists():
+            raise RuntimeError(f"SERVE_RUNTIME=onnx requires SERVE_ONNX_PATH; got {cfg.onnx_path!r}")
+        import onnxruntime as ort
+        sess_opts = ort.SessionOptions()
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        # Try providers in order; ORT silently falls back if a provider fails.
+        providers: list = list(cfg.onnx_providers)
+        # Optional TRT EP options (cache + fp16).
+        prov_opts: list = []
+        for p in providers:
+            if p == "TensorrtExecutionProvider":
+                prov_opts.append({
+                    "trt_fp16_enable": True,
+                    "trt_engine_cache_enable": True,
+                    "trt_engine_cache_path": str(Path(cfg.onnx_path).with_suffix(".trtcache")),
+                })
+            elif p == "CUDAExecutionProvider":
+                prov_opts.append({"arena_extend_strategy": "kSameAsRequested"})
+            else:
+                prov_opts.append({})
+        logger.info("Loading ONNX %s with providers=%s", cfg.onnx_path, providers)
+        self.ort_session = ort.InferenceSession(
+            cfg.onnx_path, sess_opts, providers=providers, provider_options=prov_opts
+        )
+        active = self.ort_session.get_providers()
+        logger.info("ONNX active providers: %s", active)
+        self.attn_implementation = f"onnx:{active[0]}" if active else "onnx:?"
+        # autocast/dtype is whatever the .onnx was exported as; the bench
+        # /health endpoint reports "onnx" as a sentinel.
+        self.autocast_label = "onnx"
 
     @torch.no_grad()
     def rerank(self, query: str, offers: list[dict]) -> list[OfferScore]:
@@ -246,12 +308,10 @@ class Reranker:
         return query_text, offer_texts, contexts
 
     def _forward(self, query_text: str, offer_texts: list[str]) -> torch.Tensor:
-        # Internal chunking — a single forward over 2000 pairs at S=512 OOMs on
-        # 24 GB cards. Chunks are tokenized + forwarded independently; the per-
-        # chunk logits are concatenated. Output is bit-identical to the unchunked
-        # forward (each chunk pads to its own longest seq, but truncation/padding
-        # rules match training-time collate). max_forward_batch is configurable
-        # via SERVE_MAX_BATCH; default 256 fits comfortably in 24 GB at S=512.
+        # Tokenize, then chunk-forward through the configured runtime. ONNX
+        # path uses the ORT session; torch path autocast-wraps the LightningModule.
+        # The fixture's worst-case S=512 means padding="max_length" pads to 512
+        # for every chunk, which is what ONNX's exported graph expects.
         chunk = max(1, int(self.cfg.max_forward_batch))
         out_chunks: list[torch.Tensor] = []
         for start in range(0, len(offer_texts), chunk):
@@ -259,12 +319,23 @@ class Reranker:
             enc = self.tokenizer(
                 [query_text] * len(sub),
                 sub,
-                padding=True,
+                padding="max_length" if self.runtime == "onnx" else True,
                 truncation="only_second",
                 max_length=self.max_pair_length,
                 return_tensors="pt",
                 return_token_type_ids=True,
             )
+            if self.runtime == "onnx":
+                # ORT eats numpy arrays directly; padding="max_length" keeps
+                # shape stable at (chunk, 512) so the exported graph is reused.
+                ort_inputs = {
+                    "input_ids": enc["input_ids"].numpy(),
+                    "attention_mask": enc["attention_mask"].numpy(),
+                    "token_type_ids": enc["token_type_ids"].numpy(),
+                }
+                logits_np = self.ort_session.run(["logits"], ort_inputs)[0]
+                out_chunks.append(torch.from_numpy(logits_np))
+                continue
             enc = {k: v.to(self.device) for k, v in enc.items()}
             if self.autocast_dtype is not None and self.device == "cuda":
                 with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):

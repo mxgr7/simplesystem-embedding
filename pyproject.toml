@@ -43,6 +43,10 @@ train = [
   "redis>=5.0.0",
   "sentencepiece>=0.2.0",
 ]
+serve = [
+    "onnx>=1.21.0",
+    "onnxruntime-gpu>=1.25.1",
+]
 
 [project.scripts]
 embedding-train = "embedding_train.train:main"

@@ -182,6 +182,13 @@ def _load_model():
         max_forward_batch=int(os.environ.get("SERVE_MAX_BATCH", "256")),
         compile=os.environ.get("SERVE_COMPILE", "1") == "1",
         compile_mode=os.environ.get("SERVE_COMPILE_MODE", "max-autotune"),
+        int8=os.environ.get("SERVE_INT8", "0") == "1",
+        runtime=os.environ.get("SERVE_RUNTIME", "torch"),
+        onnx_path=os.environ.get("SERVE_ONNX_PATH"),
+        onnx_providers=tuple(
+            (os.environ.get("SERVE_ONNX_PROVIDERS")
+             or "CUDAExecutionProvider,CPUExecutionProvider").split(",")
+        ),
     )
     logger.info(
         "Loading Reranker: ckpt=%s lgbm=%s T=%.4f w=%.2f",
