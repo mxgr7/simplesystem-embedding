@@ -1,0 +1,43 @@
+{
+  "feature_cols": [
+    "ce_p_irrelevant",
+    "ce_p_complement",
+    "ce_p_substitute",
+    "ce_p_exact",
+    "ean_NONE",
+    "ean_MATCH",
+    "ean_MISMATCH",
+    "art_NONE",
+    "art_EXACT",
+    "art_SUBSTRING_ONLY",
+    "art_MISMATCH",
+    "art_OFFER_INVALID",
+    "lex_substring",
+    "lex_digit_jaccard",
+    "lex_char3_jaccard",
+    "ce_p_exact_rank_desc",
+    "ce_p_exact_gap_from_max",
+    "ce_p_exact_zscore",
+    "ce_p_substitute_rank_desc",
+    "ce_p_substitute_gap_from_max",
+    "ce_p_substitute_zscore",
+    "ce_p_irrelevant_rank_desc",
+    "ce_p_irrelevant_gap_from_max",
+    "ce_p_irrelevant_zscore",
+    "group_size"
+  ],
+  "best_iteration": 600,
+  "ensemble_weight": 0.6,
+  "lgbm_params": {
+    "objective": "multiclass",
+    "num_class": 4,
+    "metric": "multi_logloss",
+    "num_leaves": 15,
+    "learning_rate": 0.03,
+    "min_data_in_leaf": 50,
+    "lambda_l2": 1.0,
+    "num_threads": 4,
+    "verbose": -1,
+    "seed": 42
+  }
+}
