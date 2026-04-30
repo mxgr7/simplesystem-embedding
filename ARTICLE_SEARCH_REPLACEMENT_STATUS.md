@@ -106,10 +106,11 @@ Smaller follow-ups worth picking up before a production run:
   - **Legacy article-search collection drop**. The pre-F9 `offers`
     + `offers_codes` collections still exist on prod Milvus; once
     F9 PR4 cutover soaks, drop them.
-  - **Documentation**:
-    - Operator runbook for `scripts/swing_aliases.py` (only remaining
-      gap; `indexer/RUNBOOK.md` and the top-level `README.md` pointer
-      both landed already).
+  - **Documentation** — all major runbooks landed:
+    `indexer/RUNBOOK.md` for the bulk pipeline,
+    `scripts/SWING_ALIASES_RUNBOOK.md` for paired alias swings,
+    `scripts/MILVUS_ALIAS_WORKFLOW.md` for the conceptual model,
+    top-level `README.md` pointer at this status doc.
 
 ## Operating the pipeline
 

@@ -121,10 +121,17 @@ the pair manually with explicit rollback. The recommended sequence:
    releases by collection ID, not name, so dropping is safe
    immediately after the swing).
 
-I3 owns folding this sequence into a single operator command (atomic
-across both aliases as far as the operator is concerned, with rollback
-built in). Until I3 lands, the manual sequence above is the
-zero-downtime contract.
+**Recommended path**: use `scripts/swing_aliases.py` instead of the
+manual sequence above — it captures the prior alias state for
+rollback, validates row counts + join-key consistency, swings both
+aliases in the right order, and auto-rolls-back on second-swing
+failure. See `scripts/SWING_ALIASES_RUNBOOK.md` for the operator
+recipe. The manual sequence above remains valid as a fallback when
+the script can't be run (e.g. partial-rollback scenarios outside its
+scope).
+
+The full I3 packet (orchestration + dual-write window + Kafka cutover)
+is still pending — `swing_aliases.py` is its alias-mechanics half.
 
 ## Swap during steady state (single alias)
 
