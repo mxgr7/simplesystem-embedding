@@ -7,6 +7,20 @@
 
 References: spec §6 (indexing pipeline), §7 (schema), §4.3 (filtering), §2.3 (relevance-pool bound on non-relevance sorts).
 
+## Status
+
+✅ **Done — all 4 PRs landed** across multiple commits (see git log).
+
+  - **PR1** (schema): `scripts/create_articles_collection.py` + revised `scripts/create_offers_collection.py` + paired alias workflow in `scripts/MILVUS_ALIAS_WORKFLOW.md`. Schema tests in `tests/test_articles_collection_schema.py` (17) + `tests/test_offers_collection_schema.py` (22).
+  - **PR2** (indexer two-stream): `indexer/projection.py:compute_article_hash`/`aggregate_article`/`to_offer_row` + `indexer/test_loader.py:load_split` for stub-vector tests.
+  - **PR2b** (DuckDB-native production indexer): `indexer/{duckdb_projection.py,bulk.py,bulk_insert.py,tei_cache.py,embedding_text.py}` + `scripts/indexer_bulk.py` CLI. Reads raw JSONL from S3, joins + projects in DuckDB, embeds via TEI (Redis cache), upserts or bulk_inserts to Milvus. Chunked + pipelined + retries + checkpoint resume. End-to-end smoke validates the pipeline against local-cached shards.
+  - **PR3** (search-api routing): `search-api/routing.py:dispatch_dedup` Path A / Path B + `search-api/filters.py` split (`build_article_expr` + `build_offer_expr`). Behind `USE_DEDUP_TOPOLOGY` flag. 27 dedup integration tests against live Milvus.
+  - **PR4** (cleanup) — deferred until production soak.
+
+Operational follow-ons that landed alongside (not strictly part of F9):
+  - `scripts/swing_aliases.py` — paired alias-swing CLI per the F9 protocol (5 e2e tests).
+  - F7 operational glue — bounded consistency, retry+timeout, RED metrics, W3C tracing baggage.
+
 ## Background — the gap this packet closes
 
 Production scale: **510M raw MongoDB offers → 159M articles** (after `(vendorId, articleNumber)` aggregation, which I1 Phase B already does, mirroring the legacy ES doc shape) → **130M unique embeddings** (after further deduplication by hashing the embedded fields: `name + manufacturerName + categories + eclass codes`). The article→embedding step is a 1.22× dedup; the offer→article step (which I1 Phase B owns, not F9) is a 3.21× dedup.

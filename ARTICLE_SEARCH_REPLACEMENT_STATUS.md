@@ -81,6 +81,37 @@ populates the Milvus collections from a Mongo Atlas snapshot in S3.
 | `test_acl_integration.py` | 7 | None |
 | `test_acl_acceptance_e2e.py` | 7 | Live Milvus |
 
+## Test-suite ordering quirk
+
+When running the **entire** suite in one pytest invocation, all 26
+dedup-integration tests fail with a 404 from the search-api endpoint
+(every test in `test_search_dedup_integration.py` falls — fixture-
+level breakage). Each test file passes individually, and most
+pairwise combinations pass. The exact triggering combination
+involves `test_swing_aliases.py` later in the alphabetical order
+producing some state that interacts badly during dedup-fixture
+setup — bisecting hasn't pinned the precise trigger.
+
+`tests/conftest.py` already evicts `main` from `sys.modules` between
+files (workaround for `acl/main.py` vs `search-api/main.py` colliding
+under the bare name). This helps with one class of cross-file
+pollution but doesn't resolve the full-sweep issue.
+
+**Working pattern**: run the dedup integration suite separately:
+
+```sh
+# Everything except the dedup integration tests:
+uv run pytest tests/ --ignore=tests/test_search_dedup_integration.py
+
+# The dedup integration tests on their own:
+uv run pytest tests/test_search_dedup_integration.py
+```
+
+Each command passes cleanly. CI should split this way until the
+underlying root cause is identified — most likely a long-term
+fix involves renaming `main.py` → `app.py` in both services so the
+bare-name `import main` collision goes away entirely.
+
 ## Deferred
 
 Major work blocked or scoped out:
