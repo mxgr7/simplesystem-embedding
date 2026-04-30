@@ -19,43 +19,43 @@ Status legend: ✅ done · 🟡 partial · ⬜ not started.
 | F1 | ✅ `549516a` | Milvus collection schema extension + id format + alias plumbing | —            | `article-search-replacement-ftsearch-01-milvus-schema.md`     |
 | F2 | ✅ `fbcd80c` | ftsearch HTTP contract (request/response DTO + OpenAPI)         | —            | `article-search-replacement-ftsearch-02-http-contract.md`     |
 | F3 | ✅ `ad3a361` + `d0cb6f4` | Scalar filtering + price-resolution module                      | F1, F2       | `article-search-replacement-ftsearch-03-filtering.md`         |
-| F4 | ⬜ | searchMode + sorting + pagination + accurate hitCount           | F1, F2, F3   | `article-search-replacement-ftsearch-04-mode-sort-paging.md`  |
-| F5 | ⬜ | Aggregations / summaries                                        | F1, F2, F3   | `article-search-replacement-ftsearch-05-aggregations.md`      |
-| F6 | ⬜ (absorbed by F9) | German identifier tokenization + classifier hardening           | —            | `article-search-replacement-ftsearch-06-german-identifiers.md`|
-| F7 | ⬜ | Operational glue (Bounded consistency, tracing, retries)        | F2..F5       | `article-search-replacement-ftsearch-07-operational.md`       |
-| F8 | ⬜ | Price-scope pre-filter columns (price-list + per-currency envelope) | F1, F3, I1, F9 | `article-search-replacement-ftsearch-08-price-scope-prefilter.md` |
-| F9 | ⬜ | Article-level dedup topology (split `articles_v{N}` + `offers_v{N}`) | F1, F3, I1 | `article-search-replacement-ftsearch-09-article-dedup.md` |
+| F4 | ✅ `ecc7d7d` | searchMode + sorting + pagination + accurate hitCount           | F1, F2, F3   | `article-search-replacement-ftsearch-04-mode-sort-paging.md`  |
+| F5 | ✅ `7e01f4f` | Aggregations / summaries                                        | F1, F2, F3   | `article-search-replacement-ftsearch-05-aggregations.md`      |
+| F6 | ✅ (absorbed by F9 PR2) | German identifier tokenization (BM25 analyzer on `articles_v{N}.sparse_codes`) | —            | `article-search-replacement-ftsearch-06-german-identifiers.md`|
+| F7 | ✅ `9c9e073` + `4057488` + `6323a86` + `b4198a9` | Operational glue (Bounded consistency, retries, timeouts, RED metrics, W3C tracing) | F2..F5       | `article-search-replacement-ftsearch-07-operational.md`       |
+| F8 | ✅ `96fdd1f` | Price-scope pre-filter columns (price-list + per-currency envelope) | F1, F3, I1, F9 | `article-search-replacement-ftsearch-08-price-scope-prefilter.md` |
+| F9 | ✅ PR1 `350c09c` · PR2 `78f844b` · PR3 `ffc89ff` · PR2b `e4e5b70` + `8e665b2` + `a4fc8a9` | Article-level dedup topology (split `articles_v{N}` + `offers_v{N+1}`) + DuckDB-native projection | F1, F3, I1 | `article-search-replacement-ftsearch-09-article-dedup.md` |
 
 ## Category 2 — ACL (new FastAPI service in this repo)
 
 | #  | Status | Packet                                                            | Depends on        | File                                                           |
 | -- | ------ | ----------------------------------------------------------------- | ----------------- | -------------------------------------------------------------- |
-| A1 | ⬜ | ACL skeleton + narrowed legacy OpenAPI                            | F2                | `article-search-replacement-acl-01-skeleton-openapi.md`        |
-| A2 | ⬜ | Legacy → ftsearch request mapper                                  | A1, F2..F5        | `article-search-replacement-acl-02-request-mapper.md`          |
-| A3 | ⬜ | ftsearch → legacy response mapper                                 | A1, F2..F5        | `article-search-replacement-acl-03-response-mapper.md`         |
-| A4 | ⬜ | Legacy error envelopes + dropped-enum rejection                   | A1                | `article-search-replacement-acl-04-error-contract.md`          |
-| A5 | ⬜ | Resilience + observability (retries, timeouts, baggage, metrics)  | A2, A3            | `article-search-replacement-acl-05-resilience-observability.md`|
-| A6 | ⬜ | Acceptance test suite (§10)                                       | A1..A5, F1..F7, I1| `article-search-replacement-acl-06-acceptance-suite.md`        |
+| A1 | ✅ `3aaac3d` | ACL skeleton + narrowed legacy OpenAPI                            | F2                | `article-search-replacement-acl-01-skeleton-openapi.md`        |
+| A2 | ✅ `3e5e9b3` | Legacy → ftsearch request mapper                                  | A1, F2..F5        | `article-search-replacement-acl-02-request-mapper.md`          |
+| A3 | ✅ `17e7638` | ftsearch → legacy response mapper                                 | A1, F2..F5        | `article-search-replacement-acl-03-response-mapper.md`         |
+| A4 | ✅ `3c9ee10` | Legacy error envelopes + dropped-enum rejection                   | A1                | `article-search-replacement-acl-04-error-contract.md`          |
+| A5 | ✅ `a73c2d6` | Resilience + observability (retries, timeouts, baggage, metrics)  | A2, A3            | `article-search-replacement-acl-05-resilience-observability.md`|
+| A6 | 🟡 happy-path `17ddc62` + `52a47ed` | Acceptance test suite (§10) — happy-path landed; per-filter / per-sort / per-aggregation expansion deferred | A1..A5, F1..F7, I1| `article-search-replacement-acl-06-acceptance-suite.md`        |
 
 ## Category 3 — Indexer (new pipeline)
 
 | #  | Status | Packet                                                       | Depends on  | File                                                       |
 | -- | ------ | ------------------------------------------------------------ | ----------- | ---------------------------------------------------------- |
-| I1 | 🟡 Phase A `81db037`; Phase B absorbed by F9 PR2 | Bulk rebuild + canonical MongoDB → Milvus projection module  | F1          | `article-search-replacement-indexer-01-bulk-rebuild.md`    |
+| I1 | ✅ Phase A `81db037`; Phase B absorbed by F9 PR2b (`58a862e`, `04494e2`, `37546ba`) | Bulk rebuild + canonical MongoDB → Milvus projection module  | F1          | `article-search-replacement-indexer-01-bulk-rebuild.md`    |
 | I2 | ⬜ | Kafka-driven incremental upserter                            | I1          | `article-search-replacement-indexer-02-incremental.md`     |
-| I3 | ⬜ | Zero-downtime reindex orchestration (alias swap)             | F1, I1      | `article-search-replacement-indexer-03-zero-downtime.md`   |
+| I3 | 🟡 alias-swing CLI `0ab059f` | Zero-downtime reindex orchestration (alias swap) — paired-swing CLI shipped; full orchestration script + dual-write window pending I2 | F1, I1      | `article-search-replacement-indexer-03-zero-downtime.md`   |
 
 ---
 
 ## Suggested execution order across categories
 
 - **Phase 1 — foundation** (✅ landed): F1 ‖ F2; F3; I1 Phase A. F6 is absorbed by F9 and no longer ships standalone.
-- **Phase 2 — topology pivot**: F9. Reshapes the storage topology before further capability work lands on top of the to-be-replaced single-collection shape. Absorbs I1 Phase B (article-aggregation grouping) and F6 (German tokenizer on `articles_v{N}.sparse_codes`); unblocks F4's sort-by-price browse path and F8's envelope-column placement.
-- **Phase 3 — ftsearch capability build-out (on new topology)**: F4 ‖ F5 ‖ F8. A1 can start in parallel since it depends only on F2 frozen.
-- **Phase 4 — ACL + operational**: A1 → (A2 ‖ A3 ‖ A4) → A5; in parallel F7 ‖ I2 ‖ I3. I2 owns the streaming envelope writer that F9 deferred (async coalescing per the F9 packet).
-- **Phase 5 — acceptance**: A6 closes out against the full stack.
+- **Phase 2 — topology pivot** (✅ landed): F9 (PR1 schema split, PR2 indexer two-stream emit, PR3 dispatcher routing, PR2b DuckDB-native projection + bulk-insert sink). Absorbed I1 Phase B (article-aggregation grouping) and F6 (German tokenizer on `articles_v{N}.sparse_codes`); unblocked F4's sort-by-price browse path and F8's envelope-column placement.
+- **Phase 3 — ftsearch capability build-out (on new topology)** (✅ landed): F4, F5, F8.
+- **Phase 4 — ACL + operational** (✅ landed): A1 → (A2 ‖ A3 ‖ A4) → A5; F7 ‖ I3-partial in parallel. I2 deferred (no Kafka infra yet).
+- **Phase 5 — acceptance** (🟡 in progress): A6 happy-path landed; per-filter / per-sort / per-aggregation expansion + PostHog-captured-traffic smoke deferred (mechanical work, see `ARTICLE_SEARCH_REPLACEMENT_STATUS.md`).
 
-The longest critical path is F1 → F3 → **F9** → F4 → F5 → A2/A3 → A6. F9's promotion lengthens the critical path by one packet but avoids rework on F4/F5/F8 against the soon-to-be-replaced single-collection topology, and lets F8 ship its envelope columns split correctly across the two collections from the start.
+The longest critical path was F1 → F3 → **F9** → F4 → F5 → A2/A3 → A6. All landed. Remaining open work is **I2** (Kafka incremental — blocked on infra) and the I3 + A6 expansion that I2 unblocks; see `ARTICLE_SEARCH_REPLACEMENT_STATUS.md` for the bird's-eye view + smaller follow-ups (full-catalog GPU TEI run, legacy collection drop, runbooks).
 
 ---
 
