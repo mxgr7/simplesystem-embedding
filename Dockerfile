@@ -1,0 +1,51 @@
+# CPU-only inference image. For GPU, swap the base for `nvidia/cuda:12.4.1-runtime-ubuntu22.04`
+# and install Python on top. CPU inference for gelectra-large is slow (~1s per pair on a
+# decent CPU); GPU is recommended for production traffic.
+
+FROM python:3.13-slim
+
+# System deps for torch / numpy / lightgbm / sentencepiece.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast, reproducible dependency installs from pyproject.toml + uv.lock.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    mv /root/.local/bin/uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Copy dependency manifests first to maximize Docker layer cache.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --no-install-project --frozen
+
+# Copy source.
+COPY src/ ./src/
+COPY configs/ ./configs/
+
+# Install the project itself (after sources are in).
+RUN uv sync --frozen
+
+# Copy small build-time artifacts. The CE checkpoint is multi-GB and is
+# expected to be mounted at runtime under /app/checkpoints (or pulled
+# from object storage in an entrypoint, etc.).
+COPY artifacts/ ./artifacts/
+
+# Default env (override at runtime).
+ENV CKPT=/app/checkpoints/apr29-final-soup-3way.ckpt
+ENV LGBM=/app/artifacts/lgbm_soup.txt
+ENV CONFIG_DIR=/app/configs
+ENV TEMPERATURE=0.534
+ENV ENSEMBLE_W=0.6
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8080
+
+# Healthcheck hits /health which only depends on the loaded model.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD curl -fsS http://localhost:8080/health || exit 1
+
+CMD ["uv", "run", "uvicorn", "cross_encoder_serve.server:app", \
+     "--host", "0.0.0.0", "--port", "8080"]
