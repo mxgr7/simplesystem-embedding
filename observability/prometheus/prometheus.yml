@@ -50,3 +50,13 @@ scrape_configs:
       - targets: ["host.docker.internal:8001"]
         labels:
           stack: playground
+
+  # ---- sstei (external TEI over HTTPS) ----
+
+  - job_name: tei-sstei
+    metrics_path: /metrics
+    scheme: https
+    static_configs:
+      - targets: ["sstei.maxgerer.com"]
+        labels:
+          stack: sstei

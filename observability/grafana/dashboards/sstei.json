@@ -1,0 +1,153 @@
+{
+  "title": "sstei (TEI @ sstei.maxgerer.com)",
+  "uid": "sstei-tei",
+  "schemaVersion": 38,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "tags": ["sstei", "tei"],
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Service health",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "TEI (sstei)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 1},
+      "targets": [{"expr": "up{job=\"tei-sstei\"}", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "id": 14,
+      "title": "Scrape duration (s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 1},
+      "targets": [{"expr": "scrape_duration_seconds{job=\"tei-sstei\"}", "refId": "A"}],
+      "options": {"colorMode": "value", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "id": 15,
+      "title": "Series scraped",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 1},
+      "targets": [{"expr": "scrape_samples_scraped{job=\"tei-sstei\"}", "refId": "A"}],
+      "options": {"colorMode": "value", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "type": "row",
+      "id": 200,
+      "title": "Requests",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 2,
+      "title": "Embed request rate by method (req/s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 7},
+      "targets": [
+        {"expr": "sum by (method) (rate(te_request_count{job=\"tei-sstei\"}[5m]))", "refId": "A", "legendFormat": "{{method}}", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0, "stacking": {"mode": "normal"}}, "unit": "reqps"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Request latency (p50/p95/p99, s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 7},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(te_request_duration_bucket{job=\"tei-sstei\"}[5m])))", "refId": "A", "legendFormat": "p50", "interval": "1m"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_request_duration_bucket{job=\"tei-sstei\"}[5m])))", "refId": "B", "legendFormat": "p95", "interval": "1m"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(te_request_duration_bucket{job=\"tei-sstei\"}[5m])))", "refId": "C", "legendFormat": "p99", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 16,
+      "title": "Time spent in queue p95 (s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_queue_duration_bucket{job=\"tei-sstei\"}[5m])))", "refId": "A", "legendFormat": "p95 queue wait", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Inference latency p95 (s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_request_inference_duration_bucket{job=\"tei-sstei\"}[5m])))", "refId": "A", "legendFormat": "p95 inference", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "row",
+      "id": 300,
+      "title": "Batching & queue",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Queue size",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 24},
+      "targets": [
+        {"expr": "te_queue_size{job=\"tei-sstei\"}", "refId": "A", "legendFormat": "queue", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Batch inference size (avg)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 24},
+      "targets": [
+        {"expr": "rate(te_batch_inference_size_sum{job=\"tei-sstei\"}[5m]) / rate(te_batch_inference_size_count{job=\"tei-sstei\"}[5m])", "refId": "A", "legendFormat": "avg batch", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    },
+    {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Batch inference duration p95 (s)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 24},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_batch_inference_duration_bucket{job=\"tei-sstei\"}[5m])))", "refId": "A", "legendFormat": "p95", "interval": "1m"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0}, "unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "single"}}
+    }
+  ]
+}
