@@ -64,7 +64,28 @@ class RerankerConfig:
     temperature: float = DEFAULT_TEMPERATURE
     ensemble_w: float = DEFAULT_ENSEMBLE_W
     device: Optional[str] = None
+    autocast_dtype: Optional[str] = None  # "bf16"|"fp16"|"fp32"|None (auto: bf16 on cuda)
     config_name: str = "cross_encoder"
+
+
+_AUTOCAST_ALIASES = {
+    "bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
+    "fp16": torch.float16, "float16": torch.float16, "16": torch.float16,
+    "fp32": None, "float32": None, "32": None, "off": None, "none": None, "": None,
+}
+
+
+def _resolve_autocast_dtype(name: Optional[str], device: str) -> Optional[torch.dtype]:
+    """`None`/`"auto"` → bf16 on cuda, off elsewhere. Else look up in alias table."""
+    if name is None or str(name).strip().lower() == "auto":
+        return torch.bfloat16 if device == "cuda" else None
+    key = str(name).strip().lower()
+    if key not in _AUTOCAST_ALIASES:
+        raise ValueError(f"Unsupported autocast dtype: {name!r}")
+    return _AUTOCAST_ALIASES[key]
+
+
+_DTYPE_LABEL = {torch.bfloat16: "bf16", torch.float16: "fp16"}
 
 
 @dataclass
@@ -108,6 +129,24 @@ class Reranker:
         self.model.load_state_dict(state_dict, strict=True)
         self.model.to(self.device)
         self.model.eval()
+
+        # bf16 autocast roughly doubles max-batch headroom at S=512 with no
+        # measurable accuracy delta on this 330M model. Weights stay fp32 so
+        # the calibration scalar is unaffected. Default: bf16 on cuda, off on cpu.
+        self.autocast_dtype = _resolve_autocast_dtype(cfg.autocast_dtype, self.device)
+        self.autocast_label = _DTYPE_LABEL.get(self.autocast_dtype, "fp32")
+        # SDPA / FlashAttention is HF's default since 4.36; we just record what's
+        # active so /health can report it. With transformers 5.x this should be
+        # "sdpa" — if it ever flips to "eager" attention memory blows up at large B.
+        self.attn_implementation = getattr(
+            getattr(self.model.encoder, "config", None),
+            "_attn_implementation",
+            "?",
+        )
+        logger.info(
+            "Reranker forward config: device=%s autocast=%s attn=%s",
+            self.device, self.autocast_label, self.attn_implementation,
+        )
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.hcfg.model.model_name, use_fast=True)
         self.max_pair_length = int(self.hcfg.data.max_pair_length)
@@ -195,6 +234,9 @@ class Reranker:
             return_token_type_ids=True,
         )
         enc = {k: v.to(self.device) for k, v in enc.items()}
+        if self.autocast_dtype is not None and self.device == "cuda":
+            with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):
+                return self.model(enc)
         return self.model(enc)
 
     def _lgbm_predict(self, ce_probs: np.ndarray, contexts: list[dict],

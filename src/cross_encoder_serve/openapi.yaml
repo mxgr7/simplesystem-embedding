@@ -1,0 +1,331 @@
+openapi: 3.1.0
+info:
+  title: cross-encoder-rerank
+  version: "1"
+  description: |
+    Reranks a candidate offer list against a query using the Soup
+    cross-encoder, with an optional LightGBM stack on top.
+
+    The service is a FastAPI app exposing two routes:
+
+      * `GET  /health`  — liveness + reports the loaded calibration
+        scalar (`temperature`), ensemble weight, device, and whether
+        the LGBM booster is loaded.
+      * `POST /rerank`  — score every offer against the query and
+        return per-offer class probabilities. Caller-side filtering
+        is supported via `threshold` (on `p_exact_calibrated`) and
+        `top_k`.
+
+    ## Scoring contract
+
+    The CE produces logits over four classes in this fixed order:
+
+      `Irrelevant`, `Complement`, `Substitute`, `Exact`
+
+    Two views of the CE output are returned per offer:
+
+      * `p_irrelevant` / `p_complement` / `p_substitute` / `p_exact`
+        — `softmax(logits)`. When LGBM is loaded these are blended
+        with the LGBM stack at weight `ensemble_w` (CE) /
+        `1 - ensemble_w` (LGBM). This is what `predicted_label` is
+        argmaxed from.
+      * `p_exact_calibrated` — `softmax(logits / T)[:, Exact]` with
+        `T = temperature` (default 0.534). Well-calibrated against
+        held-out NLL — use this for thresholding. A threshold of
+        ≈0.7 corresponds to ≈70% precision on the kept set.
+
+    ## Configuration (env vars at startup)
+
+    `CKPT` (required), `LGBM`, `CONFIG_DIR`, `TEMPERATURE` (default
+    0.534), `ENSEMBLE_W` (default 0.6), `DEVICE`, `SERVE_DTYPE`
+    (default `auto` → bf16 on cuda, fp32 on cpu — bf16 ~2× max-batch
+    capacity at S=512 with no measurable accuracy delta), `HF_TOKEN`.
+    `CKPT` and `LGBM` accept either a local path or a Hugging Face
+    Hub spec of the form `org/repo[@revision]:filename`.
+
+servers:
+  - url: http://localhost:8080
+    description: Local default (matches the Dockerfile EXPOSE).
+
+paths:
+  /health:
+    get:
+      summary: Liveness + loaded-model snapshot.
+      operationId: health
+      description: |
+        Returns 200 unconditionally. While the model is still loading
+        (before the FastAPI startup hook completes) the response has
+        `status: "loading"` and `model_loaded: false`; once loaded it
+        flips to `status: "ok"` and reports the active calibration
+        scalar, ensemble weight, and device.
+
+        The Docker `HEALTHCHECK` polls this endpoint.
+      responses:
+        "200":
+          description: Health snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+
+  /rerank:
+    post:
+      summary: Rerank a candidate offer list against a query.
+      operationId: rerank
+      description: |
+        Scores every offer in the request against `query` and returns
+        one result per kept offer. Results are sorted by
+        `p_exact_calibrated` descending. If `threshold` is given,
+        offers with `p_exact_calibrated < threshold` are dropped
+        before sorting; if `top_k` is given, the result is then
+        truncated to the top K.
+
+        An empty `offers` array short-circuits to an empty response
+        (`n_input: 0`, `n_returned: 0`) without invoking the model.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RerankRequest" }
+      responses:
+        "200":
+          description: Per-offer scores, sorted by `p_exact_calibrated` desc.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RerankResponse" }
+        "422":
+          description: Request body failed pydantic validation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HTTPValidationError" }
+        "503":
+          description: |
+            Model is not yet loaded. Emitted only if `/rerank` is hit
+            during the startup window before the FastAPI startup hook
+            finishes loading the checkpoint.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  schemas:
+
+    # --- request -------------------------------------------------------
+
+    Offer:
+      type: object
+      description: |
+        A candidate offer. Only `offer_id` is required; missing text
+        fields are treated as empty strings by the feature pipeline.
+      required: [offer_id]
+      properties:
+        offer_id:
+          type: string
+          description: Stable identifier echoed back on the result.
+        name:
+          type: string
+          nullable: true
+        manufacturer_name:
+          type: string
+          nullable: true
+        manufacturer_article_number:
+          type: string
+          nullable: true
+        manufacturer_article_type:
+          type: string
+          nullable: true
+        article_number:
+          type: string
+          nullable: true
+        ean:
+          type: string
+          nullable: true
+          description: GTIN-13 if present; used by the EAN-match feature.
+        category_paths:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+
+    RerankRequest:
+      type: object
+      required: [query, offers]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: User query (German — see project notes).
+        offers:
+          type: array
+          items: { $ref: "#/components/schemas/Offer" }
+        threshold:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          nullable: true
+          description: |
+            Filter results: keep offers with
+            `p_exact_calibrated >= threshold`. Calibrated p_exact is
+            well-calibrated against held-out NLL — threshold ≈ 0.7
+            corresponds to ≈70% precision on the kept set.
+        top_k:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: |
+            Limit results to the top K by `p_exact_calibrated` after
+            the threshold filter has been applied.
+
+    # --- response ------------------------------------------------------
+
+    Label:
+      type: string
+      enum: [Irrelevant, Complement, Substitute, Exact]
+      description: Argmax of the (possibly LGBM-blended) class probabilities.
+
+    OfferResult:
+      type: object
+      required:
+        - offer_id
+        - p_exact
+        - p_substitute
+        - p_complement
+        - p_irrelevant
+        - p_exact_calibrated
+        - predicted_label
+      properties:
+        offer_id: { type: string }
+        p_exact:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        p_substitute:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        p_complement:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        p_irrelevant:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        p_exact_calibrated:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: |
+            Temperature-scaled p_exact (`softmax(logits / T)[:, Exact]`,
+            T defaults to 0.534). Use this — not `p_exact` — for
+            thresholding.
+        predicted_label:
+          $ref: "#/components/schemas/Label"
+
+    RerankResponse:
+      type: object
+      required: [query, n_input, n_returned, results]
+      properties:
+        query: { type: string }
+        n_input:
+          type: integer
+          minimum: 0
+          description: Number of offers in the request.
+        n_returned:
+          type: integer
+          minimum: 0
+          description: Number of offers in `results` after threshold + top_k.
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/OfferResult" }
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - model_loaded
+        - lgbm_loaded
+        - temperature
+        - ensemble_w
+        - device
+        - autocast_dtype
+        - attn_implementation
+      properties:
+        status:
+          type: string
+          enum: [ok, loading]
+        model_loaded:
+          type: boolean
+          description: True once the CE checkpoint has been loaded.
+        lgbm_loaded:
+          type: boolean
+          description: True iff `LGBM` was set and the booster loaded.
+        temperature:
+          type: number
+          format: float
+          description: |
+            Active calibration scalar (default 0.534). `0.0` while the
+            model is still loading.
+        ensemble_w:
+          type: number
+          format: float
+          description: |
+            CE↔LGBM mixing weight in `[0, 1]` (default 0.6). Only
+            meaningful when `lgbm_loaded` is true. `0.0` while the
+            model is still loading.
+        device:
+          type: string
+          description: |
+            Torch device the model is running on (e.g. `cuda`, `cpu`).
+            `?` while the model is still loading.
+        autocast_dtype:
+          type: string
+          enum: [bf16, fp16, fp32, "?"]
+          description: |
+            Inference autocast dtype. `bf16` is the default on cuda
+            (~2× max-batch headroom vs fp32 at S=512). Weights stay
+            fp32; only the encoder forward runs in the autocast dtype.
+            `?` while the model is still loading.
+        attn_implementation:
+          type: string
+          description: |
+            HF attention backend in use on the encoder (`sdpa`,
+            `eager`, `flash_attention_2`, ...). Should be `sdpa` on
+            transformers ≥4.36 — `eager` indicates a regression and
+            attention memory will blow up at large batch.
+
+    # --- errors --------------------------------------------------------
+
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          description: FastAPI default error envelope.
+
+    ValidationError:
+      type: object
+      required: [loc, msg, type]
+      properties:
+        loc:
+          type: array
+          items:
+            anyOf:
+              - { type: string }
+              - { type: integer }
+        msg: { type: string }
+        type: { type: string }
+
+    HTTPValidationError:
+      type: object
+      properties:
+        detail:
+          type: array
+          items: { $ref: "#/components/schemas/ValidationError" }

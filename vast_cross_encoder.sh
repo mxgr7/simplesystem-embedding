@@ -22,6 +22,9 @@ set -euo pipefail
 : "${HF_TOKEN:?HF_TOKEN must be set (used to pull the CE checkpoint from HF)}"
 
 CKPT="${CKPT:-mxgr/simplesystem-cross-encoder:soup.ckpt}"
+# bf16 autocast roughly doubles max-batch capacity at S=512 vs fp32 with no
+# measurable accuracy delta on this 330M model. Set SERVE_DTYPE=fp32 to disable.
+SERVE_DTYPE="${SERVE_DTYPE:-bf16}"
 
 STARTUP=$(cat <<'EOF'
 set -e
@@ -64,8 +67,8 @@ EOF
 )
 
 vastai create instance "$1" \
-  --image ghcr.io/mxgr7/simplesystem-embedding/cross-encoder-serve:sha-b9f1592 \
-  --env "-e CKPT=${CKPT} -e HF_TOKEN=${HF_TOKEN} -e TORCHDYNAMO_DISABLE=1 -p 8080:8080 -p 9100:9100 -p 9835:9835" \
+  --image ghcr.io/mxgr7/simplesystem-embedding/cross-encoder-serve:sha-65d6a9d \
+  --env "-e CKPT=${CKPT} -e HF_TOKEN=${HF_TOKEN} -e SERVE_DTYPE=${SERVE_DTYPE} -e TORCHDYNAMO_DISABLE=1 -p 8080:8080 -p 9100:9100 -p 9835:9835" \
   --disk 50 \
   --entrypoint /bin/bash \
   --args -c "$STARTUP"
