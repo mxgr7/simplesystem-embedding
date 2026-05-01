@@ -76,6 +76,22 @@ class CrossEncoderModule(L.LightningModule):
         self.encoder = AutoModel.from_pretrained(
             cfg.model.model_name, dtype=self.model_dtype
         )
+        # Optional layer-pruning for distillation students: keep only the first
+        # N transformer layers. When N < full count, this reshapes the encoder
+        # so the saved state_dict (with N layers) loads strict=True.
+        prune_layers = 0
+        if hasattr(cfg.model, "get"):
+            prune_layers = int(cfg.model.get("prune_layers", 0) or 0)
+        else:
+            prune_layers = int(getattr(cfg.model, "prune_layers", 0) or 0)
+        if prune_layers > 0:
+            full_n = len(self.encoder.encoder.layer)
+            if prune_layers > full_n:
+                raise ValueError(f"prune_layers={prune_layers} > {full_n}")
+            self.encoder.encoder.layer = torch.nn.ModuleList(
+                list(self.encoder.encoder.layer)[:prune_layers]
+            )
+            self.encoder.config.num_hidden_layers = prune_layers
         features_cfg = cfg.data.get("features", None) if hasattr(
             cfg.data, "get"
         ) else getattr(cfg.data, "features", None)

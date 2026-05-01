@@ -46,6 +46,7 @@ train = [
 serve = [
     "onnx>=1.21.0",
     "onnxruntime-gpu>=1.25.1",
+    "onnxscript>=0.7.0",
 ]
 
 [project.scripts]

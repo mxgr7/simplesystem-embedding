@@ -44,8 +44,26 @@ class CrossEncoderDistillModule(L.LightningModule):
         self.model_dtype = resolve_model_dtype(cfg.trainer.precision)
 
         # ---- Student: fresh encoder + classifier head ----
+        # Two paths:
+        # - student_name + (optional) prune_layers: load student backbone, keep
+        #   only the first N layers (warm-start from teacher when student_name
+        #   == teacher_name; otherwise fresh + truncated).
+        # - default: load student_name as-is (e.g. gelectra-base, MiniLM-L12).
         student_name = cfg.model.student_name
         self.encoder = AutoModel.from_pretrained(student_name, dtype=self.model_dtype)
+        prune_layers = int(cfg.model.get("prune_layers", 0) or 0)
+        if prune_layers > 0:
+            full_n = len(self.encoder.encoder.layer)
+            if prune_layers > full_n:
+                raise ValueError(
+                    f"prune_layers={prune_layers} > encoder layers={full_n}"
+                )
+            # Keep the first N layers — empirically the lower layers have
+            # broader coverage; for a more uniform downsample, prune evenly.
+            kept = torch.nn.ModuleList(list(self.encoder.encoder.layer)[:prune_layers])
+            self.encoder.encoder.layer = kept
+            self.encoder.config.num_hidden_layers = prune_layers
+            logger.info("Pruned student encoder %d → %d layers", full_n, prune_layers)
         hidden_size = int(self.encoder.config.hidden_size)
         self.dropout = torch.nn.Dropout(float(cfg.model.head_dropout))
         self.classifier = torch.nn.Linear(hidden_size, NUM_CLASSES, dtype=self.model_dtype)

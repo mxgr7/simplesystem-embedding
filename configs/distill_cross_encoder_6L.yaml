@@ -1,0 +1,24 @@
+defaults:
+  - model: distill_cross_encoder_6L
+  - data: cross_encoder
+  - trainer: cross_encoder
+  - optimizer: adamw
+  - logger: mlflow
+  - _self_
+
+seed: 42
+log_level: WARNING
+
+trainer:
+  max_epochs: 4
+  max_time: "00:00:20:00"
+  precision: bf16-mixed
+
+logger:
+  experiment_name: cross-encoder-inference
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: outputs/distill6L/${now:%Y-%m-%d}/${now:%H-%M-%S}

@@ -1,0 +1,17 @@
+# 6L pruned gelectra-large student. Initializes from teacher's pretrained
+# 24-layer encoder, drops layers 6-23, distills against the full teacher.
+# Goal: ~4× speedup over the 24L teacher while retaining > 0.74 macro_f1.
+model_name: deepset/gelectra-large
+student_name: deepset/gelectra-large
+teacher_name: deepset/gelectra-large
+teacher_ckpt: ${oc.env:TEACHER_CKPT,../checkpoints/cross-encoder/releases/v1.0-2026-04-29/soup.ckpt}
+prune_layers: 6  # keep first N transformer blocks of the 24-layer encoder
+head_dropout: 0.1
+label_smoothing: 0.0
+focal_gamma: 0.0
+use_class_weights: false
+gradient_checkpointing: false
+compile: false
+
+distill_temperature: 2.0
+distill_alpha: 0.7
