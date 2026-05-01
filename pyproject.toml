@@ -44,6 +44,7 @@ train = [
   "sentencepiece>=0.2.0",
 ]
 serve = [
+    "flash-attn",
     "onnx>=1.21.0",
     "onnxruntime-gpu>=1.25.1",
     "onnxscript>=0.7.0",
