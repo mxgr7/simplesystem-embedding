@@ -93,6 +93,12 @@ class RerankerConfig:
     onnx_providers: tuple[str, ...] = ("CUDAExecutionProvider", "CPUExecutionProvider")
     # Set to ("TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider")
     # to attempt TRT EP first, falling back gracefully.
+    offer_tokens_path: Optional[str] = None  # path to .npz with precomputed
+    # offer-side word-piece ids (offer_token_ids: int32 (N, T_OFFER),
+    # offer_lengths: int32 (N,), offer_ids: <U str (N,)). When set, the
+    # /rerank_pretokenized endpoint uses these instead of re-tokenizing
+    # the offer half on every request — kills the ~1 s render+tokenize
+    # CPU stage for catalogs that fit in RAM. See build_offer_tokens.py.
 
 
 _AUTOCAST_ALIASES = {
@@ -199,6 +205,34 @@ class Reranker:
             torch.empty(chunk_size, self.max_pair_length, dtype=torch.int64, pin_memory=True)
             for _ in range(2)
         ]
+
+        # Pre-tokenized-offer side cache. When the cfg provides an .npz path,
+        # the /rerank_pretokenized endpoint becomes available — the request
+        # body sends only the query string + a list of offer_id strs, the
+        # server looks up each offer's pre-tokenized word-piece array, and
+        # assembles the cross-encoder pair tensors in numpy without ever
+        # invoking the renderer or the offer-side tokenizer. Re-uses the
+        # existing per-chunk pinned buffers (`_pinned_ids` etc.) for h2d.
+        self._offer_tokens: Optional[np.ndarray] = None
+        self._offer_lengths: Optional[np.ndarray] = None
+        self._offer_id_to_row: dict[str, int] = {}
+        if cfg.offer_tokens_path:
+            npz = np.load(cfg.offer_tokens_path, allow_pickle=True)
+            self._offer_tokens = npz["offer_token_ids"]
+            self._offer_lengths = npz["offer_lengths"]
+            offer_id_strs = npz["offer_ids"]
+            self._offer_id_to_row = {
+                str(s): i for i, s in enumerate(offer_id_strs)
+            }
+            logger.info(
+                "Pretokenized offer cache: %d offers, max_offer_tokens=%d "
+                "(median len=%d, max=%d) from %s",
+                self._offer_tokens.shape[0],
+                self._offer_tokens.shape[1],
+                int(np.median(self._offer_lengths)),
+                int(self._offer_lengths.max()),
+                cfg.offer_tokens_path,
+            )
 
         # Always-on feature extractor (independent of how the CE was trained).
         self.extractor = FeatureExtractor(_serving_features_cfg())
@@ -422,6 +456,207 @@ class Reranker:
             )
             for offer, p_cal in zip(offers, p_exact_cal)
         ]
+
+    def rerank_pretokenized(
+        self, query: str, offer_ids: list[str]
+    ) -> list[OfferScore]:
+        """Rerank using a pre-tokenized offer cache.
+
+        The cross-encoder input is `[CLS] query [SEP] offer [SEP]`. The offer
+        half is independent of the query, so it can be word-piece tokenized
+        once at catalog-load time and reused across requests. This method
+        skips the whole render + offer-tokenize CPU stage (~1.0 s on the
+        bench fixture); only the query (one short call) is tokenized at
+        request time, then the pair tensors for each chunk are assembled
+        directly into the existing per-chunk pinned buffers.
+
+        Reuses the same pipelined-forward shape as `_pipelined_forward` so
+        torch.compile sees only chunk_size × max_pair_length inputs (no new
+        compile cache entries; no recompile).
+
+        Args:
+            query: the query text.
+            offer_ids: list of offer_id strings; each must exist in the
+                pre-tokenized cache loaded from `cfg.offer_tokens_path`.
+
+        Returns: list[OfferScore] in the same order as offer_ids.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        import os as _os
+        import time as _time
+        debug = _os.environ.get("SERVE_DEBUG_TIMING", "0") == "1"
+        if not offer_ids:
+            return []
+        if self._offer_tokens is None:
+            raise RuntimeError(
+                "rerank_pretokenized requires SERVE_OFFER_TOKENS_PATH "
+                "(passed via RerankerConfig.offer_tokens_path); no "
+                "offer-token cache loaded."
+            )
+        wall_t0 = _time.perf_counter() if debug else 0
+
+        # 1) Tokenize the query once (one short call). add_special_tokens=False
+        # so we can place [CLS]/[SEP] in the per-row assembly below.
+        q_ids_list = self.tokenizer.encode(query, add_special_tokens=False)
+        q_ids_np = np.asarray(q_ids_list, dtype=np.int64)
+        Q = int(q_ids_np.shape[0])
+        L = int(self.max_pair_length)
+        budget = L - 3 - Q  # 3 = [CLS] + 2× [SEP]
+        if budget < 1:
+            raise ValueError(
+                f"query too long: {Q} tokens leaves {budget} for offer + "
+                f"max_pair_length={L}"
+            )
+        cls_id = int(self.tokenizer.cls_token_id)
+        sep_id = int(self.tokenizer.sep_token_id)
+        pad_id = int(self.tokenizer.pad_token_id)
+        prefix_len = 1 + Q + 1  # [CLS] + q + [SEP1]
+        t_q = _time.perf_counter() if debug else 0
+
+        # 2) Look up offer cache rows for this request.
+        rows = np.empty(len(offer_ids), dtype=np.int64)
+        for i, oid in enumerate(offer_ids):
+            r = self._offer_id_to_row.get(oid)
+            if r is None:
+                raise KeyError(f"offer_id not in pretokenized cache: {oid!r}")
+            rows[i] = r
+        offer_token_ids_all = self._offer_tokens[rows]   # (B, T_OFFER) int32
+        offer_lengths_all = self._offer_lengths[rows]    # (B,) int32
+        eff_lens_all = np.minimum(offer_lengths_all, budget).astype(np.int64)
+        B = len(offer_ids)
+        t_lookup = _time.perf_counter() if debug else 0
+
+        # 3) Per-chunk assembly into the existing 128-row pinned buffers,
+        # pipelined with GPU forward exactly like `_pipelined_forward`.
+        chunk_size = max(1, int(self.cfg.max_forward_batch))
+        sum_assemble = sum_h2d = sum_forward = sum_wait = 0.0
+
+        def assemble_h2d(chunk_offer_token_ids, chunk_eff_lens, slot):
+            """Fill the slot's pinned (chunk_size, L) buffers with assembled
+            pair tokens for this chunk and dispatch h2d. Returns the GPU
+            tensors as a model() input dict.
+            """
+            nonlocal sum_assemble, sum_h2d
+            ta0 = _time.perf_counter() if debug else 0
+            # Slice the slot to the actual chunk size; .numpy() returns a
+            # zero-copy view into the pinned host buffer.
+            n_pairs = chunk_offer_token_ids.shape[0]
+            ids_buf = self._pinned_ids[slot]
+            mask_buf = self._pinned_mask[slot]
+            ttype_buf = self._pinned_ttype[slot]
+            ids_np = ids_buf[:n_pairs].numpy()
+            mask_np = mask_buf[:n_pairs].numpy()
+            ttype_np = ttype_buf[:n_pairs].numpy()
+            # Reset to PAD / 0 / 0; the per-chunk write pattern fills only
+            # the variable-length prefix portion.
+            ids_np.fill(pad_id)
+            mask_np.fill(0)
+            ttype_np.fill(0)
+            # Broadcast prefix [CLS] q_ids [SEP1].
+            ids_np[:, 0] = cls_id
+            if Q > 0:
+                ids_np[:, 1 : 1 + Q] = q_ids_np
+            ids_np[:, 1 + Q] = sep_id
+            # Per-row offer + SEP2; mask + token_type_ids by slice assignment.
+            for i in range(n_pairs):
+                L_i = int(chunk_eff_lens[i])
+                end = prefix_len + L_i
+                ids_np[i, prefix_len:end] = chunk_offer_token_ids[i, :L_i]
+                ids_np[i, end] = sep_id
+                ttype_np[i, prefix_len : end + 1] = 1
+                mask_np[i, : end + 1] = 1
+            ta1 = _time.perf_counter() if debug else 0
+            out = {
+                "input_ids": ids_buf[:n_pairs].to(self.device, non_blocking=True),
+                "attention_mask": mask_buf[:n_pairs].to(self.device, non_blocking=True),
+                "token_type_ids": ttype_buf[:n_pairs].to(self.device, non_blocking=True),
+            }
+            ta2 = _time.perf_counter() if debug else 0
+            if debug:
+                sum_assemble += ta1 - ta0
+                sum_h2d += ta2 - ta1
+            return out
+
+        # Build (chunk_offer_token_ids, chunk_eff_lens) slices once, pass to
+        # the worker as it processes each chunk.
+        chunk_starts = list(range(0, B, chunk_size))
+
+        def chunk_args(i):
+            s = chunk_starts[i]
+            e = min(s + chunk_size, B)
+            return offer_token_ids_all[s:e], eff_lens_all[s:e]
+
+        # `torch.inference_mode()` disables autograd version-counting and
+        # graph construction across the chunked forward; without it,
+        # PyTorch holds 12 × 384 MB (FFN intermediate) of activations per
+        # chunk, and with the worker now finishing assembly in ~ms (vs ~50
+        # ms tokenize before), 16 chunks worth of activations stay alive
+        # simultaneously and OOM the 24 GB 4090. The existing rerank path
+        # is slower per-chunk so the GPU drains the activation graph
+        # between chunks; the pretokenized path's tighter queue makes this
+        # explicit.
+        out_chunks: list[torch.Tensor] = []
+        with torch.inference_mode():
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                args0 = chunk_args(0)
+                next_future = ex.submit(assemble_h2d, args0[0], args0[1], 0)
+                for i in range(len(chunk_starts)):
+                    tw0 = _time.perf_counter() if debug else 0
+                    enc = next_future.result()
+                    if debug:
+                        sum_wait += _time.perf_counter() - tw0
+                    if i + 1 < len(chunk_starts):
+                        a = chunk_args(i + 1)
+                        next_future = ex.submit(assemble_h2d, a[0], a[1], (i + 1) % 2)
+                    tf0 = _time.perf_counter() if debug else 0
+                    if self.autocast_dtype is not None and self.device == "cuda":
+                        with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):
+                            out_chunks.append(self.model(enc))
+                    else:
+                        out_chunks.append(self.model(enc))
+                    if debug:
+                        sum_forward += _time.perf_counter() - tf0
+        logits = torch.cat(out_chunks, dim=0).float()
+        t_forward = _time.perf_counter() if debug else 0
+
+        # 4) Calibration + response build.
+        p_exact_cal = (
+            F.softmax(logits / self.cfg.temperature, dim=-1)[:, EXACT_IDX]
+            .cpu()
+            .numpy()
+        )
+        t_calib = _time.perf_counter() if debug else 0
+        out = [
+            OfferScore(
+                offer_id=oid,
+                p_irrelevant=0.0, p_complement=0.0, p_substitute=0.0, p_exact=0.0,
+                p_exact_calibrated=float(p_cal),
+            )
+            for oid, p_cal in zip(offer_ids, p_exact_cal)
+        ]
+        if debug:
+            t_resp = _time.perf_counter()
+            wall = t_resp - wall_t0
+            bubble = max(0.0, sum_wait - sum_forward)
+            logger.warning(
+                "[pre] wall=%.0fms q_tok=%.0fms cache_lookup=%.0fms"
+                " assemble=%.0fms sum_h2d=%.0fms wait=%.0fms"
+                " forward(GPU dispatch)=%.0fms bubble=%.0fms"
+                " calibration=%.0fms response=%.0fms"
+                " | n=%d Q=%d budget=%d n_chunks=%d chunk_size=%d",
+                wall * 1000,
+                (t_q - wall_t0) * 1000,
+                (t_lookup - t_q) * 1000,
+                sum_assemble * 1000,
+                sum_h2d * 1000,
+                sum_wait * 1000,
+                sum_forward * 1000,
+                bubble * 1000,
+                (t_calib - t_forward) * 1000,
+                (t_resp - t_calib) * 1000,
+                B, Q, budget, len(chunk_starts), chunk_size,
+            )
+        return out
 
     def _prepare_texts(self, query: str, offers: list[dict]):
         # Fast path replacing Jinja-based rendering. The Jinja loop costs ~1.3

@@ -192,6 +192,7 @@ def _load_model():
             (os.environ.get("SERVE_ONNX_PROVIDERS")
              or "CUDAExecutionProvider,CPUExecutionProvider").split(",")
         ),
+        offer_tokens_path=os.environ.get("SERVE_OFFER_TOKENS_PATH"),
     )
     logger.info(
         "Loading Reranker: ckpt=%s lgbm=%s T=%.4f w=%.2f",
@@ -293,5 +294,70 @@ async def rerank(request: Request):
             " result_dicts=%.0fms orjson_response=%.0fms | n_offers=%d",
             (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000,
             (t4 - t3) * 1000, (t5 - t4) * 1000, len(offers),
+        )
+    return resp
+
+
+@app.post("/rerank_pretokenized")
+async def rerank_pretokenized(request: Request):
+    """Rerank using a pre-tokenized offer cache.
+
+    Request body (orjson):
+        {"query": str, "offer_ids": [str, ...], "threshold"?: float, "top_k"?: int}
+
+    The server must be launched with SERVE_OFFER_TOKENS_PATH pointing at an
+    .npz built by `autoresearch/cross-encoder-inference/build_offer_tokens.py`.
+    The reranker assembles `[CLS] q [SEP] offer [SEP]` pair tensors directly
+    in numpy from the cached offer-side word-piece arrays — no rendering, no
+    offer-side tokenization, just one short query encode per request.
+    """
+    import asyncio
+    import orjson
+    import os as _os
+    import time as _time
+    debug = _os.environ.get("SERVE_DEBUG_TIMING", "0") == "1"
+    t0 = _time.perf_counter() if debug else 0
+    body = await request.body()
+    t1 = _time.perf_counter() if debug else 0
+    payload = orjson.loads(body)
+    query = payload.get("query") or ""
+    offer_ids = payload.get("offer_ids") or []
+    threshold = payload.get("threshold")
+    top_k = payload.get("top_k")
+    t2 = _time.perf_counter() if debug else 0
+    if not offer_ids:
+        return ORJSONResponse({"query": query, "n_input": 0, "n_returned": 0, "results": []})
+
+    reranker = _get_reranker()
+    scores = await asyncio.to_thread(reranker.rerank_pretokenized, query, offer_ids)
+    t3 = _time.perf_counter() if debug else 0
+
+    results = [
+        {
+            "offer_id": s.offer_id,
+            "p_exact_calibrated": s.p_exact_calibrated,
+        }
+        for s in scores
+    ]
+    if threshold is not None:
+        results = [r for r in results if r["p_exact_calibrated"] >= threshold]
+    results.sort(key=lambda r: -r["p_exact_calibrated"])
+    if top_k is not None:
+        results = results[: int(top_k)]
+    t4 = _time.perf_counter() if debug else 0
+    resp = ORJSONResponse({
+        "query": query,
+        "n_input": len(offer_ids),
+        "n_returned": len(results),
+        "results": results,
+    })
+    if debug:
+        t5 = _time.perf_counter()
+        import logging as _logging
+        _logging.getLogger("cross_encoder_serve.server").warning(
+            "[req-pre] body_read=%.0fms json_parse=%.0fms reranker=%.0fms"
+            " result_dicts=%.0fms orjson_response=%.0fms | n_offers=%d",
+            (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000,
+            (t4 - t3) * 1000, (t5 - t4) * 1000, len(offer_ids),
         )
     return resp

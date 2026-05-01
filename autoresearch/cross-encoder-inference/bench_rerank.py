@@ -239,10 +239,11 @@ def stop_server(proc: subprocess.Popen, log_path: Optional[Path] = None,
 # Bench
 # ---------------------------------------------------------------------------
 
-def post_rerank(url: str, payload_bytes: bytes, timeout_s: float = 300.0) -> tuple[float, int]:
-    """Send /rerank request, return (wall_ms, n_returned)."""
+def post_rerank(url: str, payload_bytes: bytes, timeout_s: float = 300.0,
+                endpoint: str = "/rerank") -> tuple[float, int]:
+    """Send /rerank or /rerank_pretokenized request, return (wall_ms, n_returned)."""
     req = urllib.request.Request(
-        f"{url}/rerank",
+        f"{url}{endpoint}",
         data=payload_bytes,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -312,6 +313,14 @@ def parse_args():
                    help="Don't spawn a server; assume one is already on --port.")
     p.add_argument("--keep-server", action="store_true",
                    help="Don't terminate the server on exit.")
+    p.add_argument("--pretokenized", action="store_true",
+                   help="Bench /rerank_pretokenized: server is launched with "
+                        "SERVE_OFFER_TOKENS_PATH pointing at the .npz sidecar; "
+                        "the client posts {query, offer_ids} instead of full "
+                        "offer dicts. Use build_offer_tokens.py to create the .npz.")
+    p.add_argument("--offer-tokens-path", default=None,
+                   help="Path to the .npz sidecar (default: <fixture>"
+                        ".replace('.json', '_offer_tokens.npz')).")
     return p.parse_args()
 
 
@@ -334,14 +343,39 @@ def main():
         print(f"[fixture] loaded {fixture_path} (n_offers={len(fixture['offers'])})",
               file=sys.stderr)
 
-    payload_bytes = json.dumps(fixture).encode("utf-8")
+    # Pre-tokenized mode: payload is just {query, offer_ids}; the server
+    # owns the offer-token cache loaded from --offer-tokens-path.
+    if args.pretokenized:
+        offer_tokens_path = args.offer_tokens_path or str(
+            fixture_path.with_name(fixture_path.stem + "_offer_tokens.npz")
+        )
+        if not Path(offer_tokens_path).exists():
+            raise SystemExit(
+                f"--pretokenized requires the .npz sidecar at "
+                f"{offer_tokens_path}; build it with build_offer_tokens.py"
+            )
+        offer_id_list = [str(o.get("offer_id", "")) for o in fixture["offers"]]
+        payload_bytes = json.dumps(
+            {"query": fixture["query"], "offer_ids": offer_id_list}
+        ).encode("utf-8")
+        endpoint = "/rerank_pretokenized"
+        print(f"[bench] mode=pretokenized; offer_tokens_path={offer_tokens_path}",
+              file=sys.stderr)
+    else:
+        offer_tokens_path = None
+        payload_bytes = json.dumps(fixture).encode("utf-8")
+        endpoint = "/rerank"
 
     # 2. Server: start (or assume running)
     proc: Optional[subprocess.Popen] = None
     if not args.no_start:
         if not args.ckpt:
             raise SystemExit("--ckpt required unless --no-start")
-        proc = start_server(args.ckpt, args.port, args.serve_dtype)
+        extra_env = {}
+        if offer_tokens_path:
+            extra_env["SERVE_OFFER_TOKENS_PATH"] = offer_tokens_path
+        proc = start_server(args.ckpt, args.port, args.serve_dtype,
+                            extra_env=extra_env or None)
 
     try:
         health = wait_for_health(url, timeout_s=240.0)
@@ -364,9 +398,10 @@ def main():
             print(f"[fixture] length_check skipped: {e}", file=sys.stderr)
 
         # 4. Warmup
-        print(f"[bench] warmup: {args.n_warmup} requests", file=sys.stderr)
+        print(f"[bench] warmup: {args.n_warmup} requests (endpoint={endpoint})",
+              file=sys.stderr)
         for i in range(args.n_warmup):
-            wall_ms, n_ret = post_rerank(url, payload_bytes)
+            wall_ms, n_ret = post_rerank(url, payload_bytes, endpoint=endpoint)
             print(f"[bench]   warm {i+1}: {wall_ms:.1f} ms (n_ret={n_ret})", file=sys.stderr)
 
         # 5. Measure (with VRAM polling)
@@ -380,7 +415,7 @@ def main():
         n_returned_set = set()
         print(f"[bench] measure: {args.n_measure} requests", file=sys.stderr)
         for i in range(args.n_measure):
-            wall_ms, n_ret = post_rerank(url, payload_bytes)
+            wall_ms, n_ret = post_rerank(url, payload_bytes, endpoint=endpoint)
             timings.append(wall_ms)
             n_returned_set.add(n_ret)
             if (i + 1) % 5 == 0:
