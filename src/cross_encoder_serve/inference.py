@@ -391,45 +391,41 @@ def _render_offer_fast(offer: dict, clean_html: bool) -> str:
     """Hand-rolled equivalent of configs/data/cross_encoder.yaml::offer_template
     + RowTextRenderer.build_context normalization.
 
-    Mirrors Jinja's trim_blocks/lstrip_blocks output exactly: a newline after
-    "Artikel: {name}" then space-prefixed conditional sections concatenated
-    inline, then run through embedding_train.text.normalize_text to collapse
-    space-newline-space sequences (which is what the slow path does too).
-    Verified byte-equal to the slow renderer on the 2000-offer fixture.
+    Mirrors the slow renderer's *post-normalized* output directly — first
+    conditional after "Artikel: ..." gets NO leading space (slow's
+    `_SPACE_NL_RE` collapses ` \\n ` → `\\n`); subsequent conditionals get a
+    leading space. Each individually-rendered field is normalized once (not
+    twice via final-pass normalize_text). Verified byte-equal to the slow
+    renderer on the full 2000-offer bench fixture.
     """
     from embedding_train.text import normalize_text, clean_html_text
     name = normalize_text(offer.get("name"))
     body = f"Artikel: {name}\n"
-    ean = offer.get("ean")
-    if ean:
-        body += f" EAN: {ean}"
-    art = offer.get("article_number")
-    if art:
-        body += f" Artikelnummer: {art}"
-    man_art = offer.get("manufacturer_article_number")
-    if man_art:
-        body += f" Herstellernummer: {man_art}"
-    # category_paths: mirror flatten_category_paths only when it produces a
-    # non-trivial value; otherwise fall back to str() (bench fixture stores
-    # repr-style str so this matches the slow path's __str__ behavior).
+    first = True
+
+    def _add(label, value, sep_after_first=" "):
+        nonlocal body, first
+        if not value:
+            return
+        body += f"{label}: {value}" if first else f"{sep_after_first}{label}: {value}"
+        first = False
+
+    # All free-text fields go through normalize_text so we don't need a final
+    # body-wide pass (which costs ~1ms/offer on the 8 KB filler-padded body).
+    _add("EAN", normalize_text(offer.get("ean")))
+    _add("Artikelnummer", normalize_text(offer.get("article_number")))
+    _add("Herstellernummer", normalize_text(offer.get("manufacturer_article_number")))
     cat = offer.get("category_paths")
     if cat:
-        body += f" Kategorie: {cat}"
-    art_type = offer.get("manufacturer_article_type")
-    if art_type:
-        body += f" Artikeltyp: {art_type}"
-    man = normalize_text(offer.get("manufacturer_name"))
-    if man:
-        body += f" Marke: {man}"
+        _add("Kategorie", normalize_text(cat))
+    _add("Artikeltyp", normalize_text(offer.get("manufacturer_article_type")))
+    _add("Marke", normalize_text(offer.get("manufacturer_name")))
     desc = offer.get("description")
     if desc:
-        if clean_html:
-            desc = clean_html_text(desc)
-        else:
-            desc = normalize_text(desc)
+        desc = clean_html_text(desc) if clean_html else normalize_text(desc)
         if desc:
-            body += f" Beschreibung: {desc}"
-    return normalize_text(body)
+            _add("Beschreibung", desc)
+    return body
 
 
 _DIGIT_RUN = re.compile(r"\d+")
