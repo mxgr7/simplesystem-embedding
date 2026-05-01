@@ -1,0 +1,21 @@
+# 8L pruned gelectra-large student. Initializes from teacher's pretrained
+# 24-layer encoder, drops layers 8-23, distills against the full teacher.
+# Goal: 3× speedup over the 24L teacher while retaining the binary f1_exact
+# floor (>= 0.880). 6L was too aggressive (final f1_exact ~0.78); 12L
+# gelectra-base distilled to f1_exact ~0.90. 8L pruned-large preserves the
+# H=1024 hidden width (richer rep than gelectra-base's H=768) at a similar
+# compute cost — possibly a sweeter Pareto point.
+model_name: deepset/gelectra-large
+student_name: deepset/gelectra-large
+teacher_name: deepset/gelectra-large
+teacher_ckpt: ${oc.env:TEACHER_CKPT,../checkpoints/cross-encoder/releases/v1.0-2026-04-29/soup.ckpt}
+prune_layers: 8  # keep first 8 of 24 transformer blocks
+head_dropout: 0.1
+label_smoothing: 0.0
+focal_gamma: 0.0
+use_class_weights: false
+gradient_checkpointing: false
+compile: false
+
+distill_temperature: 2.0
+distill_alpha: 0.7

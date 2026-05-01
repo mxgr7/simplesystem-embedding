@@ -17,20 +17,25 @@ student / quantized variants.
 from __future__ import annotations
 
 import logging
+import math
 
 import lightning as L
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
+from transformers import AutoModel, get_scheduler
 
-from cross_encoder_train.labels import GAIN_VECTOR, NUM_CLASSES
+from cross_encoder_train.labels import GAIN_VECTOR, LABEL_TO_ID, NUM_CLASSES
 from cross_encoder_train.metrics import compute_classification_metrics
 from cross_encoder_train.model import CrossEncoderModule, resolve_model_dtype, resolve_scheduler_name, resolve_warmup_steps
 from embedding_train.metrics import (
     compute_binary_retrieval_metrics,
     compute_ranking_metrics,
 )
-from transformers import AutoModel, get_scheduler
+
+EXACT_IDX = LABEL_TO_ID["Exact"]
+SUBSTITUTE_IDX = LABEL_TO_ID["Substitute"]
+LN3 = math.log(3.0)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +71,13 @@ class CrossEncoderDistillModule(L.LightningModule):
             logger.info("Pruned student encoder %d → %d layers", full_n, prune_layers)
         hidden_size = int(self.encoder.config.hidden_size)
         self.dropout = torch.nn.Dropout(float(cfg.model.head_dropout))
-        self.classifier = torch.nn.Linear(hidden_size, NUM_CLASSES, dtype=self.model_dtype)
+        # Binary head: train Linear(hidden, 1) → BCE+KL on Exact-vs-rest, but
+        # save a 4-channel-shaped state_dict at checkpoint time so the existing
+        # eval / serve loaders (which expect Linear(hidden, NUM_CLASSES)) work
+        # unchanged. See on_save_checkpoint below for the conversion.
+        self.binary_head = bool(cfg.model.get("binary_head", False))
+        out_dim = 1 if self.binary_head else NUM_CLASSES
+        self.classifier = torch.nn.Linear(hidden_size, out_dim, dtype=self.model_dtype)
 
         # ---- Teacher: load full Lightning ckpt of the production CE ----
         # Override compile=False, point model_name at teacher backbone, and
@@ -150,27 +161,41 @@ class CrossEncoderDistillModule(L.LightningModule):
         teacher_logits = self._teacher_logits(batch["inputs"])
 
         T = self.distill_temperature
-        # softened distributions
-        student_log_soft = F.log_softmax(student_logits / T, dim=-1)
-        teacher_soft = F.softmax(teacher_logits / T, dim=-1)
-        # KL(student || teacher) — match teacher's distribution
-        kl = F.kl_div(student_log_soft, teacher_soft, reduction="batchmean") * (T * T)
-
-        weight = self.class_weights if self.use_class_weights else None
-        if self.focal_gamma > 0.0:
-            log_probs = F.log_softmax(student_logits, dim=-1)
-            log_pt = log_probs.gather(1, batch["labels"].unsqueeze(1)).squeeze(1)
-            pt = log_pt.exp()
-            focal = (1.0 - pt).pow(self.focal_gamma)
-            ce_per = -focal * log_pt
-            if weight is not None:
-                ce_per = ce_per * weight[batch["labels"]]
-            ce = ce_per.mean()
+        if self.binary_head:
+            # Squash teacher 4-class softmax to a Bernoulli on Exact-vs-rest;
+            # student head emits a single logit per row. KL(Bernoulli||Bernoulli)
+            # ∝ BCE(student_p, teacher_p) (the teacher-entropy term is a
+            # constant w.r.t. the student parameters and drops from the
+            # gradient). T^2 restores the gradient scale a-la Hinton, mirroring
+            # the 4-class path.
+            student_logit = student_logits.squeeze(-1)
+            teacher_p_exact = F.softmax(teacher_logits / T, dim=-1)[:, EXACT_IDX]
+            student_p_T = torch.sigmoid(student_logit / T)
+            kl = F.binary_cross_entropy(student_p_T, teacher_p_exact) * (T * T)
+            binary_target = (batch["labels"] == EXACT_IDX).float()
+            ce = F.binary_cross_entropy_with_logits(student_logit, binary_target)
         else:
-            ce = F.cross_entropy(
-                student_logits, batch["labels"], weight=weight,
-                label_smoothing=self.label_smoothing,
-            )
+            # softened distributions
+            student_log_soft = F.log_softmax(student_logits / T, dim=-1)
+            teacher_soft = F.softmax(teacher_logits / T, dim=-1)
+            # KL(student || teacher) — match teacher's distribution
+            kl = F.kl_div(student_log_soft, teacher_soft, reduction="batchmean") * (T * T)
+
+            weight = self.class_weights if self.use_class_weights else None
+            if self.focal_gamma > 0.0:
+                log_probs = F.log_softmax(student_logits, dim=-1)
+                log_pt = log_probs.gather(1, batch["labels"].unsqueeze(1)).squeeze(1)
+                pt = log_pt.exp()
+                focal = (1.0 - pt).pow(self.focal_gamma)
+                ce_per = -focal * log_pt
+                if weight is not None:
+                    ce_per = ce_per * weight[batch["labels"]]
+                ce = ce_per.mean()
+            else:
+                ce = F.cross_entropy(
+                    student_logits, batch["labels"], weight=weight,
+                    label_smoothing=self.label_smoothing,
+                )
 
         loss = self.distill_alpha * kl + (1.0 - self.distill_alpha) * ce
 
@@ -185,13 +210,32 @@ class CrossEncoderDistillModule(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         logits = self(batch["inputs"]).float()
-        ce = F.cross_entropy(logits, batch["labels"], label_smoothing=self.label_smoothing)
         bs = batch["labels"].size(0)
-        self.log("val/loss", ce, on_step=False, on_epoch=True, prog_bar=True, batch_size=bs)
 
-        probabilities = F.softmax(logits, dim=-1)
-        predictions = probabilities.argmax(dim=-1)
-        ranking_scores = (probabilities * self.gain_vector).sum(dim=-1)
+        if self.binary_head:
+            # Binary head: predict Exact iff sigmoid(logit) > 0.5; map non-Exact
+            # to SUBSTITUTE so compute_classification_metrics still gets a 4-way
+            # prediction. Only `f1_exact` is meaningful in this mode (and is the
+            # only gating metric under the new floor); the other class F1s
+            # collapse by construction.
+            student_logit = logits.squeeze(-1)
+            binary_target = (batch["labels"] == EXACT_IDX).float()
+            ce = F.binary_cross_entropy_with_logits(student_logit, binary_target)
+            self.log("val/loss", ce, on_step=False, on_epoch=True, prog_bar=True, batch_size=bs)
+            sigm = torch.sigmoid(student_logit)
+            predictions = torch.where(
+                sigm > 0.5,
+                torch.full_like(student_logit, EXACT_IDX, dtype=torch.long),
+                torch.full_like(student_logit, SUBSTITUTE_IDX, dtype=torch.long),
+            )
+            # Ranking score = p_exact (calibration-free monotone score)
+            ranking_scores = sigm
+        else:
+            ce = F.cross_entropy(logits, batch["labels"], label_smoothing=self.label_smoothing)
+            self.log("val/loss", ce, on_step=False, on_epoch=True, prog_bar=True, batch_size=bs)
+            probabilities = F.softmax(logits, dim=-1)
+            predictions = probabilities.argmax(dim=-1)
+            ranking_scores = (probabilities * self.gain_vector).sum(dim=-1)
 
         cpu_predictions = predictions.detach().cpu().tolist()
         cpu_targets = batch["labels"].detach().cpu().tolist()
@@ -247,6 +291,25 @@ class CrossEncoderDistillModule(L.LightningModule):
         for k in list(sd.keys()):
             if k.startswith("teacher."):
                 del sd[k]
+        if self.binary_head:
+            # Inflate Linear(hidden, 1) → Linear(hidden, NUM_CLASSES) so the
+            # checkpoint loads cleanly into CrossEncoderModule (which expects
+            # the 4-class shape). Mapping: rows 0..2 = zero, row EXACT_IDX =
+            # binary row + ln(3) bias offset. With this offset, at T=1
+            # softmax([0,0,0, b+ln3])[EXACT] = sigmoid(b) — preserves the
+            # binary scoring exactly. At T != 1 the mapping is monotone in b,
+            # so a re-fitted serving temperature handles the rest of the
+            # calibration.
+            w_key = "classifier.weight"
+            b_key = "classifier.bias"
+            if w_key in sd and sd[w_key].shape[0] == 1:
+                hidden = sd[w_key].shape[1]
+                inflated_w = torch.zeros(NUM_CLASSES, hidden, dtype=sd[w_key].dtype)
+                inflated_w[EXACT_IDX] = sd[w_key][0]
+                sd[w_key] = inflated_w
+                inflated_b = torch.zeros(NUM_CLASSES, dtype=sd[b_key].dtype)
+                inflated_b[EXACT_IDX] = sd[b_key][0] + LN3
+                sd[b_key] = inflated_b
 
     def configure_optimizers(self):
         # Only train the student — explicitly drop teacher params from the

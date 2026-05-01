@@ -1,0 +1,23 @@
+# Binary-head distillation: train Linear(hidden, 1) student against the
+# Bernoulli-on-Exact-vs-rest squash of the teacher's 4-class softmax.
+# Saved ckpt is inflated to Linear(hidden, NUM_CLASSES) with rows 0..2 zero
+# and row EXACT_IDX carrying the trained binary head + ln(3) bias offset, so
+# the existing eval / serve loaders work unchanged. The new f1_exact floor
+# (>= 0.880) is the only gating metric, so the 3 wasted output channels of
+# the 4-class head — and the Complement-class collapse that capped 4-class
+# distill macro_f1 — are gone.
+model_name: deepset/gelectra-base
+student_name: deepset/gelectra-base
+teacher_name: deepset/gelectra-large
+teacher_ckpt: ${oc.env:TEACHER_CKPT,../checkpoints/cross-encoder/releases/v1.0-2026-04-29/soup.ckpt}
+prune_layers: 0
+binary_head: true
+head_dropout: 0.1
+label_smoothing: 0.0
+focal_gamma: 0.0
+use_class_weights: false
+gradient_checkpointing: false
+compile: false
+
+distill_temperature: 2.0
+distill_alpha: 0.7

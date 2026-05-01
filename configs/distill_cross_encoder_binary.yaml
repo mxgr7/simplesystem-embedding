@@ -1,0 +1,24 @@
+defaults:
+  - model: distill_cross_encoder_binary
+  - data: cross_encoder
+  - trainer: cross_encoder
+  - optimizer: adamw
+  - logger: mlflow
+  - _self_
+
+seed: 42
+log_level: WARNING
+
+trainer:
+  max_epochs: 4
+  max_time: "00:00:20:00"  # exploratory budget; bump to 1h+ for finalize
+  precision: bf16-mixed
+
+logger:
+  experiment_name: cross-encoder-inference
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: outputs/distill_binary/${now:%Y-%m-%d}/${now:%H-%M-%S}
