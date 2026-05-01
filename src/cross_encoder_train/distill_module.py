@@ -69,14 +69,16 @@ class CrossEncoderDistillModule(L.LightningModule):
         self.classifier = torch.nn.Linear(hidden_size, NUM_CLASSES, dtype=self.model_dtype)
 
         # ---- Teacher: load full Lightning ckpt of the production CE ----
-        teacher_cfg_overrides = OmegaConf.create({"model": {"compile": False}})
-        teacher_cfg = OmegaConf.merge(cfg, teacher_cfg_overrides)
-        # The teacher's model_name lives under cfg.model.teacher_name; rewrite
-        # cfg.model.model_name temporarily so CrossEncoderModule loads the
-        # teacher backbone.
+        # Override compile=False, point model_name at teacher backbone, and
+        # CRITICALLY null out prune_layers so the teacher keeps its full depth
+        # (the student-side prune_layers must not leak into the teacher cfg).
         teacher_cfg = OmegaConf.merge(
-            teacher_cfg,
-            OmegaConf.create({"model": {"model_name": cfg.model.teacher_name}}),
+            cfg,
+            OmegaConf.create({"model": {
+                "compile": False,
+                "model_name": cfg.model.teacher_name,
+                "prune_layers": 0,
+            }}),
         )
         teacher = CrossEncoderModule(cfg=teacher_cfg)
         ckpt = torch.load(cfg.model.teacher_ckpt, map_location="cpu", weights_only=False)
