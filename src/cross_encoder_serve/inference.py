@@ -176,6 +176,29 @@ class Reranker:
         self._fast_tok.enable_truncation(
             max_length=self.max_pair_length, strategy="only_second"
         )
+        # Double-buffered pinned host tensors for the pipelined h2d path.
+        # When `tensor.to(device, non_blocking=True)` is called with a
+        # *pageable* host source, PyTorch synchronously pins the source
+        # memory before transferring — that's the implicit ~50 ms / chunk
+        # cost we measure as `sum_h2d` in the timing block (16 chunks ≈
+        # 770 ms). Pre-allocating pinned-memory buffers + filling them
+        # in-place each chunk avoids the synchronous pin step. Two buffer
+        # slots (i % 2) so the worker can write the next chunk while the
+        # GPU is still consuming the previous chunk's transfer; PyTorch
+        # internally syncs the GPU stream before forward starts.
+        chunk_size = max(1, int(self.cfg.max_forward_batch))
+        self._pinned_ids = [
+            torch.empty(chunk_size, self.max_pair_length, dtype=torch.int64, pin_memory=True)
+            for _ in range(2)
+        ]
+        self._pinned_mask = [
+            torch.empty(chunk_size, self.max_pair_length, dtype=torch.int64, pin_memory=True)
+            for _ in range(2)
+        ]
+        self._pinned_ttype = [
+            torch.empty(chunk_size, self.max_pair_length, dtype=torch.int64, pin_memory=True)
+            for _ in range(2)
+        ]
 
         # Always-on feature extractor (independent of how the CE was trained).
         self.extractor = FeatureExtractor(_serving_features_cfg())
@@ -447,38 +470,34 @@ class Reranker:
         clean_html = bool(getattr(self.hcfg.data, "clean_html", True))
         query_text = _normalize_text_fast(query)
 
-        def render_tok_h2d(offers_chunk):
+        def render_tok_h2d(offers_chunk, slot):
             nonlocal sum_render, sum_tokenize, sum_h2d
             tr0 = _time.perf_counter() if debug else 0
             texts = [_render_offer_fast(o, clean_html) for o in offers_chunk]
             tr1 = _time.perf_counter() if debug else 0
-            # Direct Rust call. `encode_batch_fast` releases the GIL and
-            # rayon-parallelizes over pairs. Padding+truncation come from the
-            # `enable_padding` / `enable_truncation` settings configured at
-            # init. Output is a list of native Encoding objects.
             pairs = list(zip([query_text] * len(texts), texts))
             encs = self._fast_tok.encode_batch_fast(pairs, add_special_tokens=True)
-            # Assemble into numpy arrays via pre-allocated buffers, which is
-            # ~2× faster than `torch.tensor([e.ids for e in encs])` because
-            # the latter has to walk the whole list-of-lists in Python before
-            # the constructor sees it. `from_numpy` is zero-copy.
             n_pairs = len(encs)
             seq_len = len(encs[0].ids) if encs else 0
-            ids_np = np.empty((n_pairs, seq_len), dtype=np.int64)
-            mask_np = np.empty((n_pairs, seq_len), dtype=np.int64)
-            ttype_np = np.empty((n_pairs, seq_len), dtype=np.int64)
+            # Fill the slot's pinned host buffers in-place via numpy. The
+            # buffers are sized at chunk_size × max_pair_length; only the
+            # first n_pairs rows are valid (slot[:n_pairs] is the slice we
+            # transfer + forward).
+            ids_view = self._pinned_ids[slot][:n_pairs].numpy()
+            mask_view = self._pinned_mask[slot][:n_pairs].numpy()
+            ttype_view = self._pinned_ttype[slot][:n_pairs].numpy()
             for j, e in enumerate(encs):
-                ids_np[j] = e.ids
-                mask_np[j] = e.attention_mask
-                ttype_np[j] = e.type_ids
-            input_ids = torch.from_numpy(ids_np)
-            attention_mask = torch.from_numpy(mask_np)
-            token_type_ids = torch.from_numpy(ttype_np)
+                ids_view[j] = e.ids
+                mask_view[j] = e.attention_mask
+                ttype_view[j] = e.type_ids
             tr2 = _time.perf_counter() if debug else 0
+            # Pinned-memory source → truly async non_blocking transfer.
+            # No implicit synchronous pinning step (the buffer is already
+            # page-locked).
             out = {
-                "input_ids": input_ids.to(self.device, non_blocking=True),
-                "attention_mask": attention_mask.to(self.device, non_blocking=True),
-                "token_type_ids": token_type_ids.to(self.device, non_blocking=True),
+                "input_ids": self._pinned_ids[slot][:n_pairs].to(self.device, non_blocking=True),
+                "attention_mask": self._pinned_mask[slot][:n_pairs].to(self.device, non_blocking=True),
+                "token_type_ids": self._pinned_ttype[slot][:n_pairs].to(self.device, non_blocking=True),
             }
             tr3 = _time.perf_counter() if debug else 0
             if debug:
@@ -490,14 +509,20 @@ class Reranker:
         out_chunks: list[torch.Tensor] = []
         chunks = [offers[i : i + chunk_size] for i in range(0, n, chunk_size)]
         with ThreadPoolExecutor(max_workers=1) as ex:
-            next_future = ex.submit(render_tok_h2d, chunks[0])
+            next_future = ex.submit(render_tok_h2d, chunks[0], 0)
             for i, _ in enumerate(chunks):
                 tw0 = _time.perf_counter() if debug else 0
                 enc = next_future.result()
                 if debug:
                     sum_wait += _time.perf_counter() - tw0
                 if i + 1 < len(chunks):
-                    next_future = ex.submit(render_tok_h2d, chunks[i + 1])
+                    # Alternate between 2 pinned-buffer slots so the worker
+                    # filling chunk i+1 doesn't overwrite the buffer the GPU
+                    # is still consuming for chunk i. After main forward
+                    # consumes the .to() result (a separate GPU tensor), the
+                    # host pinned buffer is free to be overwritten by chunk
+                    # i+2 which lands in the same slot.
+                    next_future = ex.submit(render_tok_h2d, chunks[i + 1], (i + 1) % 2)
                 tf0 = _time.perf_counter() if debug else 0
                 if self.autocast_dtype is not None and self.device == "cuda":
                     with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):
