@@ -163,15 +163,16 @@ class CrossEncoderDistillModule(L.LightningModule):
         T = self.distill_temperature
         if self.binary_head:
             # Squash teacher 4-class softmax to a Bernoulli on Exact-vs-rest;
-            # student head emits a single logit per row. KL(Bernoulli||Bernoulli)
-            # ∝ BCE(student_p, teacher_p) (the teacher-entropy term is a
-            # constant w.r.t. the student parameters and drops from the
-            # gradient). T^2 restores the gradient scale a-la Hinton, mirroring
-            # the 4-class path.
+            # student head emits a single logit per row. KL(teacher || student)
+            # = BCE(student_logit_at_T, teacher_p_at_T) up to a teacher-only
+            # entropy constant — which has zero gradient w.r.t. the student.
+            # `binary_cross_entropy_with_logits` accepts soft float targets and
+            # is autocast-safe (unlike the prob-input `binary_cross_entropy`).
+            # T^2 restores the gradient scale a-la Hinton, mirroring the 4-class
+            # path.
             student_logit = student_logits.squeeze(-1)
             teacher_p_exact = F.softmax(teacher_logits / T, dim=-1)[:, EXACT_IDX]
-            student_p_T = torch.sigmoid(student_logit / T)
-            kl = F.binary_cross_entropy(student_p_T, teacher_p_exact) * (T * T)
+            kl = F.binary_cross_entropy_with_logits(student_logit / T, teacher_p_exact) * (T * T)
             binary_target = (batch["labels"] == EXACT_IDX).float()
             ce = F.binary_cross_entropy_with_logits(student_logit, binary_target)
         else:
