@@ -646,6 +646,19 @@ _BR_RE_FAST = re.compile(r"(?i)<br\\s*/?>")
 _TAG_RE_FAST = re.compile(r"<[^>]+>")
 
 
+# Description char cap before normalize+clean_html. The tokenizer already
+# truncates the offer side to max_length=512 tokens (`truncation="only_second"`)
+# which is roughly 3000 chars of German text; processing more is wasted.
+# 4096 chars gives ~50 % margin for tokenizer over-counting and rare
+# multi-byte char clusters while still cutting normalize+clean_html work
+# in half on the bench filler-padded fixture (avg 8337 chars/desc).
+# normalize_text is prefix-preserving (its operations — strip, ASCII-replace,
+# whitespace collapse — operate locally on each char/whitespace cluster, so
+# normalize(s[:N]) is a prefix of normalize(s)). This guarantees the first
+# 512 tokens of normalize(desc[:4096]) and normalize(desc) are identical.
+_DESC_CHAR_CAP = 4096
+
+
 def _render_offer_fast(offer: dict, clean_html: bool) -> str:
     """Hand-rolled equivalent of configs/data/cross_encoder.yaml::offer_template
     + RowTextRenderer.build_context normalization.
@@ -655,7 +668,8 @@ def _render_offer_fast(offer: dict, clean_html: bool) -> str:
     `_SPACE_NL_RE` collapses ` \\n ` → `\\n`); subsequent conditionals get a
     leading space. Each individually-rendered field is normalized once (not
     twice via final-pass normalize_text). Verified byte-equal to the slow
-    renderer on the full 2000-offer bench fixture.
+    renderer on the full 2000-offer bench fixture (with the description char
+    cap applied — see _DESC_CHAR_CAP comment above).
     """
     normalize_text = _normalize_text_fast
     clean_html_text = _clean_html_text_fast
@@ -682,6 +696,12 @@ def _render_offer_fast(offer: dict, clean_html: bool) -> str:
     _add("Marke", normalize_text(offer.get("manufacturer_name")))
     desc = offer.get("description")
     if desc:
+        # Cheap pre-truncate: cap at _DESC_CHAR_CAP before calling normalize
+        # or clean_html so the regex passes don't process discarded tail.
+        # Safe because tokenizer truncates the offer side to 512 tokens
+        # anyway and normalize is prefix-preserving.
+        if len(desc) > _DESC_CHAR_CAP:
+            desc = desc[:_DESC_CHAR_CAP]
         desc = clean_html_text(desc) if clean_html else normalize_text(desc)
         if desc:
             _add("Beschreibung", desc)
