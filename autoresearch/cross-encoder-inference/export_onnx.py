@@ -124,6 +124,7 @@ def main():
             dynamic_axes=dynamic_axes,
             opset_version=args.opset,
             do_constant_folding=True,
+            dynamo=False,
         )
     print(f"[export] wrote {out_path} ({out_path.stat().st_size/1e6:.1f} MB)", file=sys.stderr)
 
