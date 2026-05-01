@@ -185,6 +185,7 @@ def _load_model():
         compile=os.environ.get("SERVE_COMPILE", "1") == "1",
         compile_mode=os.environ.get("SERVE_COMPILE_MODE", "max-autotune"),
         int8=os.environ.get("SERVE_INT8", "0") == "1",
+        bnb8=os.environ.get("SERVE_BNB8", "0") == "1",
         runtime=os.environ.get("SERVE_RUNTIME", "torch"),
         onnx_path=os.environ.get("SERVE_ONNX_PATH"),
         onnx_providers=tuple(

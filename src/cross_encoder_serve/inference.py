@@ -81,6 +81,13 @@ class RerankerConfig:
     # Note: quantize_dynamic uses CPU-only int8 matmul kernels; setting this forces
     # the model onto CPU. Useful for measuring quality drop at int8; for GPU int8
     # use the ONNX Runtime path (SERVE_RUNTIME=onnx) with an int8-quantized .onnx.
+    bnb8: bool = False  # post-training INT8 quantization via bitsandbytes
+    # (Linear8bitLt with has_fp16_weights=False). Replaces every nn.Linear inside
+    # the encoder. Computes matmul in fp16 with int8 weights — saves weight-load
+    # bandwidth and enables cuBLAS LtIgemm tensor cores. Quality drop typically
+    # 0.005-0.02 on f1_exact for transformer models. Incompatible with
+    # torch.compile (compile can't trace through bnb's custom ops); compile
+    # auto-disabled when bnb8 is on.
     runtime: str = "torch"  # "torch" | "onnx" — picks the encoder backend
     onnx_path: Optional[str] = None  # required when runtime=="onnx"
     onnx_providers: tuple[str, ...] = ("CUDAExecutionProvider", "CPUExecutionProvider")
@@ -200,7 +207,47 @@ class Reranker:
             self.autocast_dtype = None
             self.autocast_label = "int8"
 
-        if cfg.compile and self.device == "cuda" and not cfg.int8:
+        if cfg.bnb8 and self.device == "cuda" and not cfg.int8:
+            # Walk the encoder module tree and swap nn.Linear → bnb.Linear8bitLt
+            # in place. Skip the classifier head (NUM_CLASSES output is too small
+            # to benefit; INT8 quantizing a 4-output linear can hurt more than
+            # it saves). The first forward triggers per-row outlier extraction
+            # (the threshold=6 mode of LLM.int8); subsequent forwards run the
+            # cuBLAS LtIgemm path. Logs each replacement so the swap is
+            # visible in the server log.
+            import bitsandbytes as bnb
+            replaced = 0
+            def swap_linears(parent: torch.nn.Module, prefix: str = ""):
+                nonlocal replaced
+                for name, child in list(parent.named_children()):
+                    full = f"{prefix}.{name}" if prefix else name
+                    if isinstance(child, torch.nn.Linear):
+                        new = bnb.nn.Linear8bitLt(
+                            child.in_features,
+                            child.out_features,
+                            bias=child.bias is not None,
+                            has_fp16_weights=False,
+                            threshold=6.0,
+                        )
+                        # Convert weights to int8 representation by assigning
+                        # an Int8Params holding the original fp16/bf16 tensor.
+                        new.weight = bnb.nn.Int8Params(
+                            child.weight.data,
+                            has_fp16_weights=False,
+                            requires_grad=False,
+                        )
+                        if child.bias is not None:
+                            new.bias.data = child.bias.data.clone()
+                        new = new.to(self.device)
+                        setattr(parent, name, new)
+                        replaced += 1
+                    else:
+                        swap_linears(child, full)
+            swap_linears(self.model.encoder)
+            logger.warning("SERVE_BNB8=1: replaced %d nn.Linear → bnb.Linear8bitLt", replaced)
+            self.autocast_label = "int8"
+
+        if cfg.compile and self.device == "cuda" and not cfg.int8 and not cfg.bnb8:
             self.model.encoder = torch.compile(
                 self.model.encoder, mode=cfg.compile_mode
             )
