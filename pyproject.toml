@@ -47,6 +47,7 @@ serve = [
     "onnx>=1.21.0",
     "onnxruntime-gpu>=1.25.1",
     "onnxscript>=0.7.0",
+    "tensorrt>=10.16.1.11",
 ]
 
 [project.scripts]

@@ -259,38 +259,41 @@ class Reranker:
         if not offers:
             return []
 
-        # 1. Build query/offer texts the same way training did.
-        query_text, offer_texts, contexts = self._prepare_texts(query, offers)
-
-        # 2. CE forward → logits.
-        logits = self._forward(query_text, offer_texts).float()  # (n_offers, 4)
-
-        # 3. Two views of the CE output:
-        #    - probs_raw: softmax(logits) — what LGBM was trained on; used for
-        #      ensembling and argmax/F1.
-        #    - p_exact_cal: softmax(logits / T)[:, EXACT_IDX] — temperature-scaled,
-        #      well-calibrated against val NLL. Use for thresholding.
-        probs_raw = F.softmax(logits, dim=-1).cpu().numpy()
-        p_exact_cal = F.softmax(logits / self.cfg.temperature, dim=-1)[:, EXACT_IDX].cpu().numpy()
-
-        # 4. Optional LGBM stack — feeds LGBM the UN-scaled CE probs (matching training).
+        # 3. CE output. The full 4-class softmax is only needed for the LGBM
+        # stack ensemble; downstream consumes only `p_exact_calibrated`. When
+        # LGBM is off (the production serving config), skip the full-softmax
+        # path entirely — saves a ~85 ms cuda→cpu sync per request.
         if self.booster is not None:
+            probs_raw = F.softmax(logits, dim=-1).cpu().numpy()
+            p_exact_cal = F.softmax(logits / self.cfg.temperature, dim=-1)[:, EXACT_IDX].cpu().numpy()
             lgbm_probs = self._lgbm_predict(probs_raw, contexts, query, offers)
             probs_out = self.cfg.ensemble_w * probs_raw + (1.0 - self.cfg.ensemble_w) * lgbm_probs
-        else:
-            probs_out = probs_raw
+            return [
+                OfferScore(
+                    offer_id=str(offer.get("offer_id", "")),
+                    p_irrelevant=float(p[0]),
+                    p_complement=float(p[1]),
+                    p_substitute=float(p[2]),
+                    p_exact=float(p[3]),
+                    p_exact_calibrated=float(p_cal),
+                )
+                for offer, p, p_cal in zip(offers, probs_out, p_exact_cal)
+            ]
 
-        # 5. Return per-offer scores.
+        # LGBM-off fast path: only compute p_exact_calibrated; zero-fill the
+        # other 4-class probs (downstream ignores them; the API schema keeps
+        # them only for compatibility with the previous response shape).
+        p_exact_cal = F.softmax(logits / self.cfg.temperature, dim=-1)[:, EXACT_IDX].cpu().numpy()
         return [
             OfferScore(
                 offer_id=str(offer.get("offer_id", "")),
-                p_irrelevant=float(p[0]),
-                p_complement=float(p[1]),
-                p_substitute=float(p[2]),
-                p_exact=float(p[3]),
+                p_irrelevant=0.0,
+                p_complement=0.0,
+                p_substitute=0.0,
+                p_exact=0.0,
                 p_exact_calibrated=float(p_cal),
             )
-            for offer, p, p_cal in zip(offers, probs_out, p_exact_cal)
+            for offer, p_cal in zip(offers, p_exact_cal)
         ]
 
     def _prepare_texts(self, query: str, offers: list[dict]):
