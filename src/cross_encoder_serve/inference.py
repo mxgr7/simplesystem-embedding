@@ -259,6 +259,12 @@ class Reranker:
         if not offers:
             return []
 
+        # 1. Build query/offer texts the same way training did.
+        query_text, offer_texts, contexts = self._prepare_texts(query, offers)
+
+        # 2. CE forward → logits.
+        logits = self._forward(query_text, offer_texts).float()  # (n_offers, 4)
+
         # 3. CE output. The full 4-class softmax is only needed for the LGBM
         # stack ensemble; downstream consumes only `p_exact_calibrated`. When
         # LGBM is off (the production serving config), skip the full-softmax
