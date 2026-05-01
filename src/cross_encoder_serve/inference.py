@@ -261,6 +261,21 @@ class Reranker:
         if not offers:
             return []
 
+        if self.booster is None and self.runtime == "torch":
+            # Fast path: pipeline CPU render+tokenize with GPU forward so the
+            # ~800 ms prep cost is hidden behind the ~1.9 s forward instead
+            # of being serial in front of it.
+            logits = self._pipelined_forward(query, offers).float()
+            p_exact_cal = F.softmax(logits / self.cfg.temperature, dim=-1)[:, EXACT_IDX].cpu().numpy()
+            return [
+                OfferScore(
+                    offer_id=str(offer.get("offer_id", "")),
+                    p_irrelevant=0.0, p_complement=0.0, p_substitute=0.0, p_exact=0.0,
+                    p_exact_calibrated=float(p_cal),
+                )
+                for offer, p_cal in zip(offers, p_exact_cal)
+            ]
+
         # 1. Build query/offer texts the same way training did.
         query_text, offer_texts, contexts = self._prepare_texts(query, offers)
 
@@ -332,6 +347,45 @@ class Reranker:
         offer_texts = [_render_offer_fast(o, clean_html) for o in offers]
         query_text = _normalize_text_fast(query)
         return query_text, offer_texts, []
+
+    def _pipelined_forward(self, query: str, offers: list[dict]) -> torch.Tensor:
+        """Render+tokenize chunk i+1 on a worker thread while the GPU forwards
+        chunk i. Hides the ~800 ms prep cost behind the GPU's ~1.9 s forward
+        on the distilled gelectra-base path. Only used when LGBM is off and
+        runtime is torch (the production hot path)."""
+        from concurrent.futures import ThreadPoolExecutor
+        chunk_size = max(1, int(self.cfg.max_forward_batch))
+        n = len(offers)
+        clean_html = bool(getattr(self.hcfg.data, "clean_html", True))
+        query_text = _normalize_text_fast(query)
+
+        def render_tok_h2d(offers_chunk):
+            texts = [_render_offer_fast(o, clean_html) for o in offers_chunk]
+            enc = self.tokenizer(
+                [query_text] * len(texts),
+                texts,
+                padding=True,
+                truncation="only_second",
+                max_length=self.max_pair_length,
+                return_tensors="pt",
+                return_token_type_ids=True,
+            )
+            return {k: v.to(self.device, non_blocking=True) for k, v in enc.items()}
+
+        out_chunks: list[torch.Tensor] = []
+        chunks = [offers[i : i + chunk_size] for i in range(0, n, chunk_size)]
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            next_future = ex.submit(render_tok_h2d, chunks[0])
+            for i, _ in enumerate(chunks):
+                enc = next_future.result()
+                if i + 1 < len(chunks):
+                    next_future = ex.submit(render_tok_h2d, chunks[i + 1])
+                if self.autocast_dtype is not None and self.device == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):
+                        out_chunks.append(self.model(enc))
+                else:
+                    out_chunks.append(self.model(enc))
+        return torch.cat(out_chunks, dim=0)
 
     def _forward(self, query_text: str, offer_texts: list[str]) -> torch.Tensor:
         # Tokenize, then chunk-forward through the configured runtime. ONNX
