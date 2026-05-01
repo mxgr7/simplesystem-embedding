@@ -1,5 +1,8 @@
 # autoresearch (cross-encoder inference edition)
 
+> **2026-05-01 pivot — quality floor switched from 4-class micro/macro to binary Exact F1.**
+> The program previously gated on `val/cls/micro_f1` and `val/cls/macro_f1` from a 4-class classifier (Irrelevant/Complement/Substitute/Exact). It now gates on `val/cls/f1_exact ≥ 0.880`. Reasoning: only `p_exact_calibrated` is consumed downstream, the macro_f1 fail mode was driven entirely by Complement F1 collapsing on a 1.8%-of-val class downstream ignores, and gelectra-base distillation hit a hard ceiling at macro 0.72 from this dynamic. Binary framing removes the bottleneck and aligns the floor with what production actually uses. See NOTES.md for the full reasoning + the May-1 conversation that produced it.
+
 This is an experiment to have the LLM autonomously squeeze inference latency and hosting cost out of the production cross-encoder reranker (`src/cross_encoder_serve/`) without sacrificing quality below a hard floor.
 
 The starting model is the released **Soup CE** at `../../../checkpoints/cross-encoder/releases/v1.0-2026-04-29/soup.ckpt` — a uniform weight average of 3 `deepset/gelectra-large` (334.7M params) checkpoints with a `Linear(1024, 4)` head over `(Irrelevant, Complement, Substitute, Exact)`. Today this model is served via `cross_encoder_serve.server:app` (FastAPI + Lightning + HF tokenizer + bf16 autocast on CUDA, eager mode). The training-side context lives in `../cross-encoder/program.md` and `../cross-encoder/NOTES.md`; read those for background but do **not** modify the training program's `results.tsv` or `NOTES.md`.
@@ -16,12 +19,11 @@ The starting model is the released **Soup CE** at `../../../checkpoints/cross-en
 
 **Quality floor — must not be violated:** on the original training val split (`configs/data/cross_encoder.yaml::path` → `data/queries_offers_esci/queries_offers_merged_labeled.parquet`, query-id-based split with the configured `val_fraction` and `seed`), CE-alone (no LGBM stack), the metric outputs from `src/cross_encoder_train/metrics.py::compute_classification_metrics` must satisfy:
 
-- `val/cls/micro_f1 ≥ 0.860`
-- `val/cls/macro_f1 ≥ 0.740`
+- `val/cls/f1_exact ≥ 0.880`
 
-Strictly. A run that lands at 0.8599 micro is a floor violation.
+Strictly. A run that lands at 0.8799 f1_exact is a floor violation. Pre-2026-05-01 rows in `results.tsv` log `val_micro_f1` / `val_macro_f1` for context, but the gating decision is now made on `f1_exact` alone (which is one of the per-class fields the eval script already prints). The other three class F1s are *informational* — Complement / Substitute / Irrelevant collapses are not floor violations.
 
-(History: original floors were 0.890 / 0.770; relaxed on 2026-04-30 when distill iter 1 hit 0.859 / 0.728 — close enough that a distillation path is viable but the original floors were essentially "no quality loss permitted", which would have ruled out distillation entirely.)
+(History: original 4-class floors were 0.890 / 0.770; relaxed on 2026-04-30 to 0.860 / 0.740 when distill iter 1 hit 0.859 / 0.728. Switched on 2026-05-01 to a single binary floor — see top-of-file note. Soup teacher hits f1_exact ≈ 0.91; the 0.880 floor leaves room for further compression without trivially passing.)
 
 **API contract:** only `p_exact_calibrated` (the temperature-scaled `softmax(logits/T)[Exact]`) matters to downstream. The other 3 class probs and `predicted_label` exist in the response schema for compatibility, but downstream consumers only look at `p_exact_calibrated`. You may drop or zero-fill the others if it buys speed; you may also drop the LGBM stack entirely (it is gone from the success criterion).
 
@@ -116,29 +118,29 @@ LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH \
 grep "^val/cls/" eval.log
 ```
 
-**Subset vs full val**: by default `eval_val.py` runs on a 10k uniform-random subset of the 76,048-row val split (deterministic, seed=0). Iteration time on a 4090: ~3-4 min. Estimated noise vs full val: micro_f1 ±0.005, macro_f1 ±0.013 (driven by Complement, the rarest class at 1.8% of val). This is fine for iteration since the floors (0.890 / 0.770) sit far enough from a healthy model that 0.013 noise won't flip a keep/discard decision in the typical case. **Before declaring the latency goal hit and stopping the loop, re-run with `--subset-rows 0` (full val, ~25 min) to confirm the floors hold on the canonical split.**
+**Subset vs full val**: by default `eval_val.py` runs on a 10k uniform-random subset of the 76,048-row val split (deterministic, seed=0). Iteration time on a 4090: ~3-4 min. Estimated noise on the binary `f1_exact` metric vs full val: ±0.003 (Exact is ~52 % of val, so the subset estimate is much tighter than the old macro_f1's ±0.013 — Complement, the noisy class, is no longer in the gate). **Before declaring the latency goal hit and stopping the loop, re-run with `--subset-rows 0` (full val) to confirm the floor holds on the canonical split.**
 
 **Only Lightning `.ckpt` is supported out of the box.** If you produce a non-Lightning artifact (ONNX, TensorRT, GPTQ-quantized state dict, distilled student saved with a different module), extend the `load_model` function in `eval_val.py` rather than writing a parallel script — the eval pipeline (split, subset draw, batching, metric) must stay identical across variants.
 
 ## Keep/discard rule
 
-The goal is two-sided: drive **latency p95 down** while keeping **(micro_f1, macro_f1) at or above their floors**. Track best-so-far for `latency_p95_ms` on the branch.
+The goal is two-sided: drive **latency p95 down** while keeping **`val/cls/f1_exact` at or above its floor (0.880)**. Track best-so-far for `latency_p95_ms` on the branch.
 
 A run is `keep` if **both**:
 
-1. Quality floors hold on the 10k subset: `micro_f1 ≥ 0.860` AND `macro_f1 ≥ 0.740` (with subset noise budget — see below).
-2. It Pareto-improves vs. branch tip on `(latency_p95_ms ↓, micro_f1 ↑, macro_f1 ↑)` — i.e. latency strictly improves and neither F1 regresses below the previous run beyond the subset noise floor (micro ~0.005, macro ~0.013), OR latency holds and at least one F1 strictly improves beyond noise.
+1. Quality floor holds on the 10k subset: `f1_exact ≥ 0.880` (with subset noise budget ±0.003 — see below).
+2. It Pareto-improves vs. branch tip on `(latency_p95_ms ↓, f1_exact ↑)` — i.e. latency strictly improves and `f1_exact` does not regress below the previous run beyond the ±0.003 subset noise floor, OR latency holds and `f1_exact` strictly improves beyond noise.
 
 Else: `discard` (`git reset --hard`).
 
 Special cases:
 - **Baseline run**: always `keep` regardless of whether it hits the targets — it sets the anchor.
-- **Floor violation** (any F1 below floor on the subset): `discard`, even if latency improved dramatically. If a candidate lands within ~0.005 micro / ~0.015 macro of the floor on the subset, re-run with `--subset-rows 0` (full val) before committing the discard — subset noise can flip a borderline call.
-- **Exploratory distill runs (20-min budget)**: floors are *not* enforced — 1 epoch of distillation almost never reaches the production floor, so applying the floor here would discard every candidate before we learn which configs trend best. Use status `keep-explore` and keep a 20-min distill row if **both**:
-  1. **Trajectory is improving** — val F1 (micro or macro) is monotone-up across the 4 val checkpoints during the run (or at minimum, the final val ≥ the second-to-last val). A flat or decreasing trajectory means more training won't help.
-  2. **End-of-budget metrics are within reach** — final val micro_f1 ≥ floor − 0.03 (i.e. ≥ 0.830) AND final val macro_f1 ≥ floor − 0.03 (i.e. ≥ 0.710). Outside this band, a longer run is unlikely to recover.
+- **Floor violation** (`f1_exact` below 0.880 on the subset): `discard`, even if latency improved dramatically. If a candidate lands within ~0.005 of the floor on the subset, re-run with `--subset-rows 0` (full val) before committing the discard — subset noise can flip a borderline call.
+- **Exploratory distill runs (20-min budget)**: floor is *not* enforced — 1 epoch of distillation almost never reaches the production floor, so applying the floor here would discard every candidate before we learn which configs trend best. Use status `keep-explore` and keep a 20-min distill row if **both**:
+  1. **Trajectory is improving** — `f1_exact` is monotone-up across the 4 val checkpoints during the run (or at minimum, the final val ≥ the second-to-last val). A flat or decreasing trajectory means more training won't help.
+  2. **End-of-budget metric is within reach** — final val `f1_exact ≥ 0.840` (floor − 0.04). Outside this band, a longer run is unlikely to recover.
   Otherwise `discard`. `keep-explore` rows are *inputs to the next sweep*, not production answers — only a longer "finalizer" run on the best `keep-explore` candidate enforces the real floor and qualifies as `keep`.
-- **Latency target met (≤ 2500 ms p95) and subset floors held**: re-run quality with `--subset-rows 0` (full val) to confirm. If full-val F1s also hold, the goal is met — but **keep iterating** for headroom (lower p95 = comfortable budget for traffic spikes, sequence-length variance, lower hosting cost).
+- **Latency target met (≤ 2500 ms p95) and subset floor held**: re-run quality with `--subset-rows 0` (full val) to confirm. If full-val `f1_exact` also holds, the goal is met — but **keep iterating** for headroom (lower p95 = comfortable budget for traffic spikes, sequence-length variance, lower hosting cost).
 - Improvements < 5 ms on p95 are within benchmark noise; treat them with skepticism (re-run the benchmark before committing as `keep`).
 
 ## What you CAN do
@@ -150,6 +152,7 @@ Special cases:
 - Use `torch.compile` / CUDA graphs / SDPA backend selection / FlashAttention freely.
 - Quantize: dynamic INT8, static INT8 with calibration on the train split, INT4 (GPTQ/AWQ), bf16/fp16 weights (not just autocast). Recalibrate temperature `T` afterwards if calibration drifts (re-fit by minimizing NLL on val per `manifest.json::calibration` recipe — this is allowed because `T` is a serving-time hyperparameter, not a model weight).
 - Distill: train a smaller student (e.g. `deepset/gelectra-base` ~110M, `xlm-roberta-base` ~278M, `microsoft/Multilingual-MiniLM-L12-H384` ~117M, `microsoft/mdeberta-v3-base`, or even a 6-layer pruned version of gelectra-large) against teacher logits from `soup.ckpt`. Standard recipe: KL divergence on softened logits + optional MSE on hidden states. The teacher's logits are computed once over the train split and cached.
+- **Binary-head distill** (recommended under the new floor): train the student with `Linear(hidden, 1)` instead of `Linear(hidden, 4)`, using BCE-with-logits on the Exact-vs-rest binary target plus optional KL on the teacher's softmax-on-Exact-channel. Removes the Complement-class collapse failure mode (which was the entire reason the 4-class distill plateaued at macro 0.72), aligns the loss surface with what `p_exact_calibrated` actually consumes, and typically converges faster. The teacher still emits 4 logits; squash them to a single Exact prob via softmax for the KL target.
 - Drop layers / heads from the teacher (structural pruning) and fine-tune to recover.
 - Drop the LGBM stack entirely — it's outside the success criterion.
 - Slim the API response schema if it helps (e.g. compute only `logit[EXACT]` instead of full 4-class softmax; though this is a tiny win).
@@ -195,23 +198,23 @@ commit	latency_p95_ms	latency_p50_ms	val_micro_f1	val_macro_f1	peak_vram_gb	stat
 1. git commit hash (short, 7 chars)
 2. p95 end-to-end `/rerank` latency in ms (e.g. `1547.3`) — `0.0` for crashes
 3. p50 end-to-end latency in ms (for context; not gating)
-4. `val/cls/micro_f1` (e.g. `0.8945`) — `0.0000` for crashes
-5. `val/cls/macro_f1` (e.g. `0.7723`) — `0.0000` for crashes
+4. `val/cls/micro_f1` (e.g. `0.8945`) — `0.0000` for crashes. Pre-2026-05-01 this was a gating metric; now informational only.
+5. `val/cls/macro_f1` (e.g. `0.7723`) — `0.0000` for crashes. Pre-2026-05-01 this was a gating metric; now informational only.
 6. peak VRAM in GB during the benchmark, `.1f`
-7. status: `keep`, `discard`, or `crash`
-8. short description of what this experiment tried
+7. status: `keep`, `discard`, `keep-explore`, or `crash`
+8. short description of what this experiment tried — **MUST include `f1_exact=X.XXXX`** for any non-crash row, since that's the actual gating number under the new floor. Example: `"+ binary-head distill 2h ... f1_exact=0.8924"`.
 
 Example:
 
 ```
 commit	latency_p95_ms	latency_p50_ms	val_micro_f1	val_macro_f1	peak_vram_gb	status	description
-a1b2c3d	1742.0	1690.5	0.8951	0.7782	7.8	keep	baseline (soup.ckpt, bf16-autocast, eager, 4090)
-b2c3d4e	1480.2	1455.1	0.8950	0.7780	7.6	keep	+ torch.compile(reduce-overhead) on encoder
-c3d4e5f	1390.7	1370.3	0.8947	0.7779	5.1	keep	+ fp16 weights (not just autocast)
-d4e5f6g	1180.4	1160.0	0.8920	0.7745	5.1	keep	+ INT8 dynamic quantization on Linear layers
-e5f6g7h	820.1	810.5	0.8943	0.7791	2.6	keep	distilled to gelectra-base + bf16 + compile + ONNX RT
+a1b2c3d	1742.0	1690.5	0.8951	0.7782	7.8	keep	baseline (soup.ckpt, bf16-autocast, eager, 4090); f1_exact=0.9134
+b2c3d4e	1480.2	1455.1	0.8950	0.7780	7.6	keep	+ torch.compile(reduce-overhead) on encoder; f1_exact=0.9131
+c3d4e5f	1390.7	1370.3	0.8947	0.7779	5.1	keep	+ fp16 weights (not just autocast); f1_exact=0.9128
+d4e5f6g	1180.4	1160.0	0.8920	0.7745	5.1	keep	+ INT8 dynamic quantization on Linear layers; f1_exact=0.9105
+e5f6g7h	820.1	810.5	0.8943	0.7791	2.6	keep	distilled to gelectra-base + bf16 + compile + ONNX RT; f1_exact=0.8997
 f6g7h8i	0.0	0.0	0.0000	0.0000	0.0	crash	tensorrt build failed: unsupported op TokenTypeIds
-g7h8i9j	1175.0	1158.0	0.8881	0.7702	5.1	discard	INT8 static (cal=1k) — micro_f1 below floor
+g7h8i9j	1175.0	1158.0	0.8881	0.7702	5.1	discard	INT8 static (cal=1k); f1_exact=0.8771 — below 0.880 floor
 ```
 
 Do **not** commit changes to `results.tsv` or `NOTES.md`. Those are for human review.
@@ -241,4 +244,4 @@ LOOP FOREVER:
 
 **Crashes**: typo, missing import, OOM at sub-batch boundary, ONNX op not supported, TRT build failure — use judgment. If it's a quick fix, fix and rerun. If the idea is fundamentally broken (e.g. INT4 + this attention impl just doesn't work on Ada), log `crash` and move on.
 
-**NEVER STOP**: once the experiment loop has begun, do NOT pause to ask the human if you should continue. The human might be asleep and expects you to continue *indefinitely* until manually stopped. You are autonomous. If you run out of ideas: re-read the in-scope files, read `NOTES.md`, run a profiler (`torch.profiler`, `nsys`, `nvprof`) and stare at the trace to find what's actually dominating the 1000-ms budget, try combining previous near-misses, swap base models for distillation, try different quantization schemes, look at the request-side overhead (JSON parse, pydantic validation, tokenizer single-threaded path) — those are sometimes 10–20 % of end-to-end at this batch size and entirely fixable. The loop runs until the human interrupts it, period.
+**NEVER STOP**: once the experiment loop has begun, do NOT pause to ask the human if you should continue. The human might be asleep and expects you to continue *indefinitely* until manually stopped. Do not print a "Final summary" — there is no end state until the goal is met or the human interrupts. You are autonomous. If you run out of ideas: re-read the in-scope files, read `NOTES.md`, run a profiler (`torch.profiler`, `nsys`, `nvprof`) and stare at the trace to find what's actually dominating the 2500-ms budget, try combining previous near-misses, swap base models for distillation (binary-head variant, see lever menu), try different quantization schemes, look at the request-side overhead (JSON parse, pydantic validation, tokenizer single-threaded path) — those are sometimes 10–20 % of end-to-end at this batch size and entirely fixable. The loop runs until the human interrupts it, period.
