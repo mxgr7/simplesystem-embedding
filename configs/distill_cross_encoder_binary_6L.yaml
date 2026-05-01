@@ -1,0 +1,28 @@
+defaults:
+  - model: distill_cross_encoder_binary_6L
+  - data: cross_encoder
+  - trainer: cross_encoder
+  - optimizer: adamw
+  - logger: mlflow
+  - _self_
+
+seed: 42
+log_level: WARNING
+
+trainer:
+  max_epochs: 4
+  max_time: "00:00:20:00"
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+  val_check_interval: 0.05
+  limit_val_batches: 0.1
+  monitor_metric: val/cls/f1_exact
+
+logger:
+  experiment_name: cross-encoder-inference
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: outputs/distill_binary_6L/${now:%Y-%m-%d}/${now:%H-%M-%S}
