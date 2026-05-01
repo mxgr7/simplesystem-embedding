@@ -361,22 +361,64 @@ def _materialise_chunk_streams(
         GROUP BY vendorId."$binary".base64, articleNumber
     """)
 
-    log.info("[chunk %d/%d] loading chunk-local raw_offers…", chunk_idx + 1, n_chunks)
-    con.execute(f"""
-        CREATE OR REPLACE TABLE raw_offers AS
-        SELECT * FROM {_src(offers_glob, RAW_OFFER_COLUMNS)}
-        WHERE {chunk_filter}
-    """)
+    # Fast path #2: detect pre-projected offer_projected.parquet next to
+    # the offers source. If found, skip raw_offers + the heavy projected
+    # CTE work entirely — just load the precomputed offer-derived columns.
+    offer_projected_path = None
+    if ".parquet" in offers_glob:
+        op = Path(offers_glob.split('*')[0].rstrip('/'))
+        base = op if op.name == 'offers.parquet' else (
+            op.parent if op.parent.name == 'offers.parquet' else None
+        )
+        if base is not None:
+            cand = base.parent / 'offer_projected.parquet' / f'chunk_{chunk_idx:04d}.parquet'
+            if cand.exists():
+                offer_projected_path = cand
 
-    log.info("[chunk %d/%d] building articles table…", chunk_idx + 1, n_chunks)
-    con.execute(f"CREATE OR REPLACE TABLE articles AS {_build_articles_sql(source='raw_grouped')}")
-    article_count = con.execute("SELECT count(*) FROM articles").fetchone()[0]
-    log.info("[chunk %d/%d] articles: %d rows", chunk_idx + 1, n_chunks, article_count)
+    if offer_projected_path is not None:
+        log.info("[chunk %d/%d] loading pre-projected offer_projected from %s…",
+                 chunk_idx + 1, n_chunks, offer_projected_path.name)
+        con.execute(f"""
+            CREATE OR REPLACE TABLE offer_projected AS
+            SELECT * FROM read_parquet('{offer_projected_path}')
+        """)
+        # raw_offers still needs to exist as a table because some downstream
+        # CTEs reference it indirectly (and to keep parity tests honest).
+        # Build it from the chunk's offer parquet — fast.
+        con.execute(f"""
+            CREATE OR REPLACE TABLE raw_offers AS
+            SELECT * FROM {_src(offers_glob, RAW_OFFER_COLUMNS)}
+            WHERE {chunk_filter}
+        """)
 
-    log.info("[chunk %d/%d] building offer_rows table…", chunk_idx + 1, n_chunks)
-    con.execute(f"CREATE OR REPLACE TABLE offer_rows AS {_build_offers_sql(source='raw_grouped')}")
-    offer_count = con.execute("SELECT count(*) FROM offer_rows").fetchone()[0]
-    log.info("[chunk %d/%d] offer_rows: %d rows", chunk_idx + 1, n_chunks, offer_count)
+        log.info("[chunk %d/%d] building articles table (op_grouped path)…",
+                 chunk_idx + 1, n_chunks)
+        con.execute(f"CREATE OR REPLACE TABLE articles AS {_build_articles_sql(source='op_grouped')}")
+        article_count = con.execute("SELECT count(*) FROM articles").fetchone()[0]
+        log.info("[chunk %d/%d] articles: %d rows", chunk_idx + 1, n_chunks, article_count)
+
+        log.info("[chunk %d/%d] building offer_rows table (op_grouped path)…",
+                 chunk_idx + 1, n_chunks)
+        con.execute(f"CREATE OR REPLACE TABLE offer_rows AS {_build_offers_sql(source='op_grouped')}")
+        offer_count = con.execute("SELECT count(*) FROM offer_rows").fetchone()[0]
+        log.info("[chunk %d/%d] offer_rows: %d rows", chunk_idx + 1, n_chunks, offer_count)
+    else:
+        log.info("[chunk %d/%d] loading chunk-local raw_offers…", chunk_idx + 1, n_chunks)
+        con.execute(f"""
+            CREATE OR REPLACE TABLE raw_offers AS
+            SELECT * FROM {_src(offers_glob, RAW_OFFER_COLUMNS)}
+            WHERE {chunk_filter}
+        """)
+
+        log.info("[chunk %d/%d] building articles table…", chunk_idx + 1, n_chunks)
+        con.execute(f"CREATE OR REPLACE TABLE articles AS {_build_articles_sql(source='raw_grouped')}")
+        article_count = con.execute("SELECT count(*) FROM articles").fetchone()[0]
+        log.info("[chunk %d/%d] articles: %d rows", chunk_idx + 1, n_chunks, article_count)
+
+        log.info("[chunk %d/%d] building offer_rows table…", chunk_idx + 1, n_chunks)
+        con.execute(f"CREATE OR REPLACE TABLE offer_rows AS {_build_offers_sql(source='raw_grouped')}")
+        offer_count = con.execute("SELECT count(*) FROM offer_rows").fetchone()[0]
+        log.info("[chunk %d/%d] offer_rows: %d rows", chunk_idx + 1, n_chunks, offer_count)
 
     return article_count, offer_count
 

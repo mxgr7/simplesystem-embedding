@@ -624,7 +624,13 @@ projected AS (
             )
         ) AS customer_article_numbers
     FROM flat
-),
+)"""
+
+
+# Finalized CTE — coalesces nullables + filters NULL price entries. Reads
+# from any `projected` CTE that emits the canonical column shape (works
+# with `_PROJECTION_CTE_SQL` and `_PROJECTION_FROM_OP_CTE_SQL` alike).
+_FINALIZED_CTE_SQL = """
 finalized AS (
     SELECT
         id, "name", manufacturerName, ean, article_number, vendor_id,
@@ -876,29 +882,282 @@ with_hash AS (
 )"""
 
 
+# Offer-derived precomputation. Reads `raw_offers` directly (no JOINs to
+# pricings/markers/cans), produces a wide per-offer row that contains
+# every column that does NOT depend on the JOIN. Includes:
+#   - join keys (vk, ak) for downstream chunk-time JOINs
+#   - article_hash (computable from offer-only fields)
+#   - the raw inline `pricings.{open,closed}` STRUCTs (carry-through; the
+#     chunk-time projection passes them through `project_one_pricing`
+#     alongside the joined pricings)
+#   - inline_can_pair: the offer-inline customerArticleNumber + its
+#     catalogVersionId (carry-through; UNIONed at chunk-time with joined
+#     cans)
+#
+# Build once via `scripts/build_offer_projected.py`, write to
+# `offer_projected.parquet/chunk_KKKK.parquet`. Per-chunk indexer reads
+# the chunk's parquet and skips the heavy `_PROJECTION_CTE_SQL` work.
+_OFFER_PROJECTED_BUILD_SELECT_SQL = """
+WITH offer_derived AS (
+    SELECT
+        o.vendorId."$binary".base64 AS vk,
+        o.articleNumber AS ak,
+
+        -- ---- PK + identifiers ----
+        uuid_str(o.vendorId) AS vendor_id,
+        o.articleNumber AS article_number,
+        uuid_str(o.vendorId) || ':' || b64url_no_pad(o.articleNumber) AS id,
+
+        -- ---- article-level retrieval / display ----
+        COALESCE(o."offer".offerParams."name", '') AS "name",
+        COALESCE(o."offer".offerParams.manufacturerName, '') AS manufacturerName,
+        COALESCE(o."offer".offerParams.ean, '') AS ean,
+
+        -- ---- catalog version ----
+        CASE
+            WHEN o.catalogVersionId IS NULL THEN []::VARCHAR[]
+            ELSE [uuid_str(o.catalogVersionId)]
+        END AS catalog_version_ids,
+
+        -- ---- delivery ----
+        CAST(COALESCE(unwrap_int(o."offer".offerParams.deliveryTime), 0) AS INTEGER) AS delivery_time_days_max,
+
+        -- ---- eClass / S2Class hierarchies ----
+        COALESCE(
+            list_transform(
+                json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_5_1')::JSON[],
+                j -> CAST(unwrap_int(j) AS INTEGER)
+            ),
+            []::INTEGER[]
+        ) AS eclass5_code,
+        COALESCE(
+            list_transform(
+                json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_7_1')::JSON[],
+                j -> CAST(unwrap_int(j) AS INTEGER)
+            ),
+            []::INTEGER[]
+        ) AS eclass7_code,
+        COALESCE(
+            list_transform(
+                json_extract(o."offer".offerParams.eclassGroups::JSON, '$.S2CLASS')::JSON[],
+                j -> CAST(unwrap_int(j) AS INTEGER)
+            ),
+            []::INTEGER[]
+        ) AS s2class_code,
+
+        -- ---- relationships ----
+        list_slice(COALESCE(o."offer".relatedArticleNumbers.accessoryFor, []::VARCHAR[]), 1, 4096) AS relationship_accessory_for,
+        list_slice(COALESCE(o."offer".relatedArticleNumbers.sparePartFor, []::VARCHAR[]), 1, 4096) AS relationship_spare_part_for,
+        list_slice(COALESCE(o."offer".relatedArticleNumbers.similarTo,    []::VARCHAR[]), 1, 4096) AS relationship_similar_to,
+
+        -- ---- categories: per-depth dedup ----
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 1
+            ),
+            cp -> encode_category_path(cp.elements[1:1])
+        )), []::VARCHAR[]) AS category_l1,
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 2
+            ),
+            cp -> encode_category_path(cp.elements[1:2])
+        )), []::VARCHAR[]) AS category_l2,
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 3
+            ),
+            cp -> encode_category_path(cp.elements[1:3])
+        )), []::VARCHAR[]) AS category_l3,
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 4
+            ),
+            cp -> encode_category_path(cp.elements[1:4])
+        )), []::VARCHAR[]) AS category_l4,
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 5
+            ),
+            cp -> encode_category_path(cp.elements[1:5])
+        )), []::VARCHAR[]) AS category_l5,
+
+        -- ---- features ----
+        COALESCE(flatten(list_transform(
+            COALESCE(o."offer".offerParams.features,
+                     []::STRUCT("name" VARCHAR, "values" VARCHAR[], unit VARCHAR, description VARCHAR)[]),
+            f -> list_transform(
+                list_filter(COALESCE(f."values", []::VARCHAR[]), v -> NOT contains(v, '=')),
+                v -> f."name" || '=' || v
+            )
+        )), []::VARCHAR[]) AS features,
+
+        -- ---- carry-through: raw inline pricings (used at chunk-time) ----
+        o."offer".pricings.open AS inline_pricings_open,
+        o."offer".pricings.closed AS inline_pricings_closed,
+
+        -- ---- carry-through: offer-inline can pair (UNIONed at chunk-time
+        -- with joined cans) ----
+        CASE
+            WHEN o."offer".offerParams.customerArticleNumber IS NOT NULL
+             AND o."offer".offerParams.customerArticleNumber <> ''
+             AND o.catalogVersionId IS NOT NULL
+            THEN {
+                'value': o."offer".offerParams.customerArticleNumber,
+                'version_id': uuid_str(o.catalogVersionId)
+            }
+            ELSE NULL
+        END AS inline_can_pair
+    FROM raw_offers o
+)
+SELECT
+    *,
+    -- article_hash references the per-row computed columns above. Computed
+    -- in a second SELECT layer so the column references are valid.
+    compute_article_hash(
+        "name", manufacturerName,
+        category_l1, category_l2, category_l3, category_l4, category_l5,
+        eclass5_code, eclass7_code, s2class_code
+    ) AS article_hash
+FROM offer_derived
+"""
+
+
+# Chunk-time projection that reuses precomputed offer_projected. Drop-in
+# replacement for `_PROJECTION_CTE_SQL` when offer_projected is available.
+# Reads from a table named `offer_projected` (operator's responsibility to
+# create) and JOINs to chunk-local pricings_grouped / markers_grouped /
+# cans_grouped to compute the 4 JOIN-dependent columns:
+#     prices_raw, core_marker_enabled_sources_raw,
+#     core_marker_disabled_sources_raw, customer_article_numbers
+# Output column shape matches `_PROJECTION_CTE_SQL` exactly so downstream
+# `finalized` + `with_hash` + article/offer CTEs are unchanged.
+_PROJECTION_FROM_OP_CTE_SQL = """
+projected AS (
+    SELECT
+        op.vendor_id, op.article_number, op.id,
+        op."name", op.manufacturerName, op.ean,
+        op.catalog_version_ids, op.delivery_time_days_max,
+        op.eclass5_code, op.eclass7_code, op.s2class_code,
+        op.relationship_accessory_for, op.relationship_spare_part_for, op.relationship_similar_to,
+        op.category_l1, op.category_l2, op.category_l3, op.category_l4, op.category_l5,
+        op.features,
+
+        -- prices_raw: concat offer-inline (open + closed) + joined pricings
+        list_concat(
+            COALESCE([project_one_pricing(op.inline_pricings_open)], []),
+            COALESCE([project_one_pricing(op.inline_pricings_closed)], []),
+            COALESCE(
+                (SELECT list(project_one_pricing(jp.pricingDetails))
+                 FROM unnest(COALESCE(p.pricings_list, []::STRUCT(articleNumber VARCHAR, vendorId STRUCT("$binary" STRUCT(base64 VARCHAR, subType VARCHAR)), pricingDetails STRUCT(sourcePriceListId STRUCT("$binary" STRUCT(base64 VARCHAR, subType VARCHAR)), "type" VARCHAR, prices STRUCT(staggeredPrices STRUCT(minQuantity VARCHAR, price VARCHAR)[], currencyCode VARCHAR), dailyPrice BOOLEAN, priceQuantity VARCHAR))[])) AS t(jp)),
+                []
+            )
+        ) AS prices_raw,
+
+        -- core_marker_enabled / disabled sources from joined markers
+        (SELECT list(distinct uuid_str(mk.coreArticleListSourceId))
+         FROM unnest(COALESCE(m.markers_list, []::STRUCT(articleNumber VARCHAR, vendorId STRUCT("$binary" STRUCT(base64 VARCHAR, subType VARCHAR)), coreArticleListSourceId STRUCT("$binary" STRUCT(base64 VARCHAR, subType VARCHAR)), coreArticleMarker BOOLEAN)[])) AS t(mk)
+         WHERE mk.coreArticleListSourceId IS NOT NULL AND mk.coreArticleMarker = true
+        ) AS core_marker_enabled_sources_raw,
+        (SELECT list(distinct uuid_str(mk.coreArticleListSourceId))
+         FROM unnest(COALESCE(m.markers_list, []::STRUCT(articleNumber VARCHAR, vendorId STRUCT("$binary" STRUCT(base64 VARCHAR, subType VARCHAR)), coreArticleListSourceId STRUCT("$binary" STRUCT(base64 VARCHAR, subType VARCHAR)), coreArticleMarker BOOLEAN)[])) AS t(mk)
+         WHERE mk.coreArticleListSourceId IS NOT NULL AND mk.coreArticleMarker = false
+        ) AS core_marker_disabled_sources_raw,
+
+        -- customer_article_numbers: UNION offer-inline (carried as
+        -- op.inline_can_pair) with joined cans, group by value.
+        (
+            WITH all_pairs AS (
+                SELECT can.customerArticleNumber AS value, uuid_str(can.customerArticleNumbersListVersionId) AS version_id
+                FROM unnest(COALESCE(c.cans_list, []::STRUCT(articleNumber VARCHAR, vendorId STRUCT("$binary" STRUCT(base64 VARCHAR, subType VARCHAR)), customerArticleNumbersListVersionId STRUCT("$binary" STRUCT(base64 VARCHAR, subType VARCHAR)), customerArticleNumber VARCHAR)[])) AS t(can)
+                WHERE can.customerArticleNumber IS NOT NULL
+                  AND can.customerArticleNumber <> ''
+                  AND can.customerArticleNumbersListVersionId IS NOT NULL
+                UNION ALL
+                SELECT op.inline_can_pair.value, op.inline_can_pair.version_id
+                WHERE op.inline_can_pair IS NOT NULL
+            )
+            SELECT list({'value': value, 'version_ids': version_ids} ORDER BY value)
+            FROM (
+                SELECT value, list(distinct version_id ORDER BY version_id) AS version_ids
+                FROM all_pairs
+                GROUP BY value
+            )
+        ) AS customer_article_numbers
+    FROM offer_projected op
+    LEFT JOIN pricings_grouped p ON p.vk = op.vk AND p.ak = op.ak
+    LEFT JOIN markers_grouped m ON m.vk = op.vk AND m.ak = op.ak
+    LEFT JOIN cans_grouped c ON c.vk = op.vk AND c.ak = op.ak
+)"""
+
+
+def offer_projected_build_sql(*, source_table_or_glob: str) -> str:
+    """Render the SELECT that produces offer_projected output.
+
+    `source_table_or_glob` is either:
+      - a DuckDB table name (e.g. 'raw_offers'), or
+      - a parquet path/glob (e.g. '/path/to/offers.parquet/chunk_0000.parquet'),
+        in which case it's wrapped in `read_parquet(...)`.
+    """
+    if source_table_or_glob.endswith(".parquet") or "*.parquet" in source_table_or_glob:
+        from_clause = f"read_parquet('{source_table_or_glob}') o"
+    else:
+        from_clause = f"{source_table_or_glob} o"
+    # Substitute `raw_offers o` with the chosen FROM clause.
+    return _OFFER_PROJECTED_BUILD_SELECT_SQL.replace("FROM raw_offers o", f"FROM {from_clause}")
+
+
 def _resolve_flat_cte(source: str) -> str:
-    """`source` ∈ {'wrapper', 'raw', 'raw_grouped'}.
+    """`source` ∈ {'wrapper', 'raw', 'raw_grouped', 'op_grouped'}.
 
     - 'wrapper': single-record fixture path.
     - 'raw': inline aggregator + JOIN — heavy memory, kept for parity tests.
     - 'raw_grouped': assumes pricings_grouped/markers_grouped/cans_grouped
       already exist as tables (call `materialise_grouped_tables(con)` first).
-      Production path — drops the inline aggregator's hash-table memory."""
+      Production path — drops the inline aggregator's hash-table memory.
+    - 'op_grouped': assumes a precomputed `offer_projected` table exists
+      (loaded from `offer_projected.parquet/chunk_K.parquet`) plus the
+      chunk-local pricings_grouped/markers_grouped/cans_grouped. Skips
+      the entire `flat` JOIN + heavy `_PROJECTION_CTE_SQL` work."""
     if source == "wrapper":
         return _FLAT_FROM_WRAPPER_SQL
     if source == "raw":
         return _FLAT_FROM_RAW_COLLECTIONS_SQL
     if source == "raw_grouped":
         return _FLAT_FROM_GROUPED_TABLES_SQL
+    if source == "op_grouped":
+        return ""  # no flat CTE needed; projected reads from offer_projected directly
     raise ValueError(f"unknown source: {source}")
+
+
+def _resolve_projection_cte(source: str) -> str:
+    """Pick the right `projected` CTE for the given source mode."""
+    if source == "op_grouped":
+        return _PROJECTION_FROM_OP_CTE_SQL
+    return _PROJECTION_CTE_SQL
+
+
+def _resolve_with_hash_cte(source: str) -> str:
+    """Pick the right `with_hash` CTE. We always recompute article_hash
+    from finalized's columns rather than JOINing back to offer_projected
+    by id — the per-row sha256 (~500 MB/s/core) is much cheaper than a
+    3M×3M hash join, and finalized already carries every input the
+    macro needs (name, mfg, categories, eclass codes)."""
+    return _WITH_HASH_CTE_SQL
 
 
 def _build_flat_rows_sql(*, source: str = "wrapper") -> str:
     """Emit projected flat rows. See `_resolve_flat_cte` for `source` modes."""
     flat_cte = _resolve_flat_cte(source)
+    projection_cte = _resolve_projection_cte(source)
     return f"""
-WITH {flat_cte.lstrip()},
-{_PROJECTION_CTE_SQL.lstrip()}
+WITH {(flat_cte + ',') if flat_cte else ''}
+{projection_cte.lstrip()}
 SELECT * FROM finalized;
 """
 
@@ -906,10 +1165,13 @@ SELECT * FROM finalized;
 def _build_articles_sql(*, source: str = "wrapper") -> str:
     """Emit one article row per unique hash."""
     flat_cte = _resolve_flat_cte(source)
+    projection_cte = _resolve_projection_cte(source)
+    with_hash_cte = _resolve_with_hash_cte(source)
     return f"""
-WITH {flat_cte.lstrip()},
-{_PROJECTION_CTE_SQL.lstrip()},
-{_WITH_HASH_CTE_SQL.lstrip()},
+WITH {(flat_cte + ',') if flat_cte else ''}
+{projection_cte.lstrip()},
+{_FINALIZED_CTE_SQL.lstrip()},
+{with_hash_cte.lstrip()},
 {_ARTICLES_CTE_SQL.lstrip()}
 SELECT * FROM articles;
 """
@@ -918,10 +1180,13 @@ SELECT * FROM articles;
 def _build_offers_sql(*, source: str = "wrapper") -> str:
     """Emit one offer row per finalized projected row."""
     flat_cte = _resolve_flat_cte(source)
+    projection_cte = _resolve_projection_cte(source)
+    with_hash_cte = _resolve_with_hash_cte(source)
     return f"""
-WITH {flat_cte.lstrip()},
-{_PROJECTION_CTE_SQL.lstrip()},
-{_WITH_HASH_CTE_SQL.lstrip()},
+WITH {(flat_cte + ',') if flat_cte else ''}
+{projection_cte.lstrip()},
+{_FINALIZED_CTE_SQL.lstrip()},
+{with_hash_cte.lstrip()},
 {_OFFERS_CTE_SQL.lstrip()}
 SELECT * FROM offers;
 """
