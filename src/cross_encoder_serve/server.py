@@ -181,7 +181,7 @@ def _load_model():
         ensemble_w=float(os.environ.get("ENSEMBLE_W", DEFAULT_ENSEMBLE_W)),
         device=os.environ.get("DEVICE"),
         autocast_dtype=os.environ.get("SERVE_DTYPE"),
-        max_forward_batch=int(os.environ.get("SERVE_MAX_BATCH", "256")),
+        max_forward_batch=int(os.environ.get("SERVE_MAX_BATCH", "128")),
         compile=os.environ.get("SERVE_COMPILE", "1") == "1",
         compile_mode=os.environ.get("SERVE_COMPILE_MODE", "max-autotune"),
         int8=os.environ.get("SERVE_INT8", "0") == "1",

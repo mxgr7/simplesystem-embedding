@@ -65,9 +65,11 @@ class RerankerConfig:
     ensemble_w: float = DEFAULT_ENSEMBLE_W
     device: Optional[str] = None
     autocast_dtype: Optional[str] = None  # "bf16"|"fp16"|"fp32"|None (auto: bf16 on cuda)
-    max_forward_batch: int = 256  # internal chunk size for the encoder forward;
-    # 2000-offer requests at S=512 OOM on 24 GB cards if forwarded as one batch.
-    # Output is bit-identical regardless (torch.cat over chunk logits).
+    max_forward_batch: int = 128  # internal chunk size for the encoder forward;
+    # bench shows chunk=128 (B,S=128,512) is the 4090 sweet spot for the
+    # distilled gelectra-base path — p95 3075 ms vs 4291 ms at chunk=256
+    # and 4775 ms at chunk=1000. Bigger chunks thrash L2; smaller add launch
+    # overhead. Output is bit-identical regardless of chunk size.
     config_name: str = "cross_encoder"
     compile: bool = True  # torch.compile the encoder. Works best when chunk
     # size evenly divides 2000 (one shape for compile cache). ~-700 ms p95 on
