@@ -54,9 +54,11 @@ CREATE OR REPLACE MACRO uuid_str(b) AS
     CAST(CAST(from_base64(b['$binary']['base64']) AS UUID) AS VARCHAR);
 
 -- Base64URL with no padding — used for the article_number portion of the PK.
--- Mirrors `_b64url_no_pad`.
+-- Mirrors `_b64url_no_pad`. `encode()` returns the UTF-8 byte representation
+-- as BLOB (vs `s::BLOB` which requires ASCII or hex-escaped); production
+-- article_numbers contain non-ASCII characters like Ø in some catalogs.
 CREATE OR REPLACE MACRO b64url_no_pad(s) AS
-    rtrim(replace(replace(to_base64(s::BLOB), '+', '-'), '/', '_'), '=');
+    rtrim(replace(replace(to_base64(encode(s)), '+', '-'), '/', '_'), '=');
 
 -- Canonical category-path encoding with `¦` separator and `|` escape.
 -- Mirrors `_encode_path` + `CategoryPath.java`.
@@ -360,45 +362,59 @@ flat AS (
 # article numbers with embedded slashes / spaces / unicode — DuckDB's
 # default VARCHAR equality is byte-exact, which matches the legacy
 # Mongo string equality.
-_FLAT_FROM_RAW_COLLECTIONS_SQL = """
-pricings_grouped AS (
-    SELECT
-        vendorId."$binary".base64 AS vk,
-        articleNumber AS ak,
-        list(struct_pack(
-            articleNumber := articleNumber,
-            vendorId := vendorId,
-            pricingDetails := pricingDetails
-        )) AS pricings_list
-    FROM raw_pricings
-    GROUP BY vendorId."$binary".base64, articleNumber
-),
-markers_grouped AS (
-    SELECT
-        vendorId."$binary".base64 AS vk,
-        articleNumber AS ak,
-        list(struct_pack(
-            articleNumber := articleNumber,
-            vendorId := vendorId,
-            coreArticleListSourceId := coreArticleListSourceId,
-            coreArticleMarker := coreArticleMarker
-        )) AS markers_list
-    FROM raw_markers
-    GROUP BY vendorId."$binary".base64, articleNumber
-),
-cans_grouped AS (
-    SELECT
-        vendorId."$binary".base64 AS vk,
-        articleNumber AS ak,
-        list(struct_pack(
-            articleNumber := articleNumber,
-            vendorId := vendorId,
-            customerArticleNumbersListVersionId := customerArticleNumbersListVersionId,
-            customerArticleNumber := customerArticleNumber
-        )) AS cans_list
-    FROM raw_cans
-    GROUP BY vendorId."$binary".base64, articleNumber
-),
+# Standalone SELECT statements for pre-materialising the grouped tables.
+# Each runs as its own CREATE TABLE so the aggregator state from one
+# doesn't pile onto the next — DuckDB releases the per-CTAS memory
+# between calls. With 1.2B pricings GROUP BY (vendor, article), holding
+# the aggregator state in-memory inside the same query as the downstream
+# JOIN was OOM'ing at 100+ GB; splitting it lets each step use its full
+# memory budget independently and frees `raw_pricings` between them.
+_PRICINGS_GROUPED_SELECT_SQL = """
+SELECT
+    vendorId."$binary".base64 AS vk,
+    articleNumber AS ak,
+    list(struct_pack(
+        articleNumber := articleNumber,
+        vendorId := vendorId,
+        pricingDetails := pricingDetails
+    )) AS pricings_list
+FROM raw_pricings
+GROUP BY vendorId."$binary".base64, articleNumber
+"""
+
+_MARKERS_GROUPED_SELECT_SQL = """
+SELECT
+    vendorId."$binary".base64 AS vk,
+    articleNumber AS ak,
+    list(struct_pack(
+        articleNumber := articleNumber,
+        vendorId := vendorId,
+        coreArticleListSourceId := coreArticleListSourceId,
+        coreArticleMarker := coreArticleMarker
+    )) AS markers_list
+FROM raw_markers
+GROUP BY vendorId."$binary".base64, articleNumber
+"""
+
+_CANS_GROUPED_SELECT_SQL = """
+SELECT
+    vendorId."$binary".base64 AS vk,
+    articleNumber AS ak,
+    list(struct_pack(
+        articleNumber := articleNumber,
+        vendorId := vendorId,
+        customerArticleNumbersListVersionId := customerArticleNumbersListVersionId,
+        customerArticleNumber := customerArticleNumber
+    )) AS cans_list
+FROM raw_cans
+GROUP BY vendorId."$binary".base64, articleNumber
+"""
+
+# `flat` CTE that JOINs raw_offers against the pre-materialised
+# {pricings,markers,cans}_grouped tables. No inline aggregation —
+# downstream queries that use this assume `materialise_grouped_tables(con)`
+# has already run.
+_FLAT_FROM_GROUPED_TABLES_SQL = """
 flat AS (
     SELECT
         struct_pack(
@@ -420,6 +436,16 @@ flat AS (
     LEFT JOIN cans_grouped c
         ON c.vk = o.vendorId."$binary".base64 AND c.ak = o.articleNumber
 )"""
+
+# Original inline-CTE form. Used only by the legacy single-CTAS path
+# (kept for parity tests + the wrapper-JSON path). Production
+# (`indexer.bulk._materialise_streams`) calls `materialise_grouped_tables`
+# first and then uses `_FLAT_FROM_GROUPED_TABLES_SQL` instead.
+_FLAT_FROM_RAW_COLLECTIONS_SQL = f"""
+pricings_grouped AS ({_PRICINGS_GROUPED_SELECT_SQL.strip()}),
+markers_grouped AS ({_MARKERS_GROUPED_SELECT_SQL.strip()}),
+cans_grouped AS ({_CANS_GROUPED_SELECT_SQL.strip()}),
+{_FLAT_FROM_GROUPED_TABLES_SQL.lstrip()}"""
 
 
 # Per-offer projection CTE (`projected` + `finalized`). Reads from a
@@ -482,9 +508,15 @@ projected AS (
 
         -- ---- relationships ----
         -- Schema is pinned to VARCHAR[] for all three (see RECORDS_ELEMENT_TYPE).
-        COALESCE(inner_offer.relatedArticleNumbers.accessoryFor, []::VARCHAR[]) AS relationship_accessory_for,
-        COALESCE(inner_offer.relatedArticleNumbers.sparePartFor, []::VARCHAR[]) AS relationship_spare_part_for,
-        COALESCE(inner_offer.relatedArticleNumbers.similarTo, []::VARCHAR[]) AS relationship_similar_to,
+        -- Truncate at 4096 = Milvus 2.6's hard Array max_capacity ceiling.
+        -- Empirically `accessoryFor` hits 3175 in a 10-shard prod sample
+        -- and almost certainly exceeds 4096 at full catalog scope on the
+        -- pathological tail. Truncation here keeps the bulk_insert path
+        -- crash-free; relationship-search recall on those rows is
+        -- bounded but the schema cap is the binding constraint anyway.
+        list_slice(COALESCE(inner_offer.relatedArticleNumbers.accessoryFor, []::VARCHAR[]), 1, 4096) AS relationship_accessory_for,
+        list_slice(COALESCE(inner_offer.relatedArticleNumbers.sparePartFor, []::VARCHAR[]), 1, 4096) AS relationship_spare_part_for,
+        list_slice(COALESCE(inner_offer.relatedArticleNumbers.similarTo,    []::VARCHAR[]), 1, 4096) AS relationship_similar_to,
 
         -- ---- categories: emit one entry per depth (1..5), de-duped ----
         -- For each path, produce its prefix paths up to min(len, 5).
@@ -691,19 +723,29 @@ article_base AS (
         -- sorted distinct article_numbers, joined by single space, empty
         -- segments dropped (matches `_canon` and the Python aggregator's
         -- `" ".join(p for p in [...] if p)`).
-        array_to_string(
-            list_filter(
-                list_concat(
-                    CASE WHEN any_value("name") IS NOT NULL AND any_value("name") <> ''
-                         THEN [any_value("name")] ELSE []::VARCHAR[] END,
-                    CASE WHEN any_value(manufacturerName) IS NOT NULL AND any_value(manufacturerName) <> ''
-                         THEN [any_value(manufacturerName)] ELSE []::VARCHAR[] END,
-                    COALESCE(array_sort(list(distinct ean) FILTER (WHERE ean IS NOT NULL AND ean <> '')), []::VARCHAR[]),
-                    COALESCE(array_sort(list(distinct article_number) FILTER (WHERE article_number IS NOT NULL AND article_number <> '')), []::VARCHAR[])
+        --
+        -- Truncated to 8192 chars to fit Milvus collection schema's
+        -- VARCHAR(8192) cap. Production data has rare articles whose
+        -- aggregated EAN/article_number unions blow past 8 KB; Milvus
+        -- bulk_insert rejects the whole batch on first overflow row.
+        -- Truncate to safe length; BM25 already de-prioritises long
+        -- token salads so the tail has near-zero IDF weight anyway.
+        substr(
+            array_to_string(
+                list_filter(
+                    list_concat(
+                        CASE WHEN any_value("name") IS NOT NULL AND any_value("name") <> ''
+                             THEN [any_value("name")] ELSE []::VARCHAR[] END,
+                        CASE WHEN any_value(manufacturerName) IS NOT NULL AND any_value(manufacturerName) <> ''
+                             THEN [any_value(manufacturerName)] ELSE []::VARCHAR[] END,
+                        COALESCE(array_sort(list(distinct ean) FILTER (WHERE ean IS NOT NULL AND ean <> '')), []::VARCHAR[]),
+                        COALESCE(array_sort(list(distinct article_number) FILTER (WHERE article_number IS NOT NULL AND article_number <> '')), []::VARCHAR[])
+                    ),
+                    x -> x IS NOT NULL AND x <> ''
                 ),
-                x -> x IS NOT NULL AND x <> ''
+                ' '
             ),
-            ' '
+            1, 8192
         ) AS text_codes
     FROM with_hash
     GROUP BY article_hash
@@ -834,12 +876,26 @@ with_hash AS (
 )"""
 
 
+def _resolve_flat_cte(source: str) -> str:
+    """`source` ∈ {'wrapper', 'raw', 'raw_grouped'}.
+
+    - 'wrapper': single-record fixture path.
+    - 'raw': inline aggregator + JOIN — heavy memory, kept for parity tests.
+    - 'raw_grouped': assumes pricings_grouped/markers_grouped/cans_grouped
+      already exist as tables (call `materialise_grouped_tables(con)` first).
+      Production path — drops the inline aggregator's hash-table memory."""
+    if source == "wrapper":
+        return _FLAT_FROM_WRAPPER_SQL
+    if source == "raw":
+        return _FLAT_FROM_RAW_COLLECTIONS_SQL
+    if source == "raw_grouped":
+        return _FLAT_FROM_GROUPED_TABLES_SQL
+    raise ValueError(f"unknown source: {source}")
+
+
 def _build_flat_rows_sql(*, source: str = "wrapper") -> str:
-    """Emit projected flat rows. `source='wrapper'` reads the
-    wrapper-JSON `raw` table (parity tests, dev fixtures); `source='raw'`
-    reads the 4 `raw_offers` / `raw_pricings` / `raw_markers` / `raw_cans`
-    tables (production S3 path)."""
-    flat_cte = _FLAT_FROM_WRAPPER_SQL if source == "wrapper" else _FLAT_FROM_RAW_COLLECTIONS_SQL
+    """Emit projected flat rows. See `_resolve_flat_cte` for `source` modes."""
+    flat_cte = _resolve_flat_cte(source)
     return f"""
 WITH {flat_cte.lstrip()},
 {_PROJECTION_CTE_SQL.lstrip()}
@@ -849,7 +905,7 @@ SELECT * FROM finalized;
 
 def _build_articles_sql(*, source: str = "wrapper") -> str:
     """Emit one article row per unique hash."""
-    flat_cte = _FLAT_FROM_WRAPPER_SQL if source == "wrapper" else _FLAT_FROM_RAW_COLLECTIONS_SQL
+    flat_cte = _resolve_flat_cte(source)
     return f"""
 WITH {flat_cte.lstrip()},
 {_PROJECTION_CTE_SQL.lstrip()},
@@ -861,7 +917,7 @@ SELECT * FROM articles;
 
 def _build_offers_sql(*, source: str = "wrapper") -> str:
     """Emit one offer row per finalized projected row."""
-    flat_cte = _FLAT_FROM_WRAPPER_SQL if source == "wrapper" else _FLAT_FROM_RAW_COLLECTIONS_SQL
+    flat_cte = _resolve_flat_cte(source)
     return f"""
 WITH {flat_cte.lstrip()},
 {_PROJECTION_CTE_SQL.lstrip()},
@@ -869,6 +925,39 @@ WITH {flat_cte.lstrip()},
 {_OFFERS_CTE_SQL.lstrip()}
 SELECT * FROM offers;
 """
+
+
+def materialise_grouped_tables(con) -> tuple[int, int, int]:
+    """Pre-materialise pricings_grouped, markers_grouped, cans_grouped as
+    actual tables (not inline CTEs). Returns the row counts.
+
+    Each CTAS runs separately so the per-aggregator hash-table state is
+    freed before the next runs. Drops the corresponding raw_* table after
+    its grouped table is built — for pricings this saves ~30 GB of
+    memory + spill since raw_pricings (1.2B rows) is no longer needed
+    once pricings_grouped (159M rows) exists."""
+    import logging
+    log = logging.getLogger("indexer.duckdb")
+
+    log.info("Materialising pricings_grouped from raw_pricings (1.2B rows → ~159M)…")
+    con.execute(f"CREATE OR REPLACE TABLE pricings_grouped AS {_PRICINGS_GROUPED_SELECT_SQL.strip()}")
+    p_n = con.execute("SELECT count(*) FROM pricings_grouped").fetchone()[0]
+    log.info("  pricings_grouped: %d rows", p_n)
+    con.execute("DROP TABLE raw_pricings")
+
+    log.info("Materialising markers_grouped from raw_markers…")
+    con.execute(f"CREATE OR REPLACE TABLE markers_grouped AS {_MARKERS_GROUPED_SELECT_SQL.strip()}")
+    m_n = con.execute("SELECT count(*) FROM markers_grouped").fetchone()[0]
+    log.info("  markers_grouped: %d rows", m_n)
+    con.execute("DROP TABLE raw_markers")
+
+    log.info("Materialising cans_grouped from raw_cans…")
+    con.execute(f"CREATE OR REPLACE TABLE cans_grouped AS {_CANS_GROUPED_SELECT_SQL.strip()}")
+    c_n = con.execute("SELECT count(*) FROM cans_grouped").fetchone()[0]
+    log.info("  cans_grouped: %d rows", c_n)
+    con.execute("DROP TABLE raw_cans")
+
+    return p_n, m_n, c_n
 
 
 def load_raw_collections(
@@ -897,12 +986,27 @@ def load_raw_collections(
         ("raw_cans",     cans_glob,     RAW_CAN_COLUMNS),
     ]
     for table_name, glob, columns in schemas:
-        con.execute(
-            f"CREATE OR REPLACE TABLE {table_name} AS "
-            "SELECT * FROM read_json(?, format='newline_delimited', "
-            "maximum_object_size=?, columns=?)",
-            [glob, maximum_object_size, columns],
-        )
+        # Auto-dispatch on file extension. Parquet is preferred for
+        # production runs — DuckDB parses parquet column-parallel and
+        # zero-copy, vs JSON which is per-file single-threaded. With 4116
+        # pricings shards on a shared NVMe, parquet cuts raw-load wall
+        # from ~25 min (gzip + JSON parse, disk-I/O bound) to ~3 min.
+        # Parity: column shape is preserved across both formats because
+        # the parquet was originally written from the JSON source via
+        # `scripts/convert_source_to_parquet.py` with the same column set.
+        if ".parquet" in glob:
+            con.execute(
+                f"CREATE OR REPLACE TABLE {table_name} AS "
+                "SELECT * FROM read_parquet(?)",
+                [glob],
+            )
+        else:
+            con.execute(
+                f"CREATE OR REPLACE TABLE {table_name} AS "
+                "SELECT * FROM read_json(?, format='newline_delimited', "
+                "maximum_object_size=?, columns=?)",
+                [glob, maximum_object_size, columns],
+            )
 
 
 def _load_wrapper_fixture(con: duckdb.DuckDBPyConnection, json_path: Path | str) -> None:

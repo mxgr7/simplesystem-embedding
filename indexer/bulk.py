@@ -58,6 +58,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterator
 
 import duckdb
@@ -73,11 +74,22 @@ from indexer.bulk_insert import (
     write_articles_parquet,
     write_offers_parquet,
 )
+from indexer.collection_specs import (
+    apply_indexes_and_load,
+    build_articles_index_params,
+    build_offers_index_params,
+    release_and_drop_indexes,
+)
 from indexer.duckdb_projection import (
+    RAW_CAN_COLUMNS,
+    RAW_MARKER_COLUMNS,
+    RAW_OFFER_COLUMNS,
+    RAW_PRICING_COLUMNS,
     _build_articles_sql,
     _build_offers_sql,
     init_macros,
     load_raw_collections,
+    materialise_grouped_tables,
 )
 from indexer.tei_cache import TEICache, TEICacheStats
 
@@ -105,25 +117,45 @@ class BulkRunStats:
     # so the end-of-run summary stays comparable.
     articles_bulk_insert: BulkInsertStats = field(default_factory=BulkInsertStats)
     offers_bulk_insert: BulkInsertStats = field(default_factory=BulkInsertStats)
+    # Index lifecycle wall time, only populated on the bulk_insert path
+    # when `index_cycle=True`. `drop` covers release_collection + drop_index
+    # for both collections; `rebuild` covers create_index + index-state
+    # polling + load_collection. Together these collapse the per-segment
+    # inline IndexBuilding cost (~20s per chunk on a loaded+indexed
+    # collection) into a single post-flush pass.
+    index_drop_seconds: float = 0.0
+    index_rebuild_seconds: float = 0.0
 
 
 def _connect_duckdb(
     *,
     temp_dir: str | None,
     temp_dir_limit_gb: int,
+    memory_limit_gb: int | None,
+    threads: int,
     s3_region: str | None,
     needs_s3: bool,
 ) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection sized for the bulk run. Disk-spill is
     pinned to `temp_dir` (default = DuckDB's per-connection temp dir)
     with a hard cap so a runaway query doesn't fill the host root FS.
-    The httpfs extension + S3 credential_chain secret are installed
-    only when at least one glob is `s3://...` — local-only runs skip the
-    network setup entirely."""
+    `memory_limit_gb` caps DuckDB's RSS — without it, multi-shard JSON
+    loads can balloon past host RAM and OOM the kernel. The httpfs
+    extension + S3 credential_chain secret are installed only when at
+    least one glob is `s3://...` — local-only runs skip the network
+    setup entirely."""
     con = duckdb.connect()
     if temp_dir:
         con.execute(f"SET temp_directory = '{temp_dir}'")
     con.execute(f"SET max_temp_directory_size = '{temp_dir_limit_gb}GB'")
+    if memory_limit_gb is not None:
+        con.execute(f"SET memory_limit = '{memory_limit_gb}GB'")
+    if threads > 0:
+        con.execute(f"SET threads = {threads}")
+    # `preserve_insertion_order=false` per DuckDB's OOM hint — order is
+    # irrelevant for our materialised tables (we group + re-sort downstream),
+    # and dropping the constraint cuts JOIN intermediate memory substantially.
+    con.execute("SET preserve_insertion_order = false")
     if needs_s3:
         con.execute("INSTALL httpfs")
         con.execute("LOAD httpfs")
@@ -172,23 +204,179 @@ def _iter_relation_dicts(
 
 
 def _materialise_streams(con: duckdb.DuckDBPyConnection) -> tuple[int, int]:
-    """Run the raw → article + raw → offer SQL chains, materialising
-    both result sets as DuckDB tables. Returns the row counts.
+    """Single-shot materialise (no chunking). Use this when the data fits
+    in memory; otherwise call `_materialise_chunk_streams` per chunk.
 
-    Both streams share the upstream `flat → projected → finalized →
-    with_hash` chain. CREATE TABLE forces materialisation up to that
-    point; downstream reads against the two tables don't re-run the
-    join. DuckDB will reuse the same vectorised aggregate state for
-    article + offer streams."""
-    log.info("Building articles table from raw collections (DuckDB JOIN + aggregate)…")
-    con.execute(f"CREATE OR REPLACE TABLE articles AS {_build_articles_sql(source='raw')}")
+    Three-step pipeline (vs the old single-CTAS-per-stream form which
+    OOM'd at 100+ GB on the inline pricings aggregator):
+
+      1. `materialise_grouped_tables`: GROUP-BY pricings/markers/cans
+         once into per-article LIST tables. Each runs as its own CTAS
+         so DuckDB releases the aggregator hash-table memory between
+         steps. Each `raw_*` source is dropped after its grouped table
+         is built — saves ~30 GB once `raw_pricings` is no longer needed.
+
+      2. `articles`: hash-JOIN raw_offers against the 3 grouped tables
+         (just lookups, no aggregator state) → with_hash → group again
+         per article_hash. Memory budget = articles aggregator only.
+
+      3. `offer_rows`: hash-JOIN raw_offers against the 3 grouped tables
+         → projected → with_hash → one row per offer. Streaming output,
+         minimal aggregator memory."""
+    p_n, m_n, c_n = materialise_grouped_tables(con)
+
+    log.info("Building articles table from grouped tables (hash JOIN + group_by_hash)…")
+    con.execute(f"CREATE OR REPLACE TABLE articles AS {_build_articles_sql(source='raw_grouped')}")
     article_count = con.execute("SELECT count(*) FROM articles").fetchone()[0]
     log.info("  articles materialised: %d rows", article_count)
 
-    log.info("Building offer_rows table from raw collections (DuckDB JOIN)…")
-    con.execute(f"CREATE OR REPLACE TABLE offer_rows AS {_build_offers_sql(source='raw')}")
+    log.info("Building offer_rows table from grouped tables (hash JOIN)…")
+    con.execute(f"CREATE OR REPLACE TABLE offer_rows AS {_build_offers_sql(source='raw_grouped')}")
     offer_count = con.execute("SELECT count(*) FROM offer_rows").fetchone()[0]
     log.info("  offer_rows materialised: %d rows", offer_count)
+
+    return article_count, offer_count
+
+
+def _materialise_chunk_streams(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    n_chunks: int,
+    chunk_idx: int,
+    offers_glob: str,
+    pricings_glob: str,
+    markers_glob: str,
+    cans_glob: str,
+) -> tuple[int, int]:
+    """Build chunk-local articles + offer_rows tables for chunk `chunk_idx`
+    of `n_chunks`. Each chunk processes 1/N of the (vendor, articleNumber)
+    keyspace, partitioned via `hash() % n_chunks == chunk_idx`.
+
+    Reads source data directly from the per-collection globs (parquet via
+    `read_parquet` or gzipped JSON via `read_json`). When the source is
+    parquet, DuckDB pushes the chunk filter down so each chunk only
+    materialises ~1/N of the rows — no full-collection load required.
+
+    Why this exists: a single-shot materialise hits OOM in the pricings
+    GROUP BY (1.2B → 159M aggregator state). Chunking reduces per-step
+    GROUP BY input proportionally to ~75M per chunk at N=16.
+
+    Each chunk overwrites the global `pricings_grouped` / `markers_grouped`
+    / `cans_grouped` / `raw_offers` / `articles` / `offer_rows` tables.
+    Phase 1/2 read from these and stream to Milvus before the next
+    chunk's CTAS replaces them. Milvus's article_hash + (vendor, article)
+    PKs absorb any duplicate writes safely (impossible by construction
+    here since hash partitions are disjoint, but cheap)."""
+    chunk_filter = (
+        f'hash(vendorId."$binary".base64 || articleNumber) '
+        f'% {n_chunks} = {chunk_idx}'
+    )
+
+    def _src(glob: str, columns_for_json: dict) -> str:
+        """Render the FROM clause for either parquet (predicate pushdown)
+        or JSON (must declare columns)."""
+        if ".parquet" in glob:
+            return f"read_parquet('{glob}')"
+        # JSON path uses explicit columns — not commonly used in chunked
+        # mode, but supported for parity.
+        cols_sql = ", ".join(f"{k}: '{v}'" for k, v in columns_for_json.items())
+        return (
+            f"read_json('{glob}', format='newline_delimited', "
+            f"maximum_object_size={256 * 1024 * 1024}, columns={{{cols_sql}}})"
+        )
+
+    # Fast path: detect pre-aggregated pricings_grouped parquet next to
+    # the pricings source. If `pricings.parquet/` lives at <root>/, look
+    # for <root>/pricings_grouped.parquet/chunk_{K:04d}.parquet — produced
+    # one-time by `build_pricings_grouped.py`. Skip the runtime GROUP BY
+    # entirely (saves ~50s per chunk × N chunks).
+    pricings_grouped_path = None
+    if ".parquet" in pricings_glob:
+        p = Path(pricings_glob.split('*')[0].rstrip('/'))
+        base = p if p.name == 'pricings.parquet' else (
+            p.parent if p.parent.name == 'pricings.parquet' else None
+        )
+        if base is not None:
+            cand = base.parent / 'pricings_grouped.parquet' / f'chunk_{chunk_idx:04d}.parquet'
+            if cand.exists():
+                pricings_grouped_path = cand
+
+    if pricings_grouped_path is not None:
+        log.info("[chunk %d/%d] loading pre-aggregated pricings_grouped from %s…",
+                 chunk_idx + 1, n_chunks, pricings_grouped_path.name)
+        con.execute(f"""
+            CREATE OR REPLACE TABLE pricings_grouped AS
+            SELECT * FROM read_parquet('{pricings_grouped_path}')
+        """)
+    else:
+        log.info("[chunk %d/%d] building chunk-local pricings_grouped…", chunk_idx + 1, n_chunks)
+        con.execute(f"""
+            CREATE OR REPLACE TABLE pricings_grouped AS
+            SELECT
+                vendorId."$binary".base64 AS vk,
+                articleNumber AS ak,
+                list(struct_pack(
+                    articleNumber := articleNumber,
+                    vendorId := vendorId,
+                    pricingDetails := pricingDetails
+                )) AS pricings_list
+            FROM {_src(pricings_glob, RAW_PRICING_COLUMNS)}
+            WHERE {chunk_filter}
+            GROUP BY vendorId."$binary".base64, articleNumber
+        """)
+    p_n = con.execute("SELECT count(*) FROM pricings_grouped").fetchone()[0]
+    log.info("[chunk %d/%d] pricings_grouped: %d rows", chunk_idx + 1, n_chunks, p_n)
+
+    log.info("[chunk %d/%d] building chunk-local markers_grouped…", chunk_idx + 1, n_chunks)
+    con.execute(f"""
+        CREATE OR REPLACE TABLE markers_grouped AS
+        SELECT
+            vendorId."$binary".base64 AS vk,
+            articleNumber AS ak,
+            list(struct_pack(
+                articleNumber := articleNumber,
+                vendorId := vendorId,
+                coreArticleListSourceId := coreArticleListSourceId,
+                coreArticleMarker := coreArticleMarker
+            )) AS markers_list
+        FROM {_src(markers_glob, RAW_MARKER_COLUMNS)}
+        WHERE {chunk_filter}
+        GROUP BY vendorId."$binary".base64, articleNumber
+    """)
+
+    log.info("[chunk %d/%d] building chunk-local cans_grouped…", chunk_idx + 1, n_chunks)
+    con.execute(f"""
+        CREATE OR REPLACE TABLE cans_grouped AS
+        SELECT
+            vendorId."$binary".base64 AS vk,
+            articleNumber AS ak,
+            list(struct_pack(
+                articleNumber := articleNumber,
+                vendorId := vendorId,
+                customerArticleNumbersListVersionId := customerArticleNumbersListVersionId,
+                customerArticleNumber := customerArticleNumber
+            )) AS cans_list
+        FROM {_src(cans_glob, RAW_CAN_COLUMNS)}
+        WHERE {chunk_filter}
+        GROUP BY vendorId."$binary".base64, articleNumber
+    """)
+
+    log.info("[chunk %d/%d] loading chunk-local raw_offers…", chunk_idx + 1, n_chunks)
+    con.execute(f"""
+        CREATE OR REPLACE TABLE raw_offers AS
+        SELECT * FROM {_src(offers_glob, RAW_OFFER_COLUMNS)}
+        WHERE {chunk_filter}
+    """)
+
+    log.info("[chunk %d/%d] building articles table…", chunk_idx + 1, n_chunks)
+    con.execute(f"CREATE OR REPLACE TABLE articles AS {_build_articles_sql(source='raw_grouped')}")
+    article_count = con.execute("SELECT count(*) FROM articles").fetchone()[0]
+    log.info("[chunk %d/%d] articles: %d rows", chunk_idx + 1, n_chunks, article_count)
+
+    log.info("[chunk %d/%d] building offer_rows table…", chunk_idx + 1, n_chunks)
+    con.execute(f"CREATE OR REPLACE TABLE offer_rows AS {_build_offers_sql(source='raw_grouped')}")
+    offer_count = con.execute("SELECT count(*) FROM offer_rows").fetchone()[0]
+    log.info("[chunk %d/%d] offer_rows: %d rows", chunk_idx + 1, n_chunks, offer_count)
 
     return article_count, offer_count
 
@@ -381,15 +569,44 @@ def run_bulk_indexer(
     # Tunables
     article_batch_size: int = 1000,
     offer_batch_size: int = 5000,
-    tei_batch_size: int = 64,
+    tei_batch_size: int = 4096,
+    tei_concurrency: int = 8,
     duckdb_temp_dir: str | None = None,
     duckdb_temp_dir_limit_gb: int = 500,
+    duckdb_memory_limit_gb: int | None = None,
+    duckdb_threads: int = 0,
+    n_chunks: int = 1,
     s3_region: str | None = "eu-central-1",
     # Sink — "upsert" (default, per-row) or "bulk_insert" (parquet → MinIO →
     # `do_bulk_insert`). Production-scale runs need bulk_insert; smoke runs
     # leave it on upsert for queryable-immediately semantics.
     sink_mode: str = "upsert",
     bulk_insert: BulkInsertConfig | None = None,
+    # When True (and `sink_mode='bulk_insert'`), the orchestrator
+    # releases both collections and drops every index BEFORE Phase 1,
+    # then re-creates indexes + reloads AFTER the post-import flush.
+    # This collapses per-chunk inline IndexBuilding cost into a single
+    # post-import pass.
+    #
+    # Default False because the win only materialises at production
+    # scale (1M+ rows per chunk where inline HNSW build genuinely costs
+    # seconds per chunk). At smoke-test scale (≤100K rows / 1 chunk) the
+    # ~50s drop + rebuild overhead is pure regression — Milvus's per-
+    # chunk state-machine floor (~15s) dominates over per-chunk
+    # IndexBuilding cost on small data, so removing the inline build
+    # saves nothing while the rebuild adds a fixed cost. Empirical:
+    # shard-0.0 (26K articles + 27K offers) total wall went 47s → 95s
+    # with index_cycle=True vs False on Milvus 2.6.15.
+    #
+    # Recommended on for full-catalog reindexes; recommended off (the
+    # default) for smoke / single-shard runs. The CLI flag is
+    # `--index-cycle` to opt in.
+    index_cycle: bool = False,
+    # Vector-index recipe for the articles collection's `offer_embedding`
+    # rebuild. Must match the index originally created by
+    # `create_articles_collection.py` so the post-rebuild collection
+    # behaves identically. Ignored when `index_cycle=False`.
+    vector_index: str = "HNSW",
 ) -> BulkRunStats:
     """End-to-end bulk indexer entry point.
 
@@ -407,6 +624,8 @@ def run_bulk_indexer(
     con = _connect_duckdb(
         temp_dir=duckdb_temp_dir,
         temp_dir_limit_gb=duckdb_temp_dir_limit_gb,
+        memory_limit_gb=duckdb_memory_limit_gb,
+        threads=duckdb_threads,
         s3_region=s3_region,
         needs_s3=needs_s3,
     )
@@ -418,25 +637,34 @@ def run_bulk_indexer(
     log.info("  cans:     %s", cans_glob)
 
     duck_t0 = time.time()
-    load_raw_collections(
-        con,
-        offers_glob=offers_glob,
-        pricings_glob=pricings_glob,
-        markers_glob=markers_glob,
-        cans_glob=cans_glob,
-    )
-    stats.raw_offer_count = con.execute("SELECT count(*) FROM raw_offers").fetchone()[0]
-    stats.raw_pricing_count = con.execute("SELECT count(*) FROM raw_pricings").fetchone()[0]
-    stats.raw_marker_count = con.execute("SELECT count(*) FROM raw_markers").fetchone()[0]
-    stats.raw_can_count = con.execute("SELECT count(*) FROM raw_cans").fetchone()[0]
-    log.info(
-        "Loaded: offers=%d pricings=%d markers=%d cans=%d",
-        stats.raw_offer_count, stats.raw_pricing_count,
-        stats.raw_marker_count, stats.raw_can_count,
-    )
-
-    stats.article_count, stats.offer_row_count = _materialise_streams(con)
-    stats.duckdb_seconds = time.time() - duck_t0
+    if n_chunks <= 1:
+        # Single-shot: pre-load all 4 raw_* tables once, then materialise.
+        load_raw_collections(
+            con,
+            offers_glob=offers_glob,
+            pricings_glob=pricings_glob,
+            markers_glob=markers_glob,
+            cans_glob=cans_glob,
+        )
+        stats.raw_offer_count = con.execute("SELECT count(*) FROM raw_offers").fetchone()[0]
+        stats.raw_pricing_count = con.execute("SELECT count(*) FROM raw_pricings").fetchone()[0]
+        stats.raw_marker_count = con.execute("SELECT count(*) FROM raw_markers").fetchone()[0]
+        stats.raw_can_count = con.execute("SELECT count(*) FROM raw_cans").fetchone()[0]
+        log.info(
+            "Loaded: offers=%d pricings=%d markers=%d cans=%d",
+            stats.raw_offer_count, stats.raw_pricing_count,
+            stats.raw_marker_count, stats.raw_can_count,
+        )
+    else:
+        # Chunked path: each chunk reads its 1/N partition directly from
+        # parquet (predicate pushdown). Skip the global load entirely —
+        # avoids the 17-min full-table copy that's pure overhead when we
+        # only need 1/N of each table per chunk.
+        log.info(
+            "Chunked mode (n_chunks=%d): skipping global load; chunks read "
+            "directly from source per-partition.",
+            n_chunks,
+        )
 
     log.info("Connecting to Milvus at %s", milvus_uri)
     milvus = MilvusClient(uri=milvus_uri)
@@ -456,67 +684,130 @@ def run_bulk_indexer(
     redis_client.ping()  # fail-fast if Redis is unreachable
 
     # Load resume state for the bulk-insert path. `checkpoint_path=None`
-    # gives the empty initial state — no resume, fresh run.
-    checkpoint = (
-        load_checkpoint(bulk_insert.checkpoint_path)
-        if sink_mode == "bulk_insert" and bulk_insert is not None
-        else None
-    )
+    # gives the empty initial state — no resume, fresh run. Note:
+    # checkpoint resume is not supported with `n_chunks > 1` — chunks
+    # rewrite the same articles/offer_rows tables, so a partial checkpoint
+    # would point at rows from the wrong chunk. Pass an empty checkpoint
+    # so per-chunk Phase 1/2 sees `rows_done=0` (no resume) without
+    # crashing on subscript.
+    if sink_mode == "bulk_insert" and bulk_insert is not None:
+        if n_chunks > 1:
+            checkpoint = {
+                "articles": {"rows_done": 0, "chunks_done": 0},
+                "offers":   {"rows_done": 0, "chunks_done": 0},
+            }
+        else:
+            checkpoint = load_checkpoint(bulk_insert.checkpoint_path)
+    else:
+        checkpoint = None
     if checkpoint and (
         checkpoint["articles"]["rows_done"] > 0
         or checkpoint["offers"]["rows_done"] > 0
     ):
         log.info(
-            "Resuming from checkpoint: articles=%d/%d rows, offers=%d/%d rows",
-            checkpoint["articles"]["rows_done"], stats.article_count,
-            checkpoint["offers"]["rows_done"],   stats.offer_row_count,
+            "Resuming from checkpoint: articles=%d, offers=%d rows so far",
+            checkpoint["articles"]["rows_done"],
+            checkpoint["offers"]["rows_done"],
         )
 
-    log.info("Phase 1: writing %d article rows via %s (TEI batch=%d)…",
-             stats.article_count, sink_mode, tei_batch_size)
-    with TEICache(
+    # Drop indexes + release before bulk_insert so each chunk's server-
+    # side IndexBuilding stage becomes a no-op. The single post-flush
+    # rebuild below is significantly cheaper than per-chunk index
+    # maintenance, especially for the small-chunk shape (one chunk per
+    # shard at the standard 1M-row chunk size means the per-chunk floor
+    # is the dominant cost). Skipped on the upsert path — upsert needs
+    # the loaded indexed collection to accept writes.
+    if sink_mode == "bulk_insert" and index_cycle:
+        drop_t0 = time.time()
+        log.info("Index cycle: releasing + dropping indexes on %s and %s before bulk_insert…",
+                 articles_collection, offers_collection)
+        a_dropped = release_and_drop_indexes(milvus, articles_collection)
+        o_dropped = release_and_drop_indexes(milvus, offers_collection)
+        stats.index_drop_seconds = time.time() - drop_t0
+        log.info("  dropped %d index(es) on %s, %d on %s in %.1fs",
+                 len(a_dropped), articles_collection,
+                 len(o_dropped), offers_collection,
+                 stats.index_drop_seconds)
+
+    # Materialise + write loop. For n_chunks==1, single shot using the
+    # original `_materialise_streams`. For n_chunks > 1, partition by
+    # `hash(vendor||article) % n_chunks` and run materialise + Phase 1 +
+    # Phase 2 once per chunk. Each chunk's working set is 1/n_chunks of
+    # the full data, fits well below the OOM threshold.
+    cache_ctx = TEICache(
         tei_url=tei_url,
         redis_client=redis_client,
         tei_batch_size=tei_batch_size,
-    ) as cache:
-        if sink_mode == "upsert":
-            stats.article_upsert_seconds = _upsert_articles(
-                con=con,
-                milvus=milvus,
-                collection=articles_collection,
-                cache=cache,
-                batch_size=article_batch_size,
-            )
-        else:
-            stats.article_upsert_seconds, stats.articles_bulk_insert = _bulk_insert_articles(
-                con=con,
-                milvus_uri=milvus_uri,
-                collection=articles_collection,
-                cache=cache,
-                batch_size=article_batch_size,
-                cfg=bulk_insert,    # type: ignore[arg-type]
-                checkpoint=checkpoint,    # type: ignore[arg-type]
-            )
+        tei_concurrency=tei_concurrency,
+    )
+    with cache_ctx as cache:
+        for chunk_idx in range(max(1, n_chunks)):
+            if n_chunks > 1:
+                ca, co = _materialise_chunk_streams(
+                    con, n_chunks=n_chunks, chunk_idx=chunk_idx,
+                    offers_glob=offers_glob,
+                    pricings_glob=pricings_glob,
+                    markers_glob=markers_glob,
+                    cans_glob=cans_glob,
+                )
+                # Per-chunk fresh checkpoint — each chunk's articles/offer_rows
+                # are a fresh independent table, so rows_done must reset to 0
+                # or _bulk_insert_articles would skip the new data thinking
+                # the prior chunk's rows were "already done".
+                checkpoint = {
+                    "articles": {"rows_done": 0, "chunks_done": 0},
+                    "offers":   {"rows_done": 0, "chunks_done": 0},
+                }
+            else:
+                ca, co = _materialise_streams(con)
+            stats.article_count += ca
+            stats.offer_row_count += co
+
+            log.info("Phase 1: writing %d article rows via %s (TEI batch=%d × conc=%d)…",
+                     ca, sink_mode, tei_batch_size, tei_concurrency)
+            if sink_mode == "upsert":
+                stats.article_upsert_seconds += _upsert_articles(
+                    con=con,
+                    milvus=milvus,
+                    collection=articles_collection,
+                    cache=cache,
+                    batch_size=article_batch_size,
+                )
+            else:
+                t1, bi_a = _bulk_insert_articles(
+                    con=con,
+                    milvus_uri=milvus_uri,
+                    collection=articles_collection,
+                    cache=cache,
+                    batch_size=article_batch_size,
+                    cfg=bulk_insert,    # type: ignore[arg-type]
+                    checkpoint=checkpoint,    # type: ignore[arg-type]
+                )
+                stats.article_upsert_seconds += t1
+                stats.articles_bulk_insert = bi_a  # last chunk wins; sums tracked in metrics
+
+            log.info("Phase 2: writing %d offer rows via %s (no embedding)…", co, sink_mode)
+            if sink_mode == "upsert":
+                stats.offer_upsert_seconds += _upsert_offers(
+                    con=con,
+                    milvus=milvus,
+                    collection=offers_collection,
+                    batch_size=offer_batch_size,
+                )
+            else:
+                t2, bi_o = _bulk_insert_offers(
+                    con=con,
+                    milvus_uri=milvus_uri,
+                    collection=offers_collection,
+                    batch_size=offer_batch_size,
+                    cfg=bulk_insert,    # type: ignore[arg-type]
+                    checkpoint=checkpoint,    # type: ignore[arg-type]
+                )
+                stats.offer_upsert_seconds += t2
+                stats.offers_bulk_insert = bi_o
         stats.tei = cache.stats
 
-    log.info("Phase 2: writing %d offer rows via %s (no embedding)…",
-             stats.offer_row_count, sink_mode)
-    if sink_mode == "upsert":
-        stats.offer_upsert_seconds = _upsert_offers(
-            con=con,
-            milvus=milvus,
-            collection=offers_collection,
-            batch_size=offer_batch_size,
-        )
-    else:
-        stats.offer_upsert_seconds, stats.offers_bulk_insert = _bulk_insert_offers(
-            con=con,
-            milvus_uri=milvus_uri,
-            collection=offers_collection,
-            batch_size=offer_batch_size,
-            cfg=bulk_insert,    # type: ignore[arg-type]
-            checkpoint=checkpoint,    # type: ignore[arg-type]
-        )
+    stats.duckdb_seconds = time.time() - duck_t0
 
     # Flush so `get_collection_stats` reflects the bulk-loaded rows
     # immediately. Without this, operators running scripts/swing_aliases.py
@@ -526,12 +817,35 @@ def run_bulk_indexer(
     milvus.flush(articles_collection)
     milvus.flush(offers_collection)
 
+    # Re-apply the index recipe to both collections + reload. Symmetric
+    # with the pre-Phase-1 release_and_drop_indexes — only fires when
+    # the cycle was actually requested AND the bulk_insert path produced
+    # data, so a partial run that crashed mid-Phase-1 still has its
+    # indexes dropped (operator can re-run with --skip-index-cycle to
+    # hand-rebuild, or just rerun the full cycle).
+    if sink_mode == "bulk_insert" and index_cycle:
+        rebuild_t0 = time.time()
+        log.info("Index cycle: rebuilding indexes + reloading both collections…")
+        apply_indexes_and_load(
+            milvus, articles_collection,
+            index_params=build_articles_index_params(milvus, vector_index),
+        )
+        apply_indexes_and_load(
+            milvus, offers_collection,
+            index_params=build_offers_index_params(milvus),
+        )
+        stats.index_rebuild_seconds = time.time() - rebuild_t0
+        log.info("  rebuild + load complete in %.1fs", stats.index_rebuild_seconds)
+
     stats.total_seconds = time.time() - wall_t0
     log.info(
-        "Bulk run complete: articles=%d (%.0fs) offers=%d (%.0fs) duckdb=%.0fs total=%.0fs",
+        "Bulk run complete: articles=%d (%.0fs) offers=%d (%.0fs) duckdb=%.0fs "
+        "index_drop=%.1fs index_rebuild=%.1fs total=%.0fs",
         stats.article_count, stats.article_upsert_seconds,
         stats.offer_row_count, stats.offer_upsert_seconds,
-        stats.duckdb_seconds, stats.total_seconds,
+        stats.duckdb_seconds,
+        stats.index_drop_seconds, stats.index_rebuild_seconds,
+        stats.total_seconds,
     )
     log.info(
         "TEI cache: hits=%d misses=%d tei_calls=%d bytes_written=%.1f MB",

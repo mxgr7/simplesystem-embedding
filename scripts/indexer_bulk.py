@@ -61,7 +61,11 @@ def _build_globs(args: argparse.Namespace) -> dict[str, str]:
     `--local-cache`. `--offers-glob` overrides the offers shard
     pattern (everything else stays at `atlas-*.json.gz`) — useful for
     targeted smoke runs against a single source shard while still
-    pulling all pricings/markers/cans for full join coverage."""
+    pulling all pricings/markers/cans for full join coverage.
+
+    When `--source-format parquet` is set, the per-collection layout
+    flattens to one file per collection (`pricings.parquet` etc.) — the
+    output shape produced by `scripts/convert_source_to_parquet.py`."""
     if args.s3_base and args.local_cache:
         sys.exit("--s3-base and --local-cache are mutually exclusive")
     if not args.s3_base and not args.local_cache:
@@ -69,6 +73,18 @@ def _build_globs(args: argparse.Namespace) -> dict[str, str]:
 
     base = args.s3_base.rstrip("/") if args.s3_base else str(Path(args.local_cache).expanduser())
     sep = "/"
+
+    if args.source_format == "parquet":
+        # Single file per collection; offers can still be subset via
+        # --offers-glob (e.g. 'offers-shard-0.*.parquet') if the
+        # conversion produced per-shard parquets.
+        offers_pattern = args.offers_glob or "offers.parquet"
+        return {
+            "offers_glob":   f"{base}{sep}{offers_pattern}",
+            "pricings_glob": f"{base}{sep}pricings.parquet",
+            "markers_glob":  f"{base}{sep}markers.parquet",
+            "cans_glob":     f"{base}{sep}cans.parquet",
+        }
 
     offers_pattern = args.offers_glob or "atlas-*.json.gz"
     return {
@@ -114,8 +130,16 @@ def main() -> None:
     embed.add_argument("--redis-url", required=True,
                        help="Redis URL for the hash-keyed embedding cache. "
                             "Example: redis://localhost:6379/0")
-    embed.add_argument("--tei-batch-size", type=int, default=64,
-                       help="Texts per TEI HTTP call (default 64).")
+    embed.add_argument("--tei-batch-size", type=int, default=4096,
+                       help="Texts per TEI HTTP call (default 4096; must be ≤ "
+                            "TEI server's --max-client-batch-size).")
+    embed.add_argument("--tei-concurrency", type=int, default=8,
+                       help="Parallel TEI HTTP calls per embed phase "
+                            "(default 8). Each one carries up to --tei-batch-size "
+                            "texts. Server's --max-concurrent-requests is the upper "
+                            "bound; sweet spot is typically 4-16 even when the "
+                            "server allows more (diminishing returns past the "
+                            "point where the GPU is fully fed).")
 
     tune = p.add_argument_group("Tunables")
     tune.add_argument("--article-batch-size", type=int, default=1000,
@@ -129,6 +153,28 @@ def main() -> None:
                       help="Hard cap on DuckDB disk-spill (default 500 GB). "
                            "Bump for full-catalog runs (158 GB offers + 28 GB pricings, "
                            "uncompressed factor ~3-4×).")
+    tune.add_argument("--duckdb-memory-limit-gb", type=int, default=80,
+                      help="DuckDB memory_limit (default 80 GB). DuckDB will spill "
+                           "to --duckdb-temp-dir past this threshold. Critical: "
+                           "without a cap, multi-shard JSON loads can balloon past "
+                           "host RAM and OOM the kernel (observed at 245 GB on the "
+                           "1545-shard pull). Sized to leave room for Redis (~60 GB "
+                           "prewarmed cache), Milvus + MinIO + etcd containers (~10 GB), "
+                           "and the Python orchestrator on a 247 GB host.")
+    tune.add_argument("--duckdb-threads", type=int, default=0,
+                      help="DuckDB worker threads (default 0 = use system default). "
+                           "Lower (e.g. 8) reduces peak memory for parallel JSON "
+                           "scans at the cost of throughput.")
+    tune.add_argument("--n-chunks", type=int, default=1,
+                      help="Process the data in N hash-partitioned chunks "
+                           "(default 1 = single shot, no chunking). With N>1 "
+                           "the indexer materialises + writes each chunk's "
+                           "articles + offer_rows independently before moving "
+                           "to the next, capping per-step memory at ~1/N of "
+                           "the full job. Use 16 at production scale where the "
+                           "single-shot pricings GROUP BY (1.2B → 159M) "
+                           "OOMs even at 125 GB cap. Note: --bulk-insert-checkpoint "
+                           "resume is disabled when N>1 (chunks rewrite tables).")
     tune.add_argument("--s3-region", default="eu-central-1",
                       help="S3 region for the credential_chain secret on the SOURCE side "
                            "(reading raw shards). Ignored on --local-cache runs. The MinIO "
@@ -180,7 +226,36 @@ def main() -> None:
                            "uses this for S3 retries internally; the "
                            "do_bulk_insert wrapper uses it with exponential "
                            "backoff. Default 5.")
+    sink.add_argument("--bulk-insert-poll-interval-s", type=float, default=1.0,
+                      help="Polling cadence (seconds) for do_bulk_insert "
+                           "state. Default 1.0; lower (e.g. 0.5) gives "
+                           "tighter wall-time accounting on small chunks. "
+                           "Bump to 5.0+ for production runs where chunks "
+                           "take minutes — saves a small amount of RPC "
+                           "traffic to RootCoord.")
+    sink.add_argument("--index-cycle", action="store_true",
+                      help="Bulk-insert mode: drop every index + release "
+                           "both collections BEFORE Phase 1, then rebuild + "
+                           "reload after the post-import flush. Collapses "
+                           "per-chunk inline IndexBuilding into a single "
+                           "post-import pass — wins at production scale "
+                           "(1M+ rows per chunk where inline HNSW build "
+                           "costs seconds per chunk). Pure overhead at "
+                           "smoke-test scale (~50s of drop+rebuild on top "
+                           "of a 47s baseline for shard 0.0), so OFF by "
+                           "default. Enable for full-catalog reindexes.")
+    sink.add_argument("--vector-index", default="HNSW", choices=["HNSW", "IVF_FLAT", "FLAT"],
+                      help="Vector index type for the articles offer_embedding "
+                           "rebuild after bulk_insert. Must match what "
+                           "create_articles_collection.py created (default HNSW). "
+                           "Ignored when --index-cycle is not set.")
 
+    p.add_argument("--source-format", default="json", choices=["json", "parquet"],
+                   help="Source data format. 'json' (default): per-collection "
+                        "subdir layout with `atlas-*.json.gz` shards. 'parquet': "
+                        "flat layout with single `{collection}.parquet` per file, "
+                        "as produced by scripts/convert_source_to_parquet.py — "
+                        "skips JSON parse + decompression on every load (huge win).")
     p.add_argument("--log-level", default="INFO",
                    help="Python logging level (default INFO).")
 
@@ -206,6 +281,7 @@ def main() -> None:
             upload_workers=args.bulk_insert_upload_workers,
             checkpoint_path=Path(args.bulk_insert_checkpoint) if args.bulk_insert_checkpoint else None,
             retry_attempts=args.bulk_insert_retry_attempts,
+            poll_interval_s=args.bulk_insert_poll_interval_s,
         )
 
     stats = run_bulk_indexer(
@@ -221,11 +297,17 @@ def main() -> None:
         article_batch_size=args.article_batch_size,
         offer_batch_size=args.offer_batch_size,
         tei_batch_size=args.tei_batch_size,
+        tei_concurrency=args.tei_concurrency,
         duckdb_temp_dir=args.duckdb_temp_dir,
         duckdb_temp_dir_limit_gb=args.duckdb_temp_dir_limit_gb,
+        duckdb_memory_limit_gb=args.duckdb_memory_limit_gb,
+        duckdb_threads=args.duckdb_threads,
+        n_chunks=args.n_chunks,
         s3_region=args.s3_region,
         sink_mode=args.sink_mode,
         bulk_insert=bulk_cfg,
+        index_cycle=args.index_cycle,
+        vector_index=args.vector_index,
     )
 
     print()
@@ -258,6 +340,11 @@ def main() -> None:
             print(f"    parquet write:  {b.write_seconds:>10.1f}s")
             print(f"    upload:         {b.upload_seconds:>10.1f}s")
             print(f"    bulk_insert:    {b.bulk_insert_seconds:>10.1f}s")
+        if args.index_cycle:
+            print()
+            print("  index cycle:")
+            print(f"    drop:           {stats.index_drop_seconds:>10.1f}s")
+            print(f"    rebuild + load: {stats.index_rebuild_seconds:>10.1f}s")
 
 
 if __name__ == "__main__":
