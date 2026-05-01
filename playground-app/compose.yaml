@@ -18,7 +18,9 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redis-data:/data
+      # Bind to /data on the host (1 TB nvme) — the prewarm load of
+      # ~52 GB will not fit on the docker root volume.
+      - /data/redis-data:/data
     restart: unless-stopped
 
   playground-app:
@@ -67,6 +69,3 @@ services:
     depends_on:
       - search-api
     restart: unless-stopped
-
-volumes:
-  redis-data:

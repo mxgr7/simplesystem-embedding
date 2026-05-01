@@ -419,20 +419,23 @@ def test_hash_version_constant_present() -> None:
 
 
 def test_catalog_currencies_match_script() -> None:
-    """All four `CATALOG_CURRENCIES` declarations must agree:
+    """All `CATALOG_CURRENCIES` declarations must agree:
 
-      * `indexer/projection.py` — envelope projection
-      * `scripts/create_articles_collection.py` — articles_v{N} schema
-      * `scripts/create_offers_collection.py` — offers_v{N} schema (F8)
-      * `search-api/prices.py` — filter translator catalogue check (F8)
+      * `indexer/projection.py` — envelope projection (canonical source).
+      * `search-api/prices.py` — filter translator catalogue check (F8).
+        Standalone literal because search-api isn't on the indexer import
+        path in CI (separate uv lockfile).
 
-    Kept in sync by inspection because the script files aren't on the
-    test import path; this test documents the contract."""
+    The `create_*_collection.py` scripts and `indexer/collection_specs.py`
+    used to declare their own copies; both now import from
+    `indexer.projection`, so drift there is a Python ImportError, not a
+    silent mismatch.
+
+    Kept as a contract test because search-api lives outside the indexer
+    import boundary and its declaration could otherwise drift unnoticed."""
     import re
 
     paths = [
-        REPO_ROOT / "scripts/create_articles_collection.py",
-        REPO_ROOT / "scripts/create_offers_collection.py",
         REPO_ROOT / "search-api/prices.py",
     ]
     pattern = re.compile(r"^CATALOG_CURRENCIES(?:\s*:\s*[^=]+)?\s*=\s*(\(.+\))\s*$")

@@ -67,6 +67,49 @@ state is atomically written; on crash, restart with the same flag and
 the orchestrator skips already-ingested rows. Without it, a partial
 run is wasted on failure.
 
+### Optional index cycle (`--index-cycle`)
+
+Off by default. When enabled, the orchestrator releases both
+collections and drops every index BEFORE the first `do_bulk_insert`,
+then re-creates the indexes + reloads after the post-import flush.
+The recipe used for the rebuild lives in
+`indexer/collection_specs.py` — same single source of truth that
+`scripts/create_*_collection.py` use, so the post-rebuild collection
+is byte-identical in shape to a fresh collection.
+
+The intent is to collapse per-chunk inline IndexBuilding cost into a
+single post-import pass. **Empirically (shard 0.0, ~26K articles +
+~27K offers, Milvus 2.6.15), this REGRESSES the smoke-test wall time
+by ~50s** — the ~12s drop + ~36s rebuild are pure overhead because
+the per-chunk Milvus state-machine floor (~15s) dominates over the
+inline IndexBuilding cost on small data, so removing inline
+IndexBuilding saves nothing. The win only materialises when chunks
+are large enough that inline HNSW build genuinely costs seconds per
+chunk (production scale: 1M+ rows per chunk).
+
+  - **When to enable**: full-catalog reindexes (e.g. against
+    production S3 snapshot, ~130 chunks at 1M rows each).
+  - **When to leave off**: smoke runs, single-shard pulls, anything
+    where chunk count is single-digit.
+  - **Side effect**: when on, collections are *not queryable* between
+    Phase 1 start and the post-flush rebuild. Always run against the
+    versioned `*_v{N+1}` collection (per the F9 alias workflow) so
+    the live alias keeps pointing at the previous version.
+  - **`--vector-index HNSW|IVF_FLAT|FLAT`** chooses the rebuild
+    recipe for `articles.offer_embedding`. Must match what
+    `create_articles_collection.py --vector-index <X>` originally
+    created. Default `HNSW`.
+
+### `--bulk-insert-poll-interval-s`
+
+Default `1.0`. Polling cadence for `do_bulk_insert` state. The
+smoke-run wall time was historically inflated by ~5–10s of
+detect-rounding because the prior 5.0s default missed
+state-transition timing. Tightening to 1.0s removes that without
+meaningfully increasing RPC load on RootCoord. Bump to 5.0+ for
+production runs where each chunk takes minutes — the per-chunk
+detection lag is then a rounding error.
+
 ## Standard local-cache run
 
 ```sh
@@ -124,8 +167,15 @@ reindex feasible in a working day. CPU TEI is fine for smoke runs.
                           TEI is the bottleneck.
 --offer-batch-size        Default 5000. Offer rows per upsert (no
                           embedding step, can go bigger).
---tei-batch-size          Default 64. Texts per TEI HTTP call. Match
-                          to the model's max_batch_size.
+--tei-batch-size          Default 4096. Texts per TEI HTTP call.
+                          Must be ≤ TEI server's --max-client-batch-size
+                          (TEI returns 422 otherwise — symptom: every
+                          embed call fails immediately at Phase 1 start).
+--tei-concurrency         Default 8. Parallel TEI HTTP calls per embed
+                          phase. Bound by server's --max-concurrent-requests;
+                          sweet spot is typically 4-16 even when the server
+                          allows more (returns diminish past the point
+                          where the GPU is fully fed).
 --bulk-insert-chunk-rows  Default 1M. Larger chunks = fewer pipeline-
                           overhead hits per row but worse pipelining
                           parallelism.

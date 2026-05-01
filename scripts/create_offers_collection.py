@@ -24,12 +24,13 @@ per-offer scope:
   - Per-offer scalars (vendor, catalog, prices JSON, delivery, core
     markers, relationships, ean, article_number, features).
   - F8 per-offer price-scope envelope (`price_list_ids`, `currencies`,
-    `{ccy}_price_min/max`) — Path B's bounded probe pushes price-list /
-    currency / range pre-filters down via these columns instead of a
-    full-collection scan + JSON post-pass. Recall is preserved exactly
-    (the envelope is a superset of the precise filter).
+    `{ccy}_price_min/max`).
   - NO `offer_embedding`, NO sparse codes — the dense vector and BM25
     index live on `articles_v{N}` keyed by hash.
+
+Schema + index spec live in `indexer/collection_specs.py` so the bulk
+indexer's drop-then-rebuild path can re-apply the exact same shape
+post-bulk_insert. This script is a thin CLI shim over those builders.
 
 See `issues/article-search-replacement-ftsearch-09-article-dedup.md` for
 the topology rationale. Steady-state cutovers for `articles_v{N}` and
@@ -41,167 +42,33 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
-from pymilvus import DataType, MilvusClient
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-# Catalogue currencies that get per-offer envelope columns (F8). Mirror
-# of the same constant in `scripts/create_articles_collection.py` and
-# `indexer/projection.py`; `test_catalog_currencies_match_script` keeps
-# all three in sync. Add a new currency: append here, in the other two
-# spots, and bump the collection version.
-CATALOG_CURRENCIES = ("eur", "chf", "huf", "pln", "gbp", "czk", "cny")
+from pymilvus import MilvusClient
 
-# Each field listed here gets an INVERTED scalar index. Picked to cover
-# every filter / group_by / aggregation path called out in spec §4.3-§4.4
-# and in F3..F5. INVERTED handles equality, IN, range, and ARRAY
-# membership uniformly on Milvus 2.6.15.
-#
-# F9: `article_hash` is the join key into `articles_v{N}`. Path B's
-# bounded-probe `query()` filters on the per-offer scope here, returns
-# the matching distinct hashes, and feeds them into the article-collection
-# ANN as `article_hash IN [...]`. INVERTED on a 32-char VARCHAR is the
-# right shape for the IN-clause workload (validated at 25k hashes ≈ 430ms
-# p95 on the hardware ceiling benchmark — see F9 PATH_B_HASH_LIMIT).
-SCALAR_INDEX_FIELDS = (
-    # F9 join key
-    "article_hash",
-    # Vendor / catalog
-    "vendor_id",
-    "catalog_version_ids",
-    # Numeric range (§4.3 `maxDeliveryTime`)
-    "delivery_time_days_max",
-    # Features (§4.3 requiredFeatures, §4.4 FEATURES summary)
-    "features",
-    # Core sortiment (§4.3 `coreSortimentOnly`)
-    "core_marker_enabled_sources",
-    "core_marker_disabled_sources",
-    # Relationships (§4.3)
-    "relationship_accessory_for",
-    "relationship_spare_part_for",
-    "relationship_similar_to",
-    # Identifier-level filters used by routed strict path
-    "ean",
-    "article_number",
-    # F8 price-scope pre-filter — INVERTED handles array_contains[_any]
-    # on both columns at array scope. Per-currency price ranges are
-    # STL_SORT (added separately in build_index_params for range queries).
-    "price_list_ids",
-    "currencies",
+from indexer.collection_specs import (  # noqa: E402  (sys.path hack above)
+    CATALOG_CURRENCIES,
+    OFFER_SCALAR_INDEX_FIELDS,
+    build_offers_index_params,
+    build_offers_schema,
 )
+
+# Re-export under the legacy name so existing imports
+# (`from scripts.create_offers_collection import SCALAR_INDEX_FIELDS,
+# build_schema, build_index_params`) keep working in tests + downstream.
+SCALAR_INDEX_FIELDS = OFFER_SCALAR_INDEX_FIELDS
 
 
 def build_schema(client: MilvusClient):
-    schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
-
-    # PK: `{vendor_uuid_dashed}:{base64Url(articleNumber)}`. 256 leaves
-    # ample headroom — UUID head is 36 chars, observed b64 tail tops out
-    # ~65 chars in fixtures (long INDUSTRIAL-PART article numbers).
-    schema.add_field("id", DataType.VARCHAR, max_length=256, is_primary=True)
-
-    # Milvus 2.6 requires every collection to declare at least one vector
-    # field with an index. Path B never searches this collection — only
-    # `query()` on filter expressions — so we declare a 2-dim FLOAT
-    # placeholder + FLAT index. Storage cost: ~1.3 GB at 159M rows
-    # (negligible). The dense vector for retrieval lives on `articles_v{N}`.
-    schema.add_field("_placeholder_vector", DataType.FLOAT_VECTOR, dim=2)
-
-    # F9 join key into `articles_v{N}`. sha256 truncated to 16 bytes,
-    # hex-encoded. Path B's bounded probe queries this collection on the
-    # per-offer scope, collects distinct hashes, then constrains the
-    # article-collection ANN with `article_hash IN [...]`.
-    schema.add_field("article_hash", DataType.VARCHAR, max_length=32)
-
-    # Per-offer identifier scalars.
-    schema.add_field("ean", DataType.VARCHAR, max_length=64)
-    schema.add_field("article_number", DataType.VARCHAR, max_length=256)
-
-    # Single vendor per row (§7 / §9 #1).
-    schema.add_field("vendor_id", DataType.VARCHAR, max_length=64)
-
-    # Multi: catalog versions an offer participates in.
-    schema.add_field(
-        "catalog_version_ids", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=2048, max_length=64,
-    )
-
-    # Per-offer scalars.
-    schema.add_field("prices", DataType.JSON)
-    schema.add_field("delivery_time_days_max", DataType.INT32)
-    schema.add_field(
-        "core_marker_enabled_sources", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=64, max_length=64,
-    )
-    schema.add_field(
-        "core_marker_disabled_sources", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=64, max_length=64,
-    )
-    schema.add_field(
-        "features", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=512, max_length=512,
-    )
-    schema.add_field(
-        "relationship_accessory_for", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=128, max_length=256,
-    )
-    schema.add_field(
-        "relationship_spare_part_for", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=128, max_length=256,
-    )
-    schema.add_field(
-        "relationship_similar_to", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=128, max_length=256,
-    )
-
-    # F8 price-scope pre-filter columns. The envelope is per-offer (the
-    # F9 article-side envelope on `articles_v{N}` powers the sort-by-price
-    # browse path; this one powers Path B's bounded probe).
-    #
-    # `price_list_ids`: union of every `prices[].sourcePriceListId` on
-    # this offer. Median 4 entries, max ~470 in sampled prod data.
-    # `currencies`: union of every `prices[].currency` on this offer.
-    # Catalogue carries 7 currencies today.
-    schema.add_field(
-        "price_list_ids", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=512, max_length=64,
-    )
-    schema.add_field(
-        "currencies", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=8, max_length=8,
-    )
-    # Per-currency (min, max) FLOAT envelope. Sentinel for "no price in
-    # this currency on this offer": +MAX_PRICE_SENTINEL on _min,
-    # -MAX_PRICE_SENTINEL on _max — Milvus 2.6 rejects NaN/±Inf so a
-    # large finite value is the working substitute (see
-    # `indexer/projection.py:MAX_PRICE_SENTINEL`). Range predicates
-    # (`{ccy}_price_min <= X AND {ccy}_price_max >= Y`) naturally
-    # exclude sentinel rows.
-    for ccy in CATALOG_CURRENCIES:
-        schema.add_field(f"{ccy}_price_min", DataType.FLOAT)
-        schema.add_field(f"{ccy}_price_max", DataType.FLOAT)
-    return schema
+    return build_offers_schema(client)
 
 
 def build_index_params(client: MilvusClient):
-    params = client.prepare_index_params()
-    # Required by Milvus — see `_placeholder_vector` note in build_schema.
-    params.add_index(
-        field_name="_placeholder_vector",
-        index_type="FLAT",
-        metric_type="L2",
-    )
-    for field in SCALAR_INDEX_FIELDS:
-        params.add_index(field_name=field, index_type="INVERTED", index_name=field)
-
-    # F8: STL_SORT on every per-currency envelope column. Path B's probe
-    # composes `{ccy}_price_min <= decoded_max AND {ccy}_price_max >=
-    # decoded_min` against these — STL_SORT is the right index for range
-    # queries on FLOAT scalars (Milvus 2.6 §"Scalar indexes" capability
-    # matrix).
-    for ccy in CATALOG_CURRENCIES:
-        for suffix in ("min", "max"):
-            field = f"{ccy}_price_{suffix}"
-            params.add_index(field_name=field, index_type="STL_SORT", index_name=field)
-    return params
+    return build_offers_index_params(client)
 
 
 def swing_alias(client: MilvusClient, alias: str, target: str) -> None:

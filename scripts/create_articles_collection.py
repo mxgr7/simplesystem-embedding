@@ -16,12 +16,9 @@ F9 splits the legacy single-collection topology into two:
     `offers_v{N}`   — per-offer scalars; `article_hash` join key; no
                      vectors. See `create_offers_collection.py`.
 
-Together they support correlated per-offer filtering (catalog × price-list ×
-price-range × core-marker on the *same* offer) at ~130M embeddings vs
-~510M if we'd flattened to one row per offer. See
-`issues/article-search-replacement-ftsearch-09-article-dedup.md` for the
-design rationale and the Milvus 2.6 capability survey that pins the
-two-collection split as the only viable shape.
+Schema + index spec live in `indexer/collection_specs.py` so the bulk
+indexer's drop-then-rebuild path can re-apply the exact same shape
+post-bulk_insert. This script is a thin CLI shim over those builders.
 
 Naming is operator-driven: pick `--version N` higher than the current
 articles version. ftsearch never embeds the versioned name; it talks to
@@ -35,172 +32,37 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
-from pymilvus import DataType, Function, FunctionType, MilvusClient
+# Make `indexer.*` importable when this script is invoked directly.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-DIM = 128
+from pymilvus import MilvusClient
 
-# Currencies the catalogue carries today (per F8). Each gets a paired
-# (min, max) FLOAT envelope column on the article row, refreshed at bulk
-# reindex (streaming updates owned by I2). Used by the F4 sort-by-price
-# browse path (no queryString) for ordered scan against
-# `{ccy}_price_min ASC` — never used as a filter (the precise per-offer
-# envelope lives on `offers_v{N}`, F8's territory).
-#
-# Add a new currency: append here and bump the collection version.
-CATALOG_CURRENCIES = ("eur", "chf", "huf", "pln", "gbp", "czk", "cny")
-
-VECTOR_INDEX_DEFAULTS = {
-    "HNSW": {"params": {"M": 16, "efConstruction": 200}},
-    "IVF_FLAT": {"params": {"nlist": 4096}},
-    "FLAT": {"params": {}},
-}
-
-# BM25 analyzer for `text_codes`. Conservative starting point matching
-# today's `offers_codes` (whitespace + lowercase + length cap). F6's German
-# pattern-replace + n-gram tokenization is absorbed by F9 PR3 (when
-# `text_codes` content folding actually lands); revisit then.
-BM25_ANALYZER_PARAMS = {
-    "tokenizer": "whitespace",
-    "filter": [
-        "lowercase",
-        {"type": "length", "min": 4, "max": 40},
-    ],
-}
-
-# Article-level scalars that get an INVERTED index. Picked from the F9
-# topology block — only fields that filter at article scope (categories,
-# eclass hierarchies, manufacturer). Everything per-offer (vendor,
-# catalog, price scope, core marker, relationships, ean, article_number,
-# features, delivery) lives on `offers_v{N}` and is indexed there.
-# `name` is stored but not indexed (retrieval/display field, BM25
-# corpus is in `text_codes`).
-#
-# `manufacturerName` is INVERTED so the F9 dedup path's article-side
-# `manufacturers_filter` can push down without a full collection scan.
-SCALAR_INDEX_FIELDS = (
-    "manufacturerName",
-    "category_l1",
-    "category_l2",
-    "category_l3",
-    "category_l4",
-    "category_l5",
-    "eclass5_code",
-    "eclass7_code",
-    "s2class_code",
+from indexer.collection_specs import (  # noqa: E402  (sys.path hack above)
+    ARTICLE_SCALAR_INDEX_FIELDS,
+    BM25_ANALYZER_PARAMS,
+    CATALOG_CURRENCIES,
+    DIM,
+    VECTOR_INDEX_DEFAULTS,
+    build_articles_index_params,
+    build_articles_schema,
 )
+
+# Keep these names available at this module path so existing imports
+# (`from scripts.create_articles_collection import SCALAR_INDEX_FIELDS,
+# build_schema, build_index_params`) keep working in tests + downstream.
+SCALAR_INDEX_FIELDS = ARTICLE_SCALAR_INDEX_FIELDS
 
 
 def build_schema(client: MilvusClient):
-    schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
-
-    # PK: sha256(name + manufacturerName + categories + eclass codes)
-    # truncated to 16 bytes, hex-encoded → 32 chars. See F9 "Hash function
-    # and embedded-field set". Idempotent upsert by hash.
-    schema.add_field("article_hash", DataType.VARCHAR, max_length=32, is_primary=True)
-    schema.add_field("offer_embedding", DataType.FLOAT16_VECTOR, dim=DIM)
-
-    # BM25 input + output. `text_codes` is the union of identifier strings
-    # across the article's offers (built by I1 / F9 PR2):
-    #   name + " " + manufacturerName +
-    #   " " + " ".join(distinct EANs across offers) +
-    #   " " + " ".join(distinct article_numbers across offers)
-    # Sized to fit name(1024) + manufacturer(256) + many identifiers with
-    # headroom.
-    schema.add_field(
-        "text_codes", DataType.VARCHAR, max_length=8192,
-        enable_analyzer=True, analyzer_params=BM25_ANALYZER_PARAMS,
-    )
-    schema.add_field("sparse_codes", DataType.SPARSE_FLOAT_VECTOR)
-    schema.add_function(Function(
-        name="bm25_codes",
-        function_type=FunctionType.BM25,
-        input_field_names=["text_codes"],
-        output_field_names=["sparse_codes"],
-    ))
-
-    # Article-level retrieval / display fields.
-    schema.add_field("name", DataType.VARCHAR, max_length=1024)
-    schema.add_field("manufacturerName", DataType.VARCHAR, max_length=256)
-
-    # Category prefix-paths joined with `¦` (`|` escape per CategoryPath.java).
-    # Sized identically to offers_v{N} for parity.
-    schema.add_field("category_l1", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=256)
-    schema.add_field("category_l2", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=640)
-    schema.add_field("category_l3", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=768)
-    schema.add_field("category_l4", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=1024)
-    schema.add_field("category_l5", DataType.ARRAY, element_type=DataType.VARCHAR, max_capacity=64, max_length=1280)
-
-    # eClass / S2Class hierarchies — full root → leaf array. See F1 / F3
-    # for the recall-correctness rationale (single-INT collapses the
-    # hierarchy).
-    schema.add_field("eclass5_code", DataType.ARRAY, element_type=DataType.INT32, max_capacity=16)
-    schema.add_field("eclass7_code", DataType.ARRAY, element_type=DataType.INT32, max_capacity=16)
-    schema.add_field("s2class_code", DataType.ARRAY, element_type=DataType.INT32, max_capacity=16)
-
-    # Customer-supplied SKU aliases (legacy `customerArticleNumbers` Mongo
-    # collection + the catalog-supplied `offer.offerParams.customerArticleNumber`
-    # folded in with the offer's `catalogVersionId` as version_id).
-    # Inverted-by-value shape mirroring the legacy ES Nested:
-    #   [{"value": "BOLT-001", "version_ids": ["uuid-A", "uuid-C"]}, ...]
-    # The per-value→version_ids mapping is load-bearing for entitlement —
-    # ftsearch scopes matches to only those version_ids the requesting
-    # customer is entitled to, and a flat parallel-arrays encoding loses
-    # that relation. JSON is the only Milvus 2.6 shape that preserves it
-    # without a multi-row flatten that breaks the one-row-per-hash
-    # invariant. Filtering will use the JSON predicate family in PR3 — no
-    # scalar index here. See F9 PR2b notes / `aggregate_article` for the
-    # UNION-by-value rule across the dedup group.
-    schema.add_field("customer_article_numbers", DataType.JSON)
-
-    # Per-currency envelope across all the article's offers. Two FLOAT
-    # columns per currency; NaN sentinel for "no price in this currency
-    # on this article" (Milvus comparison against NaN is false, so range
-    # predicates naturally exclude these rows). Powers F4 sort-by-price
-    # browse (ordered scan via STL_SORT). Never a filter input — F8
-    # places the precise per-offer envelope on `offers_v{N}`.
-    for ccy in CATALOG_CURRENCIES:
-        schema.add_field(f"{ccy}_price_min", DataType.FLOAT)
-        schema.add_field(f"{ccy}_price_max", DataType.FLOAT)
-
-    return schema
+    return build_articles_schema(client)
 
 
 def build_index_params(client: MilvusClient, vector_index: str):
-    cfg = VECTOR_INDEX_DEFAULTS[vector_index]
-    params = client.prepare_index_params()
-
-    # Dense vector index.
-    params.add_index(
-        field_name="offer_embedding",
-        index_type=vector_index,
-        metric_type="COSINE",
-        **cfg,
-    )
-
-    # BM25 sparse index. Mmap matches the existing offers_codes pattern —
-    # only the inverted-index structures live in RAM, posting lists mmap
-    # off disk.
-    params.add_index(
-        field_name="sparse_codes",
-        index_type="SPARSE_INVERTED_INDEX",
-        metric_type="BM25",
-        params={"mmap.enabled": True},
-        index_name="sparse_codes",
-    )
-
-    # Article-scope filter scalars.
-    for field in SCALAR_INDEX_FIELDS:
-        params.add_index(field_name=field, index_type="INVERTED", index_name=field)
-
-    # STL_SORT on every envelope column. Ordered scan for sort-by-price
-    # browse (F4) is the hot path; range filters use the same index.
-    for ccy in CATALOG_CURRENCIES:
-        for suffix in ("min", "max"):
-            field = f"{ccy}_price_{suffix}"
-            params.add_index(field_name=field, index_type="STL_SORT", index_name=field)
-
-    return params
+    return build_articles_index_params(client, vector_index)
 
 
 def swing_alias(client: MilvusClient, alias: str, target: str) -> None:

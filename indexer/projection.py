@@ -60,16 +60,33 @@ _PATH_ESCAPE = "|"
 
 _MAX_CATEGORY_DEPTH = 5  # Schema has category_l1..l5.
 
-# F9 article-hash. Bumping invalidates every existing hash and forces a
-# full rebuild through the alias-swing playbook (I3) — there is no live
-# migration path. Grep-able from operational tooling.
-HASH_VERSION = "v1"
+# Article-hash version. Embedded in every Redis cache key
+# (`tei:{HASH_VERSION}:{hash}`). Bumping orphans every existing cache
+# entry and forces a full rebuild through the alias-swing playbook
+# (I3) — there is no live migration path. Grep-able from operational
+# tooling.
+#
+# v2: switched the article-identity field set to mirror the production
+# training template (`configs/data/default.yaml`). v1 hashed only the
+# F9 article-scoped fields (name, manufacturerName, category_l*,
+# eclass*); v2 also includes description, ean, article_number,
+# manufacturerArticleNumber, manufacturerArticleType — the offer-scoped
+# fields the trained model actually consumes. Coordinated with
+# `scripts/prewarm_tei_cache.py`, which loads pre-computed embeddings
+# from `offers_embedded_full.parquet` under the v2 prefix.
+HASH_VERSION = "v2"
 
-# Canonical-form separators for the hash input. Both are ASCII control
-# chars (US, RS) that never appear in legitimate user-supplied text, so
-# the canonical string needs no escaping.
-_HASH_FIELD_SEP = "\x1f"
-_HASH_ELEM_SEP = "\x1e"
+# Canonical-form separators for the hash input.
+#   _HASH_FIELD_SEP — NUL between top-level fields. Cannot appear in
+#                     valid UTF-8 text values; no escaping needed.
+#   _HASH_PATH_SEP  — RS (record separator) between paths within
+#                     categoryPaths.
+#   _HASH_ELEM_SEP  — within a single path (matches the existing
+#                     `_PATH_SEPARATOR` used by the legacy
+#                     `commons/.../CategoryPath.java`).
+_HASH_FIELD_SEP = "\x00"
+_HASH_PATH_SEP = "\x1e"
+_HASH_ELEM_SEP = _PATH_SEPARATOR
 
 # Catalogue currencies the per-article envelope spans (F8 + F9). Mirror
 # of the same constant in `scripts/create_articles_collection.py`; kept
@@ -400,29 +417,42 @@ def project(record: dict[str, Any]) -> ProjectionResult:
 
 
 def compute_article_hash(row: dict[str, Any]) -> str:
-    """Hash the canonicalised embedded-field tuple for an article row.
+    """Hash the article-identity field set.
 
-    Inputs (per F9): name, manufacturerName, category_l1..l5,
-    eclass5_code, eclass7_code, s2class_code. Array fields are sorted to
-    canonicalise order — the projection's array order is not stable
-    across re-runs, so the hash must be order-independent. Missing
-    fields project to empty.
+    Inputs (camelCase + snake_case as in `offers_grouped.parquet`):
+    name, manufacturerName, description, categoryPaths, ean,
+    article_number, manufacturerArticleNumber, manufacturerArticleType.
 
-    Output: 32-char lowercase hex (sha256 truncated to 16 bytes).
-    Collision probability at 10⁸ articles ≈ 10⁻²⁰. Halves the IN-clause
-    wire cost vs full sha256 — relevant at PATH_B_HASH_LIMIT scale."""
-    cat_blocks = []
-    for d in range(1, _MAX_CATEGORY_DEPTH + 1):
-        elems = sorted(row.get(f"category_l{d}") or [])
-        cat_blocks.append(_HASH_ELEM_SEP.join(elems))
-    eclass5 = _HASH_ELEM_SEP.join(str(c) for c in sorted(row.get("eclass5_code") or []))
-    eclass7 = _HASH_ELEM_SEP.join(str(c) for c in sorted(row.get("eclass7_code") or []))
-    s2class = _HASH_ELEM_SEP.join(str(c) for c in sorted(row.get("s2class_code") or []))
+    These mirror the production training template
+    (`configs/data/default.yaml`): two articles with identical values
+    across this set produce identical embedding text and therefore the
+    same vector — the cache key partitions vectors by exactly the input
+    that drives them. (v1 omitted the offer-scoped fields here, which
+    let the indexer compute hashes that didn't actually capture the
+    embedding-input identity. See HASH_VERSION docstring.)
+
+    Algorithm: NUL-join the raw values; NULL → empty string;
+    `categoryPaths` canonicalised by sorting the joined paths so source
+    order doesn't perturb the hash. Output: 32-char lowercase hex
+    (sha256 truncated to 16 bytes). Collision probability at 1.6×10⁸
+    articles ≈ 4×10⁻²³ — negligible at any plausible corpus size."""
+    paths: list[str] = []
+    for cp in row.get("categoryPaths") or []:
+        elements = cp.get("elements") if isinstance(cp, dict) else cp
+        if elements:
+            paths.append(_HASH_ELEM_SEP.join(elements))
+    paths.sort()
+    cats = _HASH_PATH_SEP.join(paths)
+
     canonical = _HASH_FIELD_SEP.join([
         row.get("name") or "",
         row.get("manufacturerName") or "",
-        *cat_blocks,
-        eclass5, eclass7, s2class,
+        row.get("description") or "",
+        cats,
+        row.get("ean") or "",
+        row.get("article_number") or "",
+        row.get("manufacturerArticleNumber") or "",
+        row.get("manufacturerArticleType") or "",
     ])
     digest = hashlib.sha256(canonical.encode("utf-8")).digest()
     return digest[:16].hex()

@@ -30,6 +30,7 @@ nothing).
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -73,13 +74,24 @@ class TEICache:
         *,
         tei_url: str,
         redis_client: redis.Redis,
-        tei_batch_size: int = 64,
+        tei_batch_size: int = 4096,
+        tei_concurrency: int = 8,
         timeout_s: float = 60.0,
     ) -> None:
         self._tei_url = tei_url.rstrip("/")
         self._redis = redis_client
         self._tei_batch = tei_batch_size
-        self._http = httpx.Client(timeout=timeout_s)
+        self._tei_concurrency = max(1, tei_concurrency)
+        # httpx.Client is thread-safe (shared connection pool). Set
+        # connection-pool max_connections high enough to actually
+        # achieve the requested concurrency.
+        self._http = httpx.Client(
+            timeout=timeout_s,
+            limits=httpx.Limits(
+                max_connections=self._tei_concurrency * 2,
+                max_keepalive_connections=self._tei_concurrency,
+            ),
+        )
         self.stats = TEICacheStats()
 
     def close(self) -> None:
@@ -124,37 +136,60 @@ class TEICache:
         pipe.execute()
         return sum(len(b) for b in hash_to_bytes.values())
 
-    def _tei_embed(self, texts: list[str]) -> np.ndarray:
-        """One TEI call. Returns shape (n, dim) fp32 array — caller
-        casts to fp16 for storage. Splits into `_tei_batch` chunks so
-        the request payload stays bounded for TEI's per-request memory
-        ceiling.
+    def _embed_chunk(self, chunk: list[str]) -> np.ndarray:
+        """Single TEI HTTP call. Thread-safe: httpx.Client + the GIL-
+        atomic stats counter increment. Caller is responsible for
+        chunk-size sanity (≤ TEI server's --max-client-batch-size)."""
+        resp = self._http.post(
+            f"{self._tei_url}/embed",
+            json={"inputs": chunk, "truncate": True},
+        )
+        resp.raise_for_status()
+        arr = np.asarray(resp.json(), dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[1] != _VECTOR_DIM:
+            raise RuntimeError(
+                f"TEI returned unexpected shape {arr.shape} (expected (*, {_VECTOR_DIM}))"
+            )
+        self.stats.tei_calls += 1
+        return arr
 
-        `truncate: true` is set per-request because the production
-        model checkpoint (`useful-cub-58-st`) was trained with a
-        ~32-token max_input_length. Article texts (`embedding_text.py`)
-        can run longer when an article carries multiple categories or
-        eclass codes; truncating right-side keeps the higher-signal
-        prefix (`name`, `manufacturerName`) intact. Without this flag
-        TEI returns 413 + 'inputs must have less than 32 tokens'."""
+    def _tei_embed(self, texts: list[str]) -> np.ndarray:
+        """Embed `texts` via TEI in `_tei_batch`-sized chunks, dispatched
+        across `_tei_concurrency` threads in parallel. Returns shape
+        (n, dim) fp32 array; caller casts to fp16 for storage.
+
+        Why parallel: even a 4096-text chunk only fills a fraction of
+        TEI's per-request capacity (max_concurrent_requests=1024 on
+        the GPU server); single-stream client + sync httpx leaves the
+        GPU mostly idle waiting on TLS round-trips and JSON decode.
+        Fanning out across threads saturates the server's
+        request-batcher, which packs concurrent client requests into
+        bigger forward passes server-side.
+
+        `truncate: true` is set per-request so TEI silently truncates
+        text exceeding `--max-input-length` (server-side ceiling)
+        instead of 413-ing. The training model accepts up to 256
+        tokens; older deployments capped at 32, in which case the
+        higher-signal prefix (`name`, `manufacturerName`) survives the
+        clip."""
         if not texts:
             return np.empty((0, _VECTOR_DIM), dtype=np.float32)
-        chunks: list[np.ndarray] = []
-        for i in range(0, len(texts), self._tei_batch):
-            chunk = texts[i : i + self._tei_batch]
-            resp = self._http.post(
-                f"{self._tei_url}/embed",
-                json={"inputs": chunk, "truncate": True},
-            )
-            resp.raise_for_status()
-            arr = np.asarray(resp.json(), dtype=np.float32)
-            if arr.ndim != 2 or arr.shape[1] != _VECTOR_DIM:
-                raise RuntimeError(
-                    f"TEI returned unexpected shape {arr.shape} (expected (*, {_VECTOR_DIM}))"
-                )
-            chunks.append(arr)
-            self.stats.tei_calls += 1
-        return np.concatenate(chunks, axis=0)
+        # `executor.map` preserves input order in its result iterator,
+        # so we can concatenate in the order map yields without an
+        # explicit reorder step.
+        chunked: list[list[str]] = [
+            texts[i : i + self._tei_batch]
+            for i in range(0, len(texts), self._tei_batch)
+        ]
+        if len(chunked) == 1 or self._tei_concurrency == 1:
+            results = [self._embed_chunk(c) for c in chunked]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(self._tei_concurrency, len(chunked)),
+                thread_name_prefix="tei",
+            ) as ex:
+                results = list(ex.map(self._embed_chunk, chunked))
+        return np.concatenate(results, axis=0)
 
     # --- public API --------------------------------------------------
 

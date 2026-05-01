@@ -38,15 +38,20 @@ Encoding rules (pinned by Milvus 2.6 bulk-insert format):
   - `BM25` `sparse_codes` is *server-computed* from `text_codes` via
     the schema's BM25 function — it is NOT included in the parquet.
 
-Indexes MUST be defined on the collection BEFORE the first
-`do_bulk_insert` is submitted. Milvus's bulk-insert pipeline builds
-indexes inline during its `IndexBuilding` stage; post-flush
-`create_index` on already-sealed bulk-insert segments is a silent
-no-op (`state=Finished indexed_rows=0`). The
-`scripts/create_*_collection.py` builders register all indexes at
-collection-create time, so this is satisfied as long as those
-scripts ran first — which the orchestrator's existence check
-enforces.
+Index lifecycle: at collection-create time the
+`scripts/create_*_collection.py` builders register the full index
+recipe so the collection is queryable immediately after creation.
+The bulk-insert orchestrator can OPTIONALLY drop indexes + release
+the collection before Phase 1 and re-apply post-flush
+(`run_bulk_indexer(index_cycle=True)`, CLI `--index-cycle`). This is
+off by default — empirically a ~50s regression at shard scale on
+Milvus 2.6.15 because the per-chunk state-machine floor (~15s)
+dominates over per-chunk inline IndexBuilding on small data, so
+removing the inline build saves nothing while the rebuild adds
+fixed cost. The cycle is intended for full-catalog reindexes where
+chunks are 1M+ rows each and inline HNSW build genuinely costs
+seconds per chunk — see `indexer/RUNBOOK.md` for the trade-off
+matrix and per-chunk timing comparison.
 """
 
 from __future__ import annotations
@@ -95,7 +100,12 @@ class BulkInsertConfig:
     parquet_compression: str = "zstd"
     parquet_compression_level: int = 1
     write_batch_rows: int = 100_000
-    poll_interval_s: float = 5.0
+    # Polling cadence for `do_bulk_insert` state. Lower than the legacy
+    # 5.0s default so smoke runs (single small chunk) don't pay several
+    # seconds of detect-rounding overhead. At production scale the gain
+    # is negligible (only the last chunk's detection lag matters), so
+    # keeping this tight costs essentially nothing in either regime.
+    poll_interval_s: float = 1.0
     chunk_rows: int = 1_000_000
     upload_workers: int = 4
     # Retry tunables. boto3 retries S3 ops itself via its `retries`

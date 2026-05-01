@@ -300,10 +300,14 @@
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 68},
       "targets": [
-        {"expr": "100 * nvidia_smi_utilization_gpu_ratio{job=\"gpu-sstei\"}", "refId": "A", "legendFormat": "compute %", "interval": "1m"},
-        {"expr": "100 * nvidia_smi_utilization_memory_ratio{job=\"gpu-sstei\"}", "refId": "B", "legendFormat": "memory bus %", "interval": "1m"}
+        {"expr": "100 * nvidia_smi_utilization_gpu_ratio{job=\"gpu-sstei\"}", "refId": "A", "legendFormat": "compute % (instant)", "interval": "1m"},
+        {"expr": "100 * max_over_time(nvidia_smi_utilization_gpu_ratio{job=\"gpu-sstei\"}[5m])", "refId": "B", "legendFormat": "compute % (5m peak)", "interval": "1m"},
+        {"expr": "100 * nvidia_smi_utilization_memory_ratio{job=\"gpu-sstei\"}", "refId": "C", "legendFormat": "memory bus % (instant)", "interval": "1m"},
+        {"expr": "100 * max_over_time(nvidia_smi_utilization_memory_ratio{job=\"gpu-sstei\"}[5m])", "refId": "D", "legendFormat": "memory bus % (5m peak)", "interval": "1m"}
       ],
-      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 1}, "unit": "percent", "min": 0, "max": 100}, "overrides": []},
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 1}, "unit": "percent", "min": 0, "max": 100}, "overrides": [
+        {"matcher": {"id": "byRegexp", "options": ".*5m peak.*"}, "properties": [{"id": "custom.fillOpacity", "value": 0}, {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [6, 4]}}]}
+      ]},
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
     },
     {
