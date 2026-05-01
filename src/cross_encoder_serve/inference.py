@@ -156,6 +156,26 @@ class Reranker:
         self.tokenizer = AutoTokenizer.from_pretrained(self.hcfg.model.model_name, use_fast=True)
         self.max_pair_length = int(self.hcfg.data.max_pair_length)
         self.renderer = RowTextRenderer(self.hcfg.data)
+        # Fast batched tokenize path used by `_pipelined_forward`. The HF
+        # `tokenizer(...)` Python wrapper costs ~1000 ms of pure Python
+        # overhead per 2000-pair call (arg validation, per-call padding logic,
+        # tensor build) on top of the Rust BPE work. Calling
+        # `tokenizer._tokenizer.encode_batch_fast(pairs)` directly skips all
+        # that and returns native Encoding objects; we then assemble tensors
+        # by hand with `np.empty(...).fill(e.ids)` for another ~150 ms of
+        # savings vs `torch.tensor([list-comp])`. Padding/truncation are
+        # pre-configured here once on the underlying Rust tokenizer; the
+        # HF Python wrapper still works for the LGBM-on path which uses
+        # the slow render+tokenize loop.
+        self._fast_tok = self.tokenizer._tokenizer
+        self._fast_tok.enable_padding(
+            pad_id=self.tokenizer.pad_token_id,
+            pad_token=self.tokenizer.pad_token,
+            length=None,
+        )
+        self._fast_tok.enable_truncation(
+            max_length=self.max_pair_length, strategy="only_second"
+        )
 
         # Always-on feature extractor (independent of how the CE was trained).
         self.extractor = FeatureExtractor(_serving_features_cfg())
@@ -305,6 +325,8 @@ class Reranker:
           manufacturer_article_number, manufacturer_article_type,
           category_paths, description
         """
+        import os, time
+        debug = os.environ.get("SERVE_DEBUG_TIMING", "0") == "1"
         if not offers:
             return []
 
@@ -312,9 +334,12 @@ class Reranker:
             # Fast path: pipeline CPU render+tokenize with GPU forward so the
             # ~800 ms prep cost is hidden behind the ~1.9 s forward instead
             # of being serial in front of it.
+            t0 = time.perf_counter() if debug else 0
             logits = self._pipelined_forward(query, offers).float()
+            t1 = time.perf_counter() if debug else 0
             p_exact_cal = F.softmax(logits / self.cfg.temperature, dim=-1)[:, EXACT_IDX].cpu().numpy()
-            return [
+            t2 = time.perf_counter() if debug else 0
+            out = [
                 OfferScore(
                     offer_id=str(offer.get("offer_id", "")),
                     p_irrelevant=0.0, p_complement=0.0, p_substitute=0.0, p_exact=0.0,
@@ -322,6 +347,15 @@ class Reranker:
                 )
                 for offer, p_cal in zip(offers, p_exact_cal)
             ]
+            if debug:
+                t3 = time.perf_counter()
+                logger.warning(
+                    "[stage] pipelined_forward=%.0fms calibration=%.0fms response_objs=%.0fms"
+                    " | rerank_total=%.0fms",
+                    (t1 - t0) * 1000, (t2 - t1) * 1000,
+                    (t3 - t2) * 1000, (t3 - t0) * 1000,
+                )
+            return out
 
         # 1. Build query/offer texts the same way training did.
         query_text, offer_texts, contexts = self._prepare_texts(query, offers)
@@ -401,38 +435,96 @@ class Reranker:
         on the distilled gelectra-base path. Only used when LGBM is off and
         runtime is torch (the production hot path)."""
         from concurrent.futures import ThreadPoolExecutor
+        import os as _os
+        import time as _time
+        debug = _os.environ.get("SERVE_DEBUG_TIMING", "0") == "1"
+        # Per-stage CPU-only timers — sum across all chunks. The GPU forward
+        # timer is wall-clock (it overlaps with prep on a worker thread).
+        sum_render = sum_tokenize = sum_h2d = sum_forward = sum_wait = 0.0
+        wall_t0 = _time.perf_counter() if debug else 0
         chunk_size = max(1, int(self.cfg.max_forward_batch))
         n = len(offers)
         clean_html = bool(getattr(self.hcfg.data, "clean_html", True))
         query_text = _normalize_text_fast(query)
 
         def render_tok_h2d(offers_chunk):
+            nonlocal sum_render, sum_tokenize, sum_h2d
+            tr0 = _time.perf_counter() if debug else 0
             texts = [_render_offer_fast(o, clean_html) for o in offers_chunk]
-            enc = self.tokenizer(
-                [query_text] * len(texts),
-                texts,
-                padding=True,
-                truncation="only_second",
-                max_length=self.max_pair_length,
-                return_tensors="pt",
-                return_token_type_ids=True,
-            )
-            return {k: v.to(self.device, non_blocking=True) for k, v in enc.items()}
+            tr1 = _time.perf_counter() if debug else 0
+            # Direct Rust call. `encode_batch_fast` releases the GIL and
+            # rayon-parallelizes over pairs. Padding+truncation come from the
+            # `enable_padding` / `enable_truncation` settings configured at
+            # init. Output is a list of native Encoding objects.
+            pairs = list(zip([query_text] * len(texts), texts))
+            encs = self._fast_tok.encode_batch_fast(pairs, add_special_tokens=True)
+            # Assemble into numpy arrays via pre-allocated buffers, which is
+            # ~2× faster than `torch.tensor([e.ids for e in encs])` because
+            # the latter has to walk the whole list-of-lists in Python before
+            # the constructor sees it. `from_numpy` is zero-copy.
+            n_pairs = len(encs)
+            seq_len = len(encs[0].ids) if encs else 0
+            ids_np = np.empty((n_pairs, seq_len), dtype=np.int64)
+            mask_np = np.empty((n_pairs, seq_len), dtype=np.int64)
+            ttype_np = np.empty((n_pairs, seq_len), dtype=np.int64)
+            for j, e in enumerate(encs):
+                ids_np[j] = e.ids
+                mask_np[j] = e.attention_mask
+                ttype_np[j] = e.type_ids
+            input_ids = torch.from_numpy(ids_np)
+            attention_mask = torch.from_numpy(mask_np)
+            token_type_ids = torch.from_numpy(ttype_np)
+            tr2 = _time.perf_counter() if debug else 0
+            out = {
+                "input_ids": input_ids.to(self.device, non_blocking=True),
+                "attention_mask": attention_mask.to(self.device, non_blocking=True),
+                "token_type_ids": token_type_ids.to(self.device, non_blocking=True),
+            }
+            tr3 = _time.perf_counter() if debug else 0
+            if debug:
+                sum_render += tr1 - tr0
+                sum_tokenize += tr2 - tr1
+                sum_h2d += tr3 - tr2
+            return out
 
         out_chunks: list[torch.Tensor] = []
         chunks = [offers[i : i + chunk_size] for i in range(0, n, chunk_size)]
         with ThreadPoolExecutor(max_workers=1) as ex:
             next_future = ex.submit(render_tok_h2d, chunks[0])
             for i, _ in enumerate(chunks):
+                tw0 = _time.perf_counter() if debug else 0
                 enc = next_future.result()
+                if debug:
+                    sum_wait += _time.perf_counter() - tw0
                 if i + 1 < len(chunks):
                     next_future = ex.submit(render_tok_h2d, chunks[i + 1])
+                tf0 = _time.perf_counter() if debug else 0
                 if self.autocast_dtype is not None and self.device == "cuda":
                     with torch.autocast(device_type="cuda", dtype=self.autocast_dtype):
                         out_chunks.append(self.model(enc))
                 else:
                     out_chunks.append(self.model(enc))
-        return torch.cat(out_chunks, dim=0)
+                if debug:
+                    sum_forward += _time.perf_counter() - tf0
+        result = torch.cat(out_chunks, dim=0)
+        if debug:
+            wall = _time.perf_counter() - wall_t0
+            # `sum_wait` is the main thread's total time blocked waiting on the
+            # worker thread's prep — i.e., the time the GPU spent idle because
+            # prep was the critical path. `sum_forward` is the main thread's
+            # GPU-forward dispatch time across 16 chunks. The render/tokenize/h2d
+            # sums are worker-thread CPU time across 16 chunks; they overlap
+            # with GPU forward via the ThreadPoolExecutor pipeline.
+            bubble = max(0.0, sum_wait - sum_forward)  # GPU idle bubble
+            logger.warning(
+                "[pipe] wall=%.0fms wait=%.0fms forward(GPU dispatch)=%.0fms"
+                " bubble=%.0fms | sum_render=%.0fms sum_tokenize=%.0fms"
+                " sum_h2d=%.0fms | n_chunks=%d chunk_size=%d",
+                wall * 1000, sum_wait * 1000, sum_forward * 1000, bubble * 1000,
+                sum_render * 1000, sum_tokenize * 1000, sum_h2d * 1000,
+                len(chunks), chunk_size,
+            )
+        return result
 
     def _forward(self, query_text: str, offer_texts: list[str]) -> torch.Tensor:
         # Tokenize, then chunk-forward through the configured runtime. ONNX

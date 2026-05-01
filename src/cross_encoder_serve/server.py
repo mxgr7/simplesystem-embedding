@@ -239,18 +239,25 @@ async def rerank(request: Request):
     """
     import asyncio
     import orjson
+    import os as _os
+    import time as _time
+    debug = _os.environ.get("SERVE_DEBUG_TIMING", "0") == "1"
+    t0 = _time.perf_counter() if debug else 0
     body = await request.body()
+    t1 = _time.perf_counter() if debug else 0
     payload = orjson.loads(body)
     query = payload.get("query")
     offers = payload.get("offers") or []
     threshold = payload.get("threshold")
     top_k = payload.get("top_k")
+    t2 = _time.perf_counter() if debug else 0
     if not offers:
         return ORJSONResponse({"query": query, "n_input": 0, "n_returned": 0, "results": []})
 
     reranker = _get_reranker()
     # Run the blocking reranker on a worker thread so the event loop stays free.
     scores = await asyncio.to_thread(reranker.rerank, query, offers)
+    t3 = _time.perf_counter() if debug else 0
 
     # Build the response as plain dicts; orjson serializes ~3× faster than
     # the default json + pydantic-model_dump path.
@@ -271,9 +278,20 @@ async def rerank(request: Request):
     results.sort(key=lambda r: -r["p_exact_calibrated"])
     if top_k is not None:
         results = results[: int(top_k)]
-    return ORJSONResponse({
+    t4 = _time.perf_counter() if debug else 0
+    resp = ORJSONResponse({
         "query": query,
         "n_input": len(offers),
         "n_returned": len(results),
         "results": results,
     })
+    if debug:
+        t5 = _time.perf_counter()
+        import logging as _logging
+        _logging.getLogger("cross_encoder_serve.server").warning(
+            "[req] body_read=%.0fms json_parse=%.0fms reranker=%.0fms"
+            " result_dicts=%.0fms orjson_response=%.0fms | n_offers=%d",
+            (t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000,
+            (t4 - t3) * 1000, (t5 - t4) * 1000, len(offers),
+        )
+    return resp
