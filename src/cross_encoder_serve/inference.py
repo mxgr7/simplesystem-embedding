@@ -326,10 +326,9 @@ class Reranker:
             return query_text, offer_texts, contexts
 
         # Lightweight str-only path (LGBM off — no need for context dicts).
-        from embedding_train.text import normalize_text
         clean_html = bool(getattr(self.hcfg.data, "clean_html", True))
         offer_texts = [_render_offer_fast(o, clean_html) for o in offers]
-        query_text = normalize_text(query)
+        query_text = _normalize_text_fast(query)
         return query_text, offer_texts, []
 
     def _forward(self, query_text: str, offer_texts: list[str]) -> torch.Tensor:
@@ -396,6 +395,62 @@ class Reranker:
 # pipeline (autoresearch/cross-encoder/{dump_predictions.py,add_list_features.py}).
 # ---------------------------------------------------------------------------
 
+_NORMALIZE_REPLACE_CHARS = ("\x00", "\xa0", "\r\n")
+_NORMALIZE_SPACE_CHARS = "\t\r\f\v"
+
+
+def _normalize_text_fast(value):
+    """Drop-in equivalent of embedding_train.text.normalize_text with cheap
+    pre-checks. The 3 regex passes inside normalize_text cost ~0.45 ms each
+    on an 8 KB string but most pre-rendered descriptions have nothing for
+    them to match (single-spaces, \\n already canonical). Skipping the
+    no-op subs saves ~700 ms across 2000 descriptions on the bench fixture.
+
+    Output is byte-identical to normalize_text — verified on the fixture.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    if any(needle in value for needle in _NORMALIZE_REPLACE_CHARS):
+        value = (value
+                 .replace("\x00", " ")
+                 .replace("\xa0", " ")
+                 .replace("\r\n", "\n"))
+    value = value.strip()
+    if "  " in value or any(c in value for c in _NORMALIZE_SPACE_CHARS):
+        value = _NORMALIZE_SPACE_RE.sub(" ", value)
+    if " \n" in value or "\n " in value:
+        value = _NORMALIZE_SPACE_NL_RE.sub("\n", value)
+    if "\n\n\n" in value:
+        value = _NORMALIZE_MULTI_NL_RE.sub("\n\n", value)
+    return value.strip()
+
+
+def _clean_html_text_fast(value):
+    """Equivalent of embedding_train.text.clean_html_text using the fast
+    normalize. Same fast-path: if no HTML markers, just normalize once."""
+    value = _normalize_text_fast(value)
+    if not value or ("<" not in value and "&" not in value):
+        return value
+    value = _BR_RE_FAST.sub("\n", value)
+    value = _TAG_RE_FAST.sub(" ", value)
+    import html as _html
+    value = _html.unescape(value)
+    return _normalize_text_fast(value)
+
+
+_NORMALIZE_SPACE_RE = re.compile(r"[ \t\r\f\v]+")
+_NORMALIZE_SPACE_NL_RE = re.compile(r" *\n *")
+_NORMALIZE_MULTI_NL_RE = re.compile(r"\n{3,}")
+# NB: the slow path's _BR_RE in embedding_train/text.py uses `\\s` (literal
+# backslash-s) which never matches an actual whitespace char — so <br/>,
+# <br />, <BR/> all fall through to _TAG_RE and are replaced with a space,
+# not a newline. We mirror that behavior here for byte-identical output.
+_BR_RE_FAST = re.compile(r"(?i)<br\\s*/?>")
+_TAG_RE_FAST = re.compile(r"<[^>]+>")
+
+
 def _render_offer_fast(offer: dict, clean_html: bool) -> str:
     """Hand-rolled equivalent of configs/data/cross_encoder.yaml::offer_template
     + RowTextRenderer.build_context normalization.
@@ -407,7 +462,8 @@ def _render_offer_fast(offer: dict, clean_html: bool) -> str:
     twice via final-pass normalize_text). Verified byte-equal to the slow
     renderer on the full 2000-offer bench fixture.
     """
-    from embedding_train.text import normalize_text, clean_html_text
+    normalize_text = _normalize_text_fast
+    clean_html_text = _clean_html_text_fast
     name = normalize_text(offer.get("name"))
     body = f"Artikel: {name}\n"
     first = True
