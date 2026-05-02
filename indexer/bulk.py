@@ -618,6 +618,7 @@ def run_bulk_indexer(
     duckdb_memory_limit_gb: int | None = None,
     duckdb_threads: int = 0,
     n_chunks: int = 1,
+    start_chunk: int = 0,
     s3_region: str | None = "eu-central-1",
     # Sink — "upsert" (default, per-row) or "bulk_insert" (parquet → MinIO →
     # `do_bulk_insert`). Production-scale runs need bulk_insert; smoke runs
@@ -783,7 +784,7 @@ def run_bulk_indexer(
         tei_concurrency=tei_concurrency,
     )
     with cache_ctx as cache:
-        for chunk_idx in range(max(1, n_chunks)):
+        for chunk_idx in range(start_chunk, max(1, n_chunks)):
             if n_chunks > 1:
                 ca, co = _materialise_chunk_streams(
                     con, n_chunks=n_chunks, chunk_idx=chunk_idx,

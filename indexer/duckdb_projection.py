@@ -161,28 +161,57 @@ CREATE OR REPLACE MACRO unwrap_int(v) AS COALESCE(
     TRY_CAST(v::JSON AS BIGINT)
 );
 
--- F9 article-hash. Mirrors `compute_article_hash` in indexer.projection.
--- sha256 of the canonical embedded-field tuple (name, manufacturerName,
--- 5 category levels, 3 eclass arrays), separated by US/RS control chars
--- that never appear in legitimate user text. Arrays sorted to make hash
--- order-independent; `substr(.., 1, 32)` gives the first 16 bytes hex.
--- DuckDB's `sha256()` returns a 64-char lowercase hex VARCHAR — no
--- to_hex() needed (an extra to_hex() would double-encode).
+-- F9 article-hash, v2: mirrors `compute_article_hash` in
+-- indexer.projection BYTE-FOR-BYTE. The cache key in Redis
+-- (`tei:v2:{hash}`) is computed from this exact algorithm — any
+-- divergence and the prewarmed embeddings become unreachable.
+--
+-- Field set is the embedding-input identity (what the model actually
+-- sees), not the F9 article-dedup field set: 8 fields total.
+--
+-- Canonical form:
+--     name || NUL || mfg || NUL || description || NUL ||
+--     <sorted-joined-category-paths> || NUL ||
+--     ean || NUL || article_number || NUL ||
+--     mfgArticleNumber || NUL || mfgArticleType
+--
+-- Where category-paths are: for each cp in categoryPaths with non-empty
+-- elements, join elements with '¦' (PATH_SEPARATOR). Sort the resulting
+-- list. Join sorted entries with RS (\x1e). NULL → empty string.
+--
+-- Then sha256 → take first 16 bytes → hex (32-char VARCHAR).
+-- _v2_canon_paths returns the BLOB form (UTF-8 bytes) of the
+-- canonical category-paths string. We work in BLOB throughout because
+-- DuckDB VARCHAR can't contain NUL bytes (the hash needs NUL as a
+-- field separator to match the Python algorithm).
+CREATE OR REPLACE MACRO _v2_canon_paths(category_paths) AS
+    encode(array_to_string(
+        array_sort(
+            list_transform(
+                list_filter(
+                    COALESCE(category_paths, []::STRUCT(elements VARCHAR[])[]),
+                    cp -> cp.elements IS NOT NULL AND len(cp.elements) > 0
+                ),
+                cp -> array_to_string(cp.elements, '¦')
+            )
+        ),
+        chr(30)  -- RS, \\x1e
+    ));
+
 CREATE OR REPLACE MACRO compute_article_hash(
-    a_name, a_mfg, c1, c2, c3, c4, c5, e5, e7, s2
+    a_name, a_mfg, a_desc, category_paths,
+    a_ean, a_article_number, a_mfg_article_number, a_mfg_article_type
 ) AS
     substr(
         sha256(
-            COALESCE(a_name, '') || E'\\x1f' ||
-            COALESCE(a_mfg, '') || E'\\x1f' ||
-            array_to_string(array_sort(COALESCE(c1, []::VARCHAR[])), E'\\x1e') || E'\\x1f' ||
-            array_to_string(array_sort(COALESCE(c2, []::VARCHAR[])), E'\\x1e') || E'\\x1f' ||
-            array_to_string(array_sort(COALESCE(c3, []::VARCHAR[])), E'\\x1e') || E'\\x1f' ||
-            array_to_string(array_sort(COALESCE(c4, []::VARCHAR[])), E'\\x1e') || E'\\x1f' ||
-            array_to_string(array_sort(COALESCE(c5, []::VARCHAR[])), E'\\x1e') || E'\\x1f' ||
-            array_to_string(list_transform(array_sort(COALESCE(e5, []::INTEGER[])), x -> x::VARCHAR), E'\\x1e') || E'\\x1f' ||
-            array_to_string(list_transform(array_sort(COALESCE(e7, []::INTEGER[])), x -> x::VARCHAR), E'\\x1e') || E'\\x1f' ||
-            array_to_string(list_transform(array_sort(COALESCE(s2, []::INTEGER[])), x -> x::VARCHAR), E'\\x1e')
+            encode(COALESCE(a_name, '')) || '\\x00'::BLOB ||
+            encode(COALESCE(a_mfg, '')) || '\\x00'::BLOB ||
+            encode(COALESCE(a_desc, '')) || '\\x00'::BLOB ||
+            _v2_canon_paths(category_paths) || '\\x00'::BLOB ||
+            encode(COALESCE(a_ean, '')) || '\\x00'::BLOB ||
+            encode(COALESCE(a_article_number, '')) || '\\x00'::BLOB ||
+            encode(COALESCE(a_mfg_article_number, '')) || '\\x00'::BLOB ||
+            encode(COALESCE(a_mfg_article_type, ''))
         ),
         1, 32
     );
@@ -235,7 +264,16 @@ _OFFER_PARAMS_TYPE = (
     # `deliveryTime` is JSON to absorb both raw EJSON-canonical
     # `{"$numberInt": "5"}` and the wrapper-JSON pre-stripped plain int.
     # The `unwrap_int` SQL macro normalises both into BIGINT downstream.
-    'deliveryTime JSON'
+    'deliveryTime JSON, '
+    # The next 3 fields are needed by the v2 article_hash macro (which
+    # mirrors the Python prewarm hash). They are not used by any other
+    # downstream stage. The Mongo Atlas snapshot has these fields on
+    # every offer; declaring them here ensures DuckDB's read_json
+    # captures them at parquet conversion time. Without them the SQL
+    # hash diverges from the prewarm hash and the Redis cache misses.
+    '"description" VARCHAR, '
+    'manufacturerArticleNumber VARCHAR, '
+    'manufacturerArticleType VARCHAR'
     ')'
 )
 _INNER_OFFER_TYPE = (
@@ -622,7 +660,22 @@ projected AS (
                 FROM all_pairs
                 GROUP BY value
             )
-        ) AS customer_article_numbers
+        ) AS customer_article_numbers,
+
+        -- v2 article_hash (computed inline using all 8 embedding-input
+        -- fields; mirrors the Python prewarm hash byte-for-byte). Computed
+        -- here in projected so it can be carried through to article/offer
+        -- aggregations without a JOIN-back.
+        compute_article_hash(
+            COALESCE(params."name", ''),
+            COALESCE(params.manufacturerName, ''),
+            COALESCE(params."description", ''),
+            COALESCE(params.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+            COALESCE(params.ean, ''),
+            outer_offer.articleNumber,
+            COALESCE(params.manufacturerArticleNumber, ''),
+            COALESCE(params.manufacturerArticleType, '')
+        ) AS article_hash
     FROM flat
 )"""
 
@@ -644,7 +697,8 @@ finalized AS (
         eclass5_code, eclass7_code, s2class_code,
         COALESCE(features, []::VARCHAR[]) AS features,
         relationship_accessory_for, relationship_spare_part_for, relationship_similar_to,
-        COALESCE(customer_article_numbers, []::STRUCT(value VARCHAR, version_ids VARCHAR[])[]) AS customer_article_numbers
+        COALESCE(customer_article_numbers, []::STRUCT(value VARCHAR, version_ids VARCHAR[])[]) AS customer_article_numbers,
+        article_hash
     FROM projected
 )"""
 
@@ -866,19 +920,12 @@ offers AS (
 )"""
 
 
-# Hash CTE — adds `article_hash` to each finalized row. Sits between
-# `finalized` and the article/offer CTEs. Defined here so all consumers
-# pick up the same column shape.
+# Hash CTE — kept as a passthrough rename for downstream consistency
+# (article_hash is now computed earlier in the projected CTE, since the
+# v2 macro requires inputs that aren't propagated to finalized).
 _WITH_HASH_CTE_SQL = """
 with_hash AS (
-    SELECT
-        f.*,
-        compute_article_hash(
-            "name", manufacturerName,
-            category_l1, category_l2, category_l3, category_l4, category_l5,
-            eclass5_code, eclass7_code, s2class_code
-        ) AS article_hash
-    FROM finalized f
+    SELECT * FROM finalized
 )"""
 
 
@@ -1012,17 +1059,34 @@ WITH offer_derived AS (
                 'version_id': uuid_str(o.catalogVersionId)
             }
             ELSE NULL
-        END AS inline_can_pair
+        END AS inline_can_pair,
+
+        -- ---- carry-through: raw v2-hash inputs (used in the outer
+        -- SELECT to compute article_hash). These columns are not
+        -- consumed downstream by the indexer beyond the hash, so they
+        -- carry through offer_projected for completeness only.
+        COALESCE(o."offer".offerParams."description", '') AS _hash_description,
+        COALESCE(o."offer".offerParams.categoryPaths,
+                 []::STRUCT(elements VARCHAR[])[]) AS _hash_category_paths,
+        COALESCE(o."offer".offerParams.manufacturerArticleNumber, '') AS _hash_mfg_article_number,
+        COALESCE(o."offer".offerParams.manufacturerArticleType, '') AS _hash_mfg_article_type
     FROM raw_offers o
 )
 SELECT
     *,
-    -- article_hash references the per-row computed columns above. Computed
-    -- in a second SELECT layer so the column references are valid.
+    -- v2 article_hash, computed from embedding-input fields in the same
+    -- algorithm the Python prewarm uses (mirrors `compute_article_hash`
+    -- in indexer.projection byte-for-byte). Allows the indexer's TEI
+    -- cache lookups to hit the Redis prewarm.
     compute_article_hash(
-        "name", manufacturerName,
-        category_l1, category_l2, category_l3, category_l4, category_l5,
-        eclass5_code, eclass7_code, s2class_code
+        "name",
+        manufacturerName,
+        _hash_description,
+        _hash_category_paths,
+        ean,
+        article_number,
+        _hash_mfg_article_number,
+        _hash_mfg_article_type
     ) AS article_hash
 FROM offer_derived
 """
@@ -1088,7 +1152,10 @@ projected AS (
                 FROM all_pairs
                 GROUP BY value
             )
-        ) AS customer_article_numbers
+        ) AS customer_article_numbers,
+
+        -- Pass through precomputed article_hash from offer_projected.
+        op.article_hash
     FROM offer_projected op
     LEFT JOIN pricings_grouped p ON p.vk = op.vk AND p.ak = op.ak
     LEFT JOIN markers_grouped m ON m.vk = op.vk AND m.ak = op.ak

@@ -175,6 +175,12 @@ def main() -> None:
                            "single-shot pricings GROUP BY (1.2B → 159M) "
                            "OOMs even at 125 GB cap. Note: --bulk-insert-checkpoint "
                            "resume is disabled when N>1 (chunks rewrite tables).")
+    tune.add_argument("--start-chunk", type=int, default=0,
+                      help="Start chunk index (default 0). For resume: if "
+                           "chunks 0..K-1 already landed in Milvus, set to K "
+                           "and they're skipped. Milvus PKs are idempotent so "
+                           "re-running is safe but wasteful. Only meaningful "
+                           "when --n-chunks > 1.")
     tune.add_argument("--s3-region", default="eu-central-1",
                       help="S3 region for the credential_chain secret on the SOURCE side "
                            "(reading raw shards). Ignored on --local-cache runs. The MinIO "
@@ -303,6 +309,7 @@ def main() -> None:
         duckdb_memory_limit_gb=args.duckdb_memory_limit_gb,
         duckdb_threads=args.duckdb_threads,
         n_chunks=args.n_chunks,
+        start_chunk=args.start_chunk,
         s3_region=args.s3_region,
         sink_mode=args.sink_mode,
         bulk_insert=bulk_cfg,
