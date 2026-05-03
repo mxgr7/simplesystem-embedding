@@ -55,6 +55,7 @@ from indexer.collection_specs import (  # noqa: E402  (sys.path hack above)
     OFFER_SCALAR_INDEX_FIELDS,
     build_offers_index_params,
     build_offers_schema,
+    enable_mmap_for_collection,
 )
 
 # Re-export under the legacy name so existing imports
@@ -115,6 +116,9 @@ def main() -> None:
     index_params = build_index_params(client)
     client.create_collection(collection_name=name, schema=schema, index_params=index_params)
     print(f"Created collection {name!r}.")
+
+    enable_mmap_for_collection(client, name)
+    print(f"Enabled field-level mmap on {name!r}.")
 
     client.load_collection(name)
     print(f"Loaded {name!r}.")

@@ -272,11 +272,21 @@ def build_articles_index_params(client: MilvusClient, vector_index: str = "HNSW"
         index_name="sparse_codes",
     )
 
+    # Mmap on all INVERTED scalar indexes. At 30% catalog scale the
+    # combined heap of resident inverted dicts pushed Milvus standalone
+    # to 165 GiB and triggered etcd-timeout-as-OOM-symptom restart loops;
+    # mmap drops it to ~20 GiB by paging posting lists from disk.
     for field in ARTICLE_SCALAR_INDEX_FIELDS:
-        params.add_index(field_name=field, index_type="INVERTED", index_name=field)
+        params.add_index(
+            field_name=field,
+            index_type="INVERTED",
+            index_name=field,
+            params={"mmap.enabled": True},
+        )
 
     # STL_SORT on every envelope column. Ordered scan for sort-by-price
     # browse (F4) is the hot path; range filters use the same index.
+    # STL_SORT does not support mmap (Milvus rejects mmap.enabled on it).
     for ccy in CATALOG_CURRENCIES:
         for suffix in ("min", "max"):
             field = f"{ccy}_price_{suffix}"
@@ -295,17 +305,56 @@ def build_offers_index_params(client: MilvusClient):
         metric_type="L2",
     )
     for field in OFFER_SCALAR_INDEX_FIELDS:
-        params.add_index(field_name=field, index_type="INVERTED", index_name=field)
+        params.add_index(
+            field_name=field,
+            index_type="INVERTED",
+            index_name=field,
+            params={"mmap.enabled": True},
+        )
 
     # F8: STL_SORT on every per-currency envelope column. Path B's probe
     # composes `{ccy}_price_min <= decoded_max AND {ccy}_price_max >=
     # decoded_min` against these — STL_SORT is the right index for range
-    # queries on FLOAT scalars.
+    # queries on FLOAT scalars. STL_SORT does not support mmap.
     for ccy in CATALOG_CURRENCIES:
         for suffix in ("min", "max"):
             field = f"{ccy}_price_{suffix}"
             params.add_index(field_name=field, index_type="STL_SORT", index_name=field)
     return params
+
+
+# Vector-field DataType numeric IDs (FloatVector, Float16Vector,
+# BFloat16Vector, SparseFloatVector, Int8Vector). Mmap doesn't apply to
+# these via the field-level setter; vector mmap is configured on the
+# index params (already done for sparse_codes).
+_VECTOR_FIELD_TYPE_IDS = {101, 102, 103, 104, 105}
+
+
+def enable_mmap_for_collection(client: MilvusClient, collection: str) -> None:
+    """Enable field-level mmap on every non-vector field of `collection`.
+
+    Field-level mmap pages raw scalar/array/JSON column storage from disk
+    instead of resident heap. The collection should be unloaded before
+    calling this; alter calls are safe afterwards but the change only
+    takes effect on the next load.
+
+    Index-level mmap is already wired into `build_*_index_params`; this
+    handles the orthogonal field-level setting (which `drop_index` does
+    not touch, so it persists across the bulk indexer's drop+rebuild)."""
+    if not client.has_collection(collection):
+        return
+    desc = client.describe_collection(collection)
+    n = 0
+    for field in desc["fields"]:
+        if field["type"] in _VECTOR_FIELD_TYPE_IDS:
+            continue
+        client.alter_collection_field(
+            collection_name=collection,
+            field_name=field["name"],
+            field_params={"mmap.enabled": "true"},
+        )
+        n += 1
+    log.info("  enabled field-level mmap on %d non-vector fields of %s", n, collection)
 
 
 # ---------- index lifecycle (drop / re-apply) ----------------------------
@@ -411,6 +460,7 @@ __all__ = [
     "build_articles_index_params",
     "build_offers_schema",
     "build_offers_index_params",
+    "enable_mmap_for_collection",
     "release_and_drop_indexes",
     "apply_indexes_and_load",
     "list_collection_indexes",

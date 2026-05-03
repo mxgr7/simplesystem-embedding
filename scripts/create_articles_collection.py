@@ -49,6 +49,7 @@ from indexer.collection_specs import (  # noqa: E402  (sys.path hack above)
     VECTOR_INDEX_DEFAULTS,
     build_articles_index_params,
     build_articles_schema,
+    enable_mmap_for_collection,
 )
 
 # Keep these names available at this module path so existing imports
@@ -111,6 +112,9 @@ def main() -> None:
     index_params = build_index_params(client, args.vector_index)
     client.create_collection(collection_name=name, schema=schema, index_params=index_params)
     print(f"Created collection {name!r}.")
+
+    enable_mmap_for_collection(client, name)
+    print(f"Enabled field-level mmap on {name!r}.")
 
     client.load_collection(name)
     print(f"Loaded {name!r}.")
