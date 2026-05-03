@@ -692,8 +692,15 @@ finalized AS (
         -- Drop NULL price entries (no resolvable single_unit_price).
         list_filter(prices_raw, p -> p IS NOT NULL) AS prices,
         delivery_time_days_max,
-        COALESCE(core_marker_enabled_sources_raw, []::VARCHAR[]) AS core_marker_enabled_sources,
-        COALESCE(core_marker_disabled_sources_raw, []::VARCHAR[]) AS core_marker_disabled_sources,
+        -- Truncated to 64 elements (Milvus offers_v5 schema cap on these
+        -- ARRAY fields). At full prod scale, some articles are flagged
+        -- as core-article in 79+ list sources; the cap was sized for
+        -- typical scale. Truncation here is lossy — relationship-search
+        -- recall on those rare offers is bounded — but matches the
+        -- truncation pattern already in place for `text_codes` (8192) and
+        -- `relationship_*` (4096).
+        list_slice(COALESCE(core_marker_enabled_sources_raw, []::VARCHAR[]), 1, 64) AS core_marker_enabled_sources,
+        list_slice(COALESCE(core_marker_disabled_sources_raw, []::VARCHAR[]), 1, 64) AS core_marker_disabled_sources,
         eclass5_code, eclass7_code, s2class_code,
         COALESCE(features, []::VARCHAR[]) AS features,
         relationship_accessory_for, relationship_spare_part_for, relationship_similar_to,
