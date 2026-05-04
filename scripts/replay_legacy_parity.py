@@ -30,20 +30,248 @@ Pagination:
 
 Auth:
   `--legacy-auth` value goes verbatim into the `Authorization` header
-  on legacy requests. The ACL is assumed unauthenticated (typical for
-  in-cluster service-to-service).
+  on legacy requests. For the staging next-gen frontend/legacy endpoint,
+  pass `--nextgen-stg-auth`: the script refreshes a bearer token via
+  `/authentication/refresh`, stores `{token, refreshToken}` in
+  `.nextgen-auth`, and prompts for a fresh refresh token when that state
+  is missing/empty or refresh fails. The ACL is assumed unauthenticated
+  (typical for in-cluster service-to-service).
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import datetime as dt
+import getpass
 import json
+import os
 import sys
+import time
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_NEXTGEN_AUTH_STATE = REPO_ROOT / ".nextgen-auth"
+DEFAULT_NEXTGEN_REFRESH_URL = (
+    "https://api-nextgen-stg.simplesystem.com/authentication/refresh"
+)
+NEXTGEN_REFRESH_MARGIN_SECONDS = 5
+
+
+# ---------- next-gen staging auth -----------------------------------------
+
+class NextgenAuthError(RuntimeError):
+    """Raised when the next-gen refresh-token flow cannot produce a bearer."""
+
+
+def _now_utc_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    payload += "=" * ((4 - len(payload) % 4) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload.encode("ascii"))
+        obj = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _token_expires_at(token: str | None) -> float | None:
+    if not token:
+        return None
+    payload = _decode_jwt_payload(token)
+    if not payload:
+        return None
+    exp = payload.get("exp")
+    return float(exp) if isinstance(exp, (int, float)) else None
+
+
+def _token_needs_refresh(
+    token: str | None,
+    *,
+    margin_seconds: int = NEXTGEN_REFRESH_MARGIN_SECONDS,
+) -> bool:
+    if not token:
+        return True
+    exp = _token_expires_at(token)
+    if exp is None:
+        # Opaque token: keep using it until a 401 forces a refresh.
+        return False
+    return exp <= time.time() + margin_seconds
+
+
+def load_nextgen_auth_state(path: Path) -> dict[str, str]:
+    """Load `.nextgen-auth` without ever raising on missing/empty/corrupt data.
+
+    Corrupt or wrong-shaped files are treated like a missing state file so the
+    caller can prompt for a fresh refresh token.
+    """
+    try:
+        txt = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    if not txt.strip():
+        return {}
+    try:
+        obj = json.loads(txt)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+
+    state: dict[str, str] = {}
+    token = obj.get("token") or obj.get("accessToken")
+    refresh = obj.get("refreshToken") or obj.get("refresh_token")
+    if isinstance(token, str) and token.strip():
+        state["token"] = token.strip()
+    if isinstance(refresh, str) and refresh.strip():
+        state["refreshToken"] = refresh.strip()
+    return state
+
+
+def save_nextgen_auth_state(path: Path, state: dict[str, str]) -> None:
+    token = state.get("token")
+    refresh = state.get("refreshToken")
+    if not token or not refresh:
+        raise NextgenAuthError("refusing to save incomplete next-gen auth state")
+
+    payload = {
+        "token": token,
+        "refreshToken": refresh,
+        "updatedAt": _now_utc_iso(),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f"{path.name}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def _extract_nextgen_auth_state(
+    body: Any,
+    *,
+    fallback_refresh_token: str,
+) -> dict[str, str]:
+    if not isinstance(body, dict):
+        raise NextgenAuthError("refresh response was not a JSON object")
+    token = body.get("token") or body.get("accessToken")
+    refresh = (
+        body.get("refreshToken") or body.get("refresh_token") or fallback_refresh_token
+    )
+    if not isinstance(token, str) or not token.strip():
+        raise NextgenAuthError("refresh response did not contain a bearer token")
+    if not isinstance(refresh, str) or not refresh.strip():
+        raise NextgenAuthError("refresh response did not contain a refresh token")
+    return {"token": token.strip(), "refreshToken": refresh.strip()}
+
+
+def refresh_nextgen_auth(
+    client: httpx.Client,
+    refresh_url: str,
+    refresh_token: str,
+) -> dict[str, str]:
+    try:
+        response = client.post(
+            refresh_url,
+            json={"refreshToken": refresh_token},
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+    except httpx.HTTPError as e:
+        raise NextgenAuthError(f"refresh request failed: {e!r}") from e
+
+    if response.status_code >= 400:
+        raise NextgenAuthError(f"refresh failed with HTTP {response.status_code}")
+    try:
+        body = response.json()
+    except ValueError as e:
+        raise NextgenAuthError("refresh response was not JSON") from e
+    return _extract_nextgen_auth_state(body, fallback_refresh_token=refresh_token)
+
+
+class NextgenStgAuth:
+    """Small stateful auth helper for the staging frontend/legacy endpoint.
+
+    State is read from and written to `.nextgen-auth` as JSON with 0600
+    permissions. Refresh tokens are rotated when the backend returns a new one.
+    """
+
+    def __init__(
+        self,
+        client: httpx.Client,
+        *,
+        state_path: Path = DEFAULT_NEXTGEN_AUTH_STATE,
+        refresh_url: str = DEFAULT_NEXTGEN_REFRESH_URL,
+        prompt_fn: Callable[[str], str] | None = None,
+    ) -> None:
+        self.client = client
+        self.state_path = state_path
+        self.refresh_url = refresh_url
+        self.prompt_fn = prompt_fn
+        self.state = load_nextgen_auth_state(state_path)
+
+    def authenticated_headers(
+        self,
+        headers: dict[str, str],
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, str]:
+        out = dict(headers)
+        out["Authorization"] = f"Bearer {self.token(force_refresh=force_refresh)}"
+        return out
+
+    def token(self, *, force_refresh: bool = False) -> str:
+        token = self.state.get("token")
+        if force_refresh or _token_needs_refresh(token):
+            return self._refresh_with_prompt_fallback()
+        return token
+
+    def _refresh_with_prompt_fallback(self) -> str:
+        while True:
+            refresh_token = self.state.get("refreshToken")
+            if not refresh_token:
+                refresh_token = self._prompt_refresh_token()
+                self.state["refreshToken"] = refresh_token
+            try:
+                self.state = refresh_nextgen_auth(
+                    self.client, self.refresh_url, refresh_token
+                )
+                save_nextgen_auth_state(self.state_path, self.state)
+                return self.state["token"]
+            except NextgenAuthError as e:
+                print(f"next-gen auth refresh failed: {e}", file=sys.stderr)
+                self.state.pop("token", None)
+                self.state["refreshToken"] = self._prompt_refresh_token()
+
+    def _prompt_refresh_token(self) -> str:
+        prompt = "Paste NEXTGEN refresh token (input hidden): "
+        if self.prompt_fn is not None:
+            raw = self.prompt_fn(prompt)
+        else:
+            if not sys.stdin.isatty():
+                raise NextgenAuthError(
+                    f"{self.state_path} is missing/empty or its refresh token "
+                    "failed, and stdin is not interactive. Run this command in "
+                    "a terminal once and paste a fresh refresh token."
+                )
+            raw = getpass.getpass(prompt)
+        token = (raw or "").strip()
+        if not token:
+            raise NextgenAuthError("no refresh token provided")
+        return token
 
 
 # ---------- shape extraction ----------------------------------------------
@@ -185,6 +413,7 @@ def replay_one(
     legacy_headers: dict,
     acl_headers: dict,
     params: dict,
+    legacy_auth: NextgenStgAuth | None = None,
 ) -> dict:
     """POST one request to both endpoints, return a result record.
 
@@ -198,11 +427,21 @@ def replay_one(
     acl_body: Any = None
 
     try:
-        r = post(client, legacy_url, body, params, legacy_headers)
+        request_headers = (
+            legacy_auth.authenticated_headers(legacy_headers)
+            if legacy_auth is not None else legacy_headers
+        )
+        r = post(client, legacy_url, body, params, request_headers)
+        if r.status_code == 401 and legacy_auth is not None:
+            # Bearers on staging are short-lived. Refresh once and retry.
+            request_headers = legacy_auth.authenticated_headers(
+                legacy_headers, force_refresh=True
+            )
+            r = post(client, legacy_url, body, params, request_headers)
         rec["legacy_status"] = r.status_code
         if r.headers.get("content-type", "").startswith("application/json"):
             legacy_body = r.json()
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, NextgenAuthError) as e:
         rec["legacy_error"] = repr(e)
 
     try:
@@ -227,6 +466,13 @@ def render_report(results: list[dict], args: argparse.Namespace) -> str:
     out.append(f"- acl:    `{args.acl_url}`")
     out.append(f"- pagination: page={args.page} pageSize={args.page_size}"
                + ("" if not args.no_pagination else " (disabled)"))
+    if getattr(args, "nextgen_stg_auth", False):
+        out.append(f"- legacy auth: next-gen staging refresh-token flow "
+                   f"(`{args.nextgen_auth_state}`)")
+    elif getattr(args, "legacy_auth", None):
+        out.append("- legacy auth: explicit Authorization header")
+    if getattr(args, "legacy_impersonate_user", None):
+        out.append(f"- legacy impersonation: `{args.legacy_impersonate_user}`")
     out.append(f"- requests: {len(results)}\n")
 
     n = len(results)
@@ -298,6 +544,20 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--legacy-auth", default=None,
                    help="Authorization header value sent to the legacy "
                         "endpoint, e.g. 'Bearer <token>'. Not sent to ACL.")
+    p.add_argument("--nextgen-stg-auth", action="store_true",
+                   help="Use the staging next-gen refresh-token flow for "
+                        "legacy requests. Stores token state in "
+                        "--nextgen-auth-state and refreshes/retries on 401.")
+    p.add_argument("--nextgen-auth-state", type=Path,
+                   default=DEFAULT_NEXTGEN_AUTH_STATE,
+                   help="Hidden JSON auth state file for --nextgen-stg-auth. "
+                        "Default: %(default)s")
+    p.add_argument("--nextgen-refresh-url", default=DEFAULT_NEXTGEN_REFRESH_URL,
+                   help="Refresh endpoint for --nextgen-stg-auth. "
+                        "Default: %(default)s")
+    p.add_argument("--legacy-impersonate-user", default=None,
+                   help="Optional Impersonate-User header sent to legacy "
+                        "requests, commonly required on staging.")
     p.add_argument("--page", type=int, default=1)
     p.add_argument("--page-size", type=int, default=10)
     p.add_argument("--no-pagination", action="store_true",
@@ -321,9 +581,18 @@ def main(argv: list[str] | None = None) -> int:
         print("no requests to replay", file=sys.stderr)
         return 1
 
+    if args.legacy_auth and args.nextgen_stg_auth:
+        print(
+            "--legacy-auth and --nextgen-stg-auth are mutually exclusive",
+            file=sys.stderr,
+        )
+        return 2
+
     legacy_headers = {"Content-Type": "application/json"}
     if args.legacy_auth:
         legacy_headers["Authorization"] = args.legacy_auth
+    if args.legacy_impersonate_user:
+        legacy_headers["Impersonate-User"] = args.legacy_impersonate_user
     acl_headers = {"Content-Type": "application/json"}
     params: dict[str, Any] = {} if args.no_pagination else {
         "page": args.page, "pageSize": args.page_size,
@@ -331,12 +600,18 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[dict] = []
     with httpx.Client(timeout=args.timeout) as client:
+        legacy_auth = NextgenStgAuth(
+            client,
+            state_path=args.nextgen_auth_state,
+            refresh_url=args.nextgen_refresh_url,
+        ) if args.nextgen_stg_auth else None
         for body in requests:
             results.append(replay_one(
                 client, body,
                 legacy_url=args.legacy_url, acl_url=args.acl_url,
                 legacy_headers=legacy_headers, acl_headers=acl_headers,
                 params=params,
+                legacy_auth=legacy_auth,
             ))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

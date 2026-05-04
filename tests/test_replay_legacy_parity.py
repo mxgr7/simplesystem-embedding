@@ -8,8 +8,10 @@ against expected substrings rather than a full snapshot.
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -21,8 +23,10 @@ sys.path.insert(0, str(REPO_ROOT))
 from scripts.replay_legacy_parity import (  # noqa: E402
     HARD,
     SOFT,
+    NextgenStgAuth,
     build_argparser,
     diff_paths,
+    load_nextgen_auth_state,
     load_requests,
     main,
     render_report,
@@ -175,6 +179,80 @@ def test_load_requests_rejects_top_level_scalar(tmp_path: Path):
         load_requests(p)
 
 
+# ---- next-gen staging auth -----------------------------------------------
+
+def _fake_jwt(exp: int | None = None) -> str:
+    def enc(obj: dict) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    payload = {"exp": exp or int(time.time()) + 3600}
+    return f"{enc({'alg': 'none', 'typ': 'JWT'})}.{enc(payload)}.sig"
+
+
+def test_nextgen_auth_missing_state_prompts_refresh_and_saves(tmp_path: Path):
+    state_path = tmp_path / ".nextgen-auth"
+    refresh_url = "https://auth.test/refresh"
+    bearer = _fake_jwt()
+    prompts: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert str(req.url) == refresh_url
+        assert json.loads(req.content)["refreshToken"] == "initial-refresh"
+        return httpx.Response(
+            200,
+            json={"token": bearer, "refreshToken": "rotated-refresh"},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        auth = NextgenStgAuth(
+            client,
+            state_path=state_path,
+            refresh_url=refresh_url,
+            prompt_fn=lambda prompt: prompts.append(prompt) or "initial-refresh",
+        )
+        headers = auth.authenticated_headers({"Content-Type": "application/json"})
+
+    assert headers["Authorization"] == f"Bearer {bearer}"
+    assert prompts == ["Paste NEXTGEN refresh token (input hidden): "]
+    assert load_nextgen_auth_state(state_path) == {
+        "token": bearer,
+        "refreshToken": "rotated-refresh",
+    }
+    assert state_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_nextgen_auth_refresh_failure_prompts_for_new_refresh_token(tmp_path: Path):
+    state_path = tmp_path / ".nextgen-auth"
+    state_path.write_text(json.dumps({"refreshToken": "stale-refresh"}))
+    refresh_url = "https://auth.test/refresh"
+    bearer = _fake_jwt()
+    attempts: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        refresh_token = json.loads(req.content)["refreshToken"]
+        attempts.append(refresh_token)
+        if refresh_token == "stale-refresh":
+            return httpx.Response(401, json={"message": "bad refresh"})
+        return httpx.Response(
+            200,
+            json={"token": bearer, "refreshToken": "rotated-refresh"},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        auth = NextgenStgAuth(
+            client,
+            state_path=state_path,
+            refresh_url=refresh_url,
+            prompt_fn=lambda _prompt: "fresh-refresh",
+        )
+        headers = auth.authenticated_headers({})
+
+    assert headers["Authorization"] == f"Bearer {bearer}"
+    assert attempts == ["stale-refresh", "fresh-refresh"]
+    assert load_nextgen_auth_state(state_path)["refreshToken"] == "rotated-refresh"
+
+
 # ---- replay_one() with mocked HTTP ---------------------------------------
 
 LEGACY_RESPONSE = {
@@ -223,6 +301,51 @@ def test_replay_one_flags_drop_in_acl():
         params={},
     )
     assert any(p == "metadata.warnings" for p, _, _ in rec["diffs"])
+
+
+def test_replay_one_refreshes_and_retries_legacy_401(tmp_path: Path):
+    state_path = tmp_path / ".nextgen-auth"
+    state_path.write_text(json.dumps({"refreshToken": "r1"}))
+    refresh_url = "https://auth.test/refresh"
+    refresh_calls = 0
+    legacy_auth_headers: list[str | None] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        nonlocal refresh_calls
+        if str(req.url) == refresh_url:
+            refresh_calls += 1
+            return httpx.Response(
+                200,
+                json={"token": f"t{refresh_calls}",
+                      "refreshToken": f"r{refresh_calls + 1}"},
+            )
+        if "legacy.test" in str(req.url):
+            auth_header = req.headers.get("Authorization")
+            legacy_auth_headers.append(auth_header)
+            if auth_header == "Bearer t1":
+                return httpx.Response(401, json={"message": "expired"})
+            return httpx.Response(200, json=LEGACY_RESPONSE)
+        return httpx.Response(200, json=LEGACY_RESPONSE)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        auth = NextgenStgAuth(
+            client,
+            state_path=state_path,
+            refresh_url=refresh_url,
+            prompt_fn=lambda _prompt: pytest.fail("prompt should not be needed"),
+        )
+        rec = replay_one(
+            client, body={"q": "x"},
+            legacy_url="http://legacy.test/search",
+            acl_url="http://acl.test/search",
+            legacy_headers={}, acl_headers={},
+            params={},
+            legacy_auth=auth,
+        )
+
+    assert rec["legacy_status"] == 200
+    assert rec["acl_status"] == 200
+    assert legacy_auth_headers == ["Bearer t1", "Bearer t2"]
 
 
 def test_replay_one_records_legacy_error():

@@ -17,6 +17,8 @@ mlflow.db
 logs/playground-app.log
 
 .env
+.nextgen-auth
+.nextgen-auth.tmp
 .opencode/
 .vscode/
 
