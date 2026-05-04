@@ -27,6 +27,7 @@ from scripts.replay_legacy_parity import (  # noqa: E402
     build_argparser,
     diff_paths,
     load_nextgen_auth_state,
+    load_request_records,
     load_requests,
     main,
     render_report,
@@ -177,6 +178,38 @@ def test_load_requests_rejects_top_level_scalar(tmp_path: Path):
     p.write_text("42")
     with pytest.raises(SystemExit):
         load_requests(p)
+
+
+def test_load_request_records_accepts_named_params_wrapper(tmp_path: Path):
+    p = tmp_path / "reqs.jsonl"
+    p.write_text(json.dumps({
+        "name": "sort-fixture",
+        "source": "unit-test",
+        "params": {"page": 7, "pageSize": 12, "sort": ["name,desc"]},
+        "body": {"q": "schraube"},
+    }) + "\n")
+
+    records = load_request_records(p)
+    assert records == [{
+        "name": "sort-fixture",
+        "source": "unit-test",
+        "params": {"page": 7, "pageSize": 12, "sort": ["name,desc"]},
+        "body": {"q": "schraube"},
+    }]
+    # Existing body-only callers still see just the request body.
+    assert load_requests(p) == [{"q": "schraube"}]
+
+
+def test_checked_in_a6_replay_fixture_records_validate_against_acl_contract():
+    from acl.models import LegacySearchRequest
+
+    records = load_request_records(REPO_ROOT / "tests/fixtures/a6_replay_requests.jsonl")
+    assert len(records) >= 6
+    for record in records:
+        assert record.get("name")
+        assert record.get("source")
+        assert isinstance(record["params"], dict)
+        LegacySearchRequest.model_validate(record["body"])
 
 
 # ---- next-gen staging auth -----------------------------------------------
@@ -437,3 +470,45 @@ def test_main_runs_end_to_end(tmp_path: Path, monkeypatch):
     assert out.exists()
     md = out.read_text()
     assert "Shape: OK" in md
+
+
+def test_main_applies_per_record_params_to_both_endpoints(tmp_path: Path, monkeypatch):
+    reqs = tmp_path / "reqs.jsonl"
+    reqs.write_text(json.dumps({
+        "name": "with-sort",
+        "params": {"page": 7, "pageSize": 12, "sort": ["name,desc"]},
+        "body": {"q": "schraube"},
+    }) + "\n")
+    out = tmp_path / "report.md"
+    seen = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append({
+            "page": req.url.params.get("page"),
+            "pageSize": req.url.params.get("pageSize"),
+            "sort": req.url.params.get_list("sort"),
+        })
+        return httpx.Response(200, json=LEGACY_RESPONSE)
+
+    real_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+
+    def fake_client(*a, **kw):
+        return real_client(transport=transport)
+
+    monkeypatch.setattr("scripts.replay_legacy_parity.httpx.Client", fake_client)
+
+    rc = main([
+        "--requests-file", str(reqs),
+        "--legacy-url", "http://legacy.test/article-features/search",
+        "--acl-url", "http://acl.test/article-features/search",
+        "--no-pagination",
+        "--out", str(out),
+    ])
+
+    assert rc == 0
+    assert seen == [
+        {"page": "7", "pageSize": "12", "sort": ["name,desc"]},
+        {"page": "7", "pageSize": "12", "sort": ["name,desc"]},
+    ]
+    assert "with-sort" in out.read_text()

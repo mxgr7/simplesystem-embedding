@@ -14,9 +14,16 @@ Use cases:
     `ARTICLE_SEARCH_REPLACEMENT_STATUS.md`).
 
 Input (`--requests-file`):
-  - JSONL: one legacy request body per line, OR
-  - JSON list: a top-level array of legacy request bodies, OR
-  - JSON object: a single legacy request body (treated as a 1-item list).
+  - JSONL: one legacy request body or replay record per line, OR
+  - JSON list: a top-level array of request bodies / replay records, OR
+  - JSON object: a single request body / replay record (treated as a 1-item list).
+
+Replay records let fixtures carry per-request query params and provenance:
+  {"name": "case-name", "source": "where it came from",
+   "params": {"page": 2, "pageSize": 20, "sort": ["name,desc"]},
+   "body": { ... legacy request body ... }}
+
+Plain body-only files remain supported for captured traffic JSONL.
 
 Output:
   - `reports/parity/replay.md` (overrideable via `--out`) — per-request
@@ -25,8 +32,9 @@ Output:
 
 Pagination:
   Both endpoints get `?page=N&pageSize=M` query params by default.
-  Pass `--no-pagination` if your legacy endpoint puts pagination in
-  the body (or rejects unknown query params).
+  Replay-record `params` override those defaults, so checked-in fixtures
+  can cover sort/page variants. Pass `--no-pagination` if your legacy
+  endpoint puts pagination in the body (or rejects unknown query params).
 
 Auth:
   `--legacy-auth` value goes verbatim into the `Authorization` header
@@ -388,7 +396,7 @@ def _repr(shape_node: Any) -> str:
 
 # ---------- I/O -----------------------------------------------------------
 
-def load_requests(path: Path) -> list[dict]:
+def _load_json_items(path: Path) -> list[Any]:
     """Accept JSON-list, JSONL, or single JSON object."""
     txt = path.read_text(encoding="utf-8")
     if path.suffix.lower() == ".jsonl":
@@ -399,6 +407,49 @@ def load_requests(path: Path) -> list[dict]:
     if isinstance(obj, dict):
         return [obj]
     raise SystemExit(f"unsupported request file shape in {path}: {type(obj).__name__}")
+
+
+def load_requests(path: Path) -> list[dict]:
+    """Back-compatible body-only loader used by older callers/tests."""
+    return [r["body"] for r in load_request_records(path)]
+
+
+def load_request_records(path: Path) -> list[dict]:
+    """Load replay inputs as normalized records.
+
+    Each item may be either a raw legacy request body or a replay record with
+    `{body, params?, name?, source?}`. The normalized shape is always:
+    `{body: dict, params: dict, name?: str, source?: str}`.
+    """
+    return [_normalize_request_record(obj, path) for obj in _load_json_items(path)]
+
+
+def _normalize_request_record(obj: Any, path: Path) -> dict:
+    if not isinstance(obj, dict):
+        raise SystemExit(
+            f"unsupported request item in {path}: {type(obj).__name__}"
+        )
+
+    if "body" not in obj:
+        return {"body": obj, "params": {}}
+
+    body = obj.get("body")
+    if not isinstance(body, dict):
+        raise SystemExit(
+            f"replay record in {path} has non-object body: {type(body).__name__}"
+        )
+    params = obj.get("params") or {}
+    if not isinstance(params, dict):
+        raise SystemExit(
+            f"replay record in {path} has non-object params: {type(params).__name__}"
+        )
+
+    rec: dict[str, Any] = {"body": body, "params": params}
+    for key in ("name", "source"):
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            rec[key] = value.strip()
+    return rec
 
 
 def post(client: httpx.Client, url: str, body: dict, params: dict, headers: dict) -> httpx.Response:
@@ -512,7 +563,17 @@ def render_report(results: list[dict], args: argparse.Namespace) -> str:
     for i, r in enumerate(results, 1):
         legacy_label = r.get("legacy_status", r.get("legacy_error", "—"))
         acl_label = r.get("acl_status", r.get("acl_error", "—"))
-        out.append(f"### #{i} — legacy={legacy_label} acl={acl_label}\n")
+        title = f"#{i}"
+        if r.get("name"):
+            title += f" — {r['name']}"
+        out.append(f"### {title} — legacy={legacy_label} acl={acl_label}\n")
+        if r.get("source"):
+            out.append(f"Source: `{r['source']}`")
+        if r.get("params"):
+            out.append("Query params:")
+            out.append("```json")
+            out.append(json.dumps(r["params"], indent=2, ensure_ascii=False))
+            out.append("```")
         out.append("Request:")
         out.append("```json")
         out.append(json.dumps(r["request"], indent=2, ensure_ascii=False)[:2000])
@@ -535,7 +596,7 @@ def build_argparser() -> argparse.ArgumentParser:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--requests-file", type=Path, required=True,
                    help="Path to a JSON list, JSONL, or single-JSON-object file "
-                        "of legacy request bodies.")
+                        "of legacy request bodies or replay records.")
     p.add_argument("--legacy-url", required=True,
                    help="Full URL to legacy /article-features/search "
                         "(e.g. https://prod.example/article-features/search).")
@@ -574,10 +635,10 @@ def build_argparser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_argparser().parse_args(argv)
 
-    requests = load_requests(args.requests_file)
+    request_records = load_request_records(args.requests_file)
     if args.limit > 0:
-        requests = requests[: args.limit]
-    if not requests:
+        request_records = request_records[: args.limit]
+    if not request_records:
         print("no requests to replay", file=sys.stderr)
         return 1
 
@@ -605,14 +666,23 @@ def main(argv: list[str] | None = None) -> int:
             state_path=args.nextgen_auth_state,
             refresh_url=args.nextgen_refresh_url,
         ) if args.nextgen_stg_auth else None
-        for body in requests:
-            results.append(replay_one(
+        for request_record in request_records:
+            body = request_record["body"]
+            request_params = dict(params)
+            request_params.update(request_record.get("params") or {})
+            rec = replay_one(
                 client, body,
                 legacy_url=args.legacy_url, acl_url=args.acl_url,
                 legacy_headers=legacy_headers, acl_headers=acl_headers,
-                params=params,
+                params=request_params,
                 legacy_auth=legacy_auth,
-            ))
+            )
+            for key in ("name", "source"):
+                if request_record.get(key):
+                    rec[key] = request_record[key]
+            if request_params:
+                rec["params"] = request_params
+            results.append(rec)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(render_report(results, args), encoding="utf-8")
