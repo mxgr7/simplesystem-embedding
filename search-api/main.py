@@ -593,7 +593,7 @@ async def _search_dedup(
             page=page,
             pageSize=page_size,
             pageCount=page_count,
-            term=body.query or "",
+            term=body.query,
             hitCount=result.hit_count,
             recallClipped=result.recall_clipped,
             hitCountClipped=result.hit_count_clipped,

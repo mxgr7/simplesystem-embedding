@@ -132,3 +132,22 @@ this work:
 F2/ACL-adjacent suites (search-api contract, search-dedup integration,
 all ACL acceptance + skeleton + integration tests + the new F2 file)
 all pass: 192 passed, 27 skipped, 0 failed.
+
+### Iteration 6 — `metadata.term` divergence between dedup and legacy paths
+
+```
+term '' != expected None for query None
+```
+
+**Root cause:** main.py wires `term` differently in the two F2 paths:
+- legacy single-collection: `term=body.query` (None propagates).
+- F9 dedup-topology (the path articles_v6/offers_v6 use):
+  `term=body.query or ""` (None becomes "").
+
+Spec declares `term: { type: string, nullable: true }`, so both wire-
+shapes are valid, but the two paths disagree on what they emit for
+the same input. Real bug: the dedup path silently coerces null → "".
+
+**Fix:** align dedup path with legacy + spec — drop the `or ""` so
+None propagates. Tested implicitly by the F2 suite via the
+term-echoes-query-text test.

@@ -44,10 +44,7 @@ representation in the catalog.
 
 from __future__ import annotations
 
-import copy
-import importlib
 import importlib.util
-import os
 import re
 import sys
 from pathlib import Path
@@ -1226,6 +1223,40 @@ class TestBehaviour:
         assert r.status_code == 200, r.text
         assert_search_response_valid(r.json())
 
+    def test_closed_marketplace_flag_swaps_cv_scope(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """When closedMarketplaceOnly is False, the open-list scope
+        (catalogVersionIdsOrderedByPreference) drives the CV
+        intersection. When True, the closed-list scope
+        (closedCatalogVersionIds) does. With orthogonal CV lists,
+        the two requests must produce DIFFERENT hit counts."""
+        cv_first_half = all_cvs[: max(1, len(all_cvs) // 2)]
+        cv_second_half = all_cvs[max(1, len(all_cvs) // 2):]
+        if not cv_first_half or not cv_second_half:
+            pytest.skip("not enough distinct CVs to split for the contrast test")
+
+        body_open = make_body(cvs=cv_first_half, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        body_open["selectedArticleSources"]["closedCatalogVersionIds"] = cv_second_half
+        body_closed = {**body_open, "closedMarketplaceOnly": True}
+
+        r_open = search_api_app.post(search_path, json=body_open)
+        r_closed = search_api_app.post(search_path, json=body_closed)
+        assert r_open.status_code == 200 and r_closed.status_code == 200
+        # The two filters select disjoint CV scopes; they may both
+        # be zero or both non-zero, but they should NOT agree exactly
+        # (the catalog covers many CVs). Exit cleanly if both happen
+        # to be zero — that just means neither half overlapped this
+        # vendor — and inform the test runner.
+        h_open = r_open.json()["metadata"]["hitCount"]
+        h_closed = r_closed.json()["metadata"]["hitCount"]
+        if h_open == 0 and h_closed == 0:
+            pytest.skip("vendor does not span both CV halves; coverage too thin")
+        assert h_open != h_closed, (
+            f"closedMarketplaceOnly toggle did not change CV scope: "
+            f"both halves report hitCount={h_open}"
+        )
+
     def test_max_delivery_time_does_not_grow_hits(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
@@ -1323,6 +1354,35 @@ class TestFreeTextQuery:
         body = r.json()
         assert_search_response_valid(body)
         assert body["metadata"]["term"] == "größe"
+
+    def test_term_echoes_query_text(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """metadata.term must echo whatever was sent — including null
+        when query is omitted, an empty string when query='', and the
+        verbatim text otherwise."""
+        cases: list[tuple[Any, Any]] = [
+            ("schraube", "schraube"),
+            ("", ""),
+            (None, None),
+        ]
+        for query_in, expected_term in cases:
+            body = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+            if query_in is None:
+                # omit `query` entirely
+                pass
+            else:
+                body["query"] = query_in
+            r = search_api_app.post(search_path, json=body)
+            assert r.status_code == 200, r.text
+            term = r.json()["metadata"].get("term")
+            # `query=None` and "no query field at all" both flow into
+            # SearchRequest.query=None on the impl side, then
+            # `term=body.query` puts `None` on the wire — JSON-serialised
+            # as null, parsed as None. Empty string stays as "".
+            assert term == expected_term, (
+                f"term {term!r} != expected {expected_term!r} for query {query_in!r}"
+            )
 
     def test_long_query_string_accepted(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
