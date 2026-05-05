@@ -8,24 +8,30 @@ testing. Every response in this file is validated against the
 ``SearchResponse`` schema in the OpenAPI document — drift between
 the implementation and the spec fails the suite.
 
-Test layout:
+Coverage matrix (one class per concern):
 
-  Class A — schema validator self-test (tiny sanity tests that the
-            spec validator works as intended).
-  Class B — path/query parameter coverage (collection, page, pageSize,
-            sort).
-  Class C — request body validation + 422 rejections.
-  Class D — searchMode envelope shapes (HITS_ONLY, SUMMARIES_ONLY,
-            BOTH).
-  Class E — every filter atom from spec §4.3 against real data.
-  Class F — relationship filters (accessoriesFor / sparePartsFor /
-            similarTo).
-  Class G — priceFilter (currency-coded minor units).
-  Class H — sort orderings (relevance default, articleId, name, price,
-            asc/desc, multi-key first-key only).
-  Class I — pagination invariants.
-  Class J — summaries (one test per ``SummaryKind``).
-  Class K — auth + concurrency guards (401 / 503).
+  TestValidator              — schema validator self-test
+  TestParameters             — path/query parameter coverage
+  TestBodyValidation         — request body 422 rejections
+  TestSearchModes            — HITS_ONLY/SUMMARIES_ONLY/BOTH envelope
+  TestFilters                — every filter atom from spec §4.3
+  TestRelationships          — accessoriesFor/sparePartsFor/similarTo
+  TestPriceFilter            — currency-coded minor units
+  TestSortOrderings          — relevance/articleId/name/price asc+desc
+  TestPagination             — pageCount math, no overlap, idempotence
+  TestSummaries              — one envelope test per SummaryKind
+  TestAuthAndConcurrency     — 401, 503 gate, HITCOUNT_CAP, recallClipped
+  TestBehaviour              — filter narrowing on the live catalog
+  TestFreeTextQuery          — query body field, term echo, Unicode
+  TestArticleIdsFilter       — real offer-id round-trips
+  TestPaginationEdges        — pageSize=500 boundary, page=9999, count
+  TestSummaryContent         — bucket counts cohere with hitCount
+  TestOpenAPIDocument        — spec/impl parity per model + examples
+  TestNegativeBodies         — per-sub-schema additional-properties
+  TestAuthHeaderAlternatives — both header forms, /metrics + openapi.{yaml,json}
+  TestPageSizeZero           — pageSize=0 keeps real hitCount
+  TestMinimalBody            — only the spec's required fields
+  TestDeeperSummaries        — per-kind structural invariants
 
 The catalog is read-only — we never mutate it. Every test runs against
 the current state of ``articles_v6`` + ``offers_v6`` in the Milvus at
