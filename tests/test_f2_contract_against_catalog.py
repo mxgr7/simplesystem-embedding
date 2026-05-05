@@ -1165,6 +1165,23 @@ class TestPagination:
             "summaries varied across page slices"
         )
 
+    def test_article_count_never_exceeds_page_size(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """A request with `pageSize=N` must never return more than N
+        articles, regardless of the underlying hitCount."""
+        for n in (1, 5, 13, 50):
+            r = search_api_app.post(
+                f"{search_path}?pageSize={n}",
+                json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert len(body["articles"]) <= n, (
+                f"pageSize={n} returned {len(body['articles'])} articles"
+            )
+            assert body["metadata"]["pageSize"] == n
+
     def test_returned_article_ids_are_unique_within_a_page(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
