@@ -927,6 +927,25 @@ class TestSortOrderings:
         ids = [a["articleId"] for a in body["articles"]]
         assert ids == sorted(ids, reverse=True), f"articleId,desc not in order: {ids[:5]}…"
 
+    def test_query_with_explicit_sort_overrides_relevance(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """When a query is set AND `sort=articleId,asc` is requested,
+        the page must be sorted by articleId, not by score. The
+        per-page tiebreak is articleId ascending in either path, so
+        the visible order is articleId-asc regardless."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=20&sort=articleId,asc",
+            json=make_body(cvs=all_cvs, query="schraube"),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        ids = [a["articleId"] for a in body["articles"]]
+        assert ids == sorted(ids), (
+            f"sort=articleId,asc with query did not order by articleId: {ids[:5]}…"
+        )
+
     def test_relevance_sort_returns_descending_scores(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
@@ -1423,6 +1442,24 @@ class TestBehaviour:
         assert_search_response_valid(out)
         assert out["articles"] == []
         assert out["metadata"]["hitCount"] == 0
+
+    def test_widening_cv_scope_does_not_shrink_hit_count(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Adding more CVs to `catalogVersionIdsOrderedByPreference`
+        broadens the always-on CV intersection, so hitCount can only
+        grow or stay equal — never shrink."""
+        first_quarter = all_cvs[: max(1, len(all_cvs) // 4)]
+        body_narrow = make_body(cvs=first_quarter,
+                                vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        body_wide = make_body(cvs=all_cvs,
+                              vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        r_n = search_api_app.post(search_path, json=body_narrow)
+        r_w = search_api_app.post(search_path, json=body_wide)
+        assert r_n.status_code == 200 and r_w.status_code == 200
+        n = r_n.json()["metadata"]["hitCount"]
+        w = r_w.json()["metadata"]["hitCount"]
+        assert w >= n, f"widening CV scope shrank hitCount: {n} → {w}"
 
     def test_filter_intersection_narrows_more_than_each(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
