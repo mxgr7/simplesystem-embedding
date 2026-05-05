@@ -165,13 +165,17 @@ class TestArticleIdFormat:
                 f"Expected 3 colon-separated parts, got {len(parts)}: {art['articleId']}"
             )
 
-    def test_articleid_base64_segment(self):
+    def test_articleid_segments_valid(self):
+        uuid_re = re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
         body = _post_ok(_base_body())
         for art in body["articles"]:
             parts = art["articleId"].split(":")
-            b64_part = parts[1]
-            decoded = base64.b64decode(b64_part).decode("utf-8")
+            assert uuid_re.match(parts[0]), f"Part 0 not UUID: {parts[0]}"
+            decoded = base64.b64decode(parts[1]).decode("utf-8")
             assert len(decoded) > 0, "Empty article number"
+            assert uuid_re.match(parts[2]), f"Part 2 not UUID: {parts[2]}"
 
 
 # ===========================================================================
@@ -192,7 +196,7 @@ class TestSearchModes:
             summaries=["VENDORS"],
         ))
         assert body["articles"] == []
-        assert body["metadata"]["hitCount"] >= 0
+        assert body["metadata"]["hitCount"] > 0
 
     def test_both_returns_articles_and_summaries(self):
         body = _post_ok(_base_body(
@@ -223,7 +227,15 @@ class TestPagination:
     def test_pagesize_zero_returns_no_articles(self):
         body = _post_ok(_base_body(), page_size=0)
         assert body["articles"] == []
-        assert body["metadata"]["hitCount"] >= 0
+        assert body["metadata"]["hitCount"] > 0
+
+    def test_pagesize_500_accepted(self):
+        body = _post_ok(_base_body(), page_size=500)
+        assert body["metadata"]["pageSize"] == 500
+
+    def test_metadata_pagesize_echoes_request(self):
+        body = _post_ok(_base_body(), page_size=3)
+        assert body["metadata"]["pageSize"] == 3
 
     def test_pagecount_consistent_with_hitcount(self):
         body = _post_ok(_base_body(), page_size=5)
@@ -255,32 +267,41 @@ class TestSorting:
         ids = [a["articleId"] for a in body["articles"]]
         assert ids == sorted(ids, reverse=True), "Articles not sorted by articleId descending"
 
-    def test_sort_name_asc_returns_results(self):
-        body = _post_ok(_base_body(), sort=["name,asc"], page_size=5)
-        assert len(body["articles"]) > 0
+    def test_sort_name_asc_and_desc_differ(self):
+        asc = _post_ok(_base_body(), sort=["name,asc"], page_size=10)
+        desc = _post_ok(_base_body(), sort=["name,desc"], page_size=10)
+        ids_asc = [a["articleId"] for a in asc["articles"]]
+        ids_desc = [a["articleId"] for a in desc["articles"]]
+        assert len(ids_asc) > 0
+        assert len(ids_desc) > 0
+        assert ids_asc != ids_desc, "asc and desc returned same order"
 
-    def test_sort_name_desc_returns_results(self):
-        body = _post_ok(_base_body(), sort=["name,desc"], page_size=5)
-        assert len(body["articles"]) > 0
+    def test_sort_price_asc_and_desc_differ(self):
+        sas = {
+            "closedCatalogVersionIds": [],
+            "catalogVersionIdsOrderedByPreference": [CV_EUR],
+            "sourcePriceListIds": PRICE_LIST_IDS_EUR,
+        }
+        asc = _post_ok(_base_body(selectedArticleSources=sas), sort=["price,asc"], page_size=10)
+        desc = _post_ok(_base_body(selectedArticleSources=sas), sort=["price,desc"], page_size=10)
+        ids_asc = [a["articleId"] for a in asc["articles"]]
+        ids_desc = [a["articleId"] for a in desc["articles"]]
+        assert len(ids_asc) > 0
+        assert len(ids_desc) > 0
+        assert ids_asc != ids_desc, "price asc and desc returned same order"
 
-    def test_sort_price_asc_returns_results(self):
-        body = _post_ok(_base_body(
-            selectedArticleSources={
-                "closedCatalogVersionIds": [],
-                "catalogVersionIdsOrderedByPreference": [CV_EUR],
-                "sourcePriceListIds": PRICE_LIST_IDS_EUR,
-            },
-        ), sort=["price,asc"], page_size=5)
-        assert len(body["articles"]) > 0
-
-    def test_sort_price_desc_returns_results(self):
-        body = _post_ok(_base_body(
-            selectedArticleSources={
-                "closedCatalogVersionIds": [],
-                "catalogVersionIdsOrderedByPreference": [CV_EUR],
-                "sourcePriceListIds": PRICE_LIST_IDS_EUR,
-            },
-        ), sort=["price,desc"], page_size=5)
+    def test_multi_key_sort_accepted(self):
+        body = _post_ok(
+            _base_body(
+                selectedArticleSources={
+                    "closedCatalogVersionIds": [],
+                    "catalogVersionIdsOrderedByPreference": [CV_EUR],
+                    "sourcePriceListIds": PRICE_LIST_IDS_EUR,
+                },
+            ),
+            sort=["price,asc", "articleId,asc"],
+            page_size=5,
+        )
         assert len(body["articles"]) > 0
 
     def test_sort_invalid_field_rejected(self):
@@ -334,16 +355,18 @@ class TestFilters:
         for vs in filtered["summaries"]["vendorSummaries"]:
             assert vs["vendorId"] == VENDOR_MAJOR
 
-    def test_manufacturer_filter(self):
-        body = _post_ok(_base_body(
-            selectedArticleSources={
-                "closedCatalogVersionIds": [],
-                "catalogVersionIdsOrderedByPreference": [CV_BIG],
-            },
+    def test_manufacturer_filter_narrows_results(self):
+        sas = {
+            "closedCatalogVersionIds": [],
+            "catalogVersionIdsOrderedByPreference": [CV_BIG],
+        }
+        unfiltered = _post_ok(_base_body(selectedArticleSources=sas, summaries=["MANUFACTURERS"]))
+        filtered = _post_ok(_base_body(
+            selectedArticleSources=sas,
             manufacturersFilter=["Würth"],
             summaries=["MANUFACTURERS"],
         ))
-        assert body["metadata"]["hitCount"] >= 0
+        assert filtered["metadata"]["hitCount"] <= unfiltered["metadata"]["hitCount"]
 
     def test_max_delivery_time_filter(self):
         all_results = _post_ok(_base_body())
@@ -394,13 +417,14 @@ class TestFilters:
         ))
         assert body["metadata"]["hitCount"] == 0
 
-    def test_article_ids_filter(self):
+    def test_article_ids_filter_returns_only_requested(self):
         browse = _post_ok(_base_body(), page_size=3, sort=["articleId,asc"])
         assert len(browse["articles"]) > 0
         target_id = browse["articles"][0]["articleId"]
         filtered = _post_ok(_base_body(articleIdsFilter=[target_id]))
-        found_ids = [a["articleId"] for a in filtered["articles"]]
+        found_ids = {a["articleId"] for a in filtered["articles"]}
         assert target_id in found_ids
+        assert found_ids == {target_id}
 
     def test_accessories_for_article_number(self):
         body = _post_ok(_base_body(
@@ -409,6 +433,16 @@ class TestFilters:
                 "catalogVersionIdsOrderedByPreference": [CV_ACCESSORIES],
             },
             accessoriesForArticleNumber=ARTICLE_NUM_ACCESSORIES,
+        ))
+        assert body["metadata"]["hitCount"] >= 0
+
+    def test_spare_parts_for_article_number(self):
+        body = _post_ok(_base_body(
+            selectedArticleSources={
+                "closedCatalogVersionIds": [],
+                "catalogVersionIdsOrderedByPreference": [CV_ACCESSORIES],
+            },
+            sparePartsForArticleNumber=ARTICLE_NUM_ACCESSORIES,
         ))
         assert body["metadata"]["hitCount"] >= 0
 
@@ -422,25 +456,26 @@ class TestFilters:
         ))
         assert body["metadata"]["hitCount"] >= 0
 
-    def test_eclass_filter(self):
-        body = _post_ok(_base_body(
-            selectedArticleSources={
-                "closedCatalogVersionIds": [],
-                "catalogVersionIdsOrderedByPreference": [CV_BIG],
-            },
-            eClassesFilter=[23110103],
-        ))
-        assert body["metadata"]["hitCount"] >= 0
+    def test_eclass_filter_narrows_results(self):
+        sas = {
+            "closedCatalogVersionIds": [],
+            "catalogVersionIdsOrderedByPreference": [CV_BIG],
+        }
+        unfiltered = _post_ok(_base_body(selectedArticleSources=sas))
+        filtered = _post_ok(_base_body(selectedArticleSources=sas, eClassesFilter=[23110103]))
+        assert filtered["metadata"]["hitCount"] <= unfiltered["metadata"]["hitCount"]
 
-    def test_required_features_filter(self):
-        body = _post_ok(_base_body(
-            selectedArticleSources={
-                "closedCatalogVersionIds": [],
-                "catalogVersionIdsOrderedByPreference": [CV_FEATURES],
-            },
+    def test_required_features_filter_narrows_results(self):
+        sas = {
+            "closedCatalogVersionIds": [],
+            "catalogVersionIdsOrderedByPreference": [CV_FEATURES],
+        }
+        unfiltered = _post_ok(_base_body(selectedArticleSources=sas))
+        filtered = _post_ok(_base_body(
+            selectedArticleSources=sas,
             requiredFeatures=[{"name": "für Schraube", "values": ["M 10"]}],
         ))
-        assert body["metadata"]["hitCount"] >= 0
+        assert filtered["metadata"]["hitCount"] <= unfiltered["metadata"]["hitCount"]
 
     def test_price_filter_min_max(self):
         body = _post_ok(_base_body(
@@ -498,6 +533,10 @@ class TestTextSearch:
             sort=["price,asc"],
         )
         assert body["metadata"]["hitCount"] >= 0
+
+    def test_empty_query_string(self):
+        body = _post_ok(_base_body(queryString=""))
+        assert body["metadata"]["term"] is None or body["metadata"]["term"] == ""
 
     def test_metadata_term_echoes_query(self):
         body = _post_ok(_base_body(queryString="Bohrer"))
@@ -573,10 +612,11 @@ class TestSummaries:
         assert isinstance(ps, list)
         if ps:
             p = ps[0]
-            assert "min" in p
-            assert "max" in p
-            assert "currencyCode" in p
+            assert set(p.keys()) == {"min", "max", "currencyCode"}
             assert p["min"] <= p["max"]
+            assert re.match(r"^[A-Z]{3}$", p["currencyCode"]), (
+                f"Invalid currency code: {p['currencyCode']}"
+            )
 
     def test_categories_summary(self):
         body = _post_ok(_base_body(
@@ -637,6 +677,28 @@ class TestSummaries:
             summaries=["ECLASS5SET"],
         ))
         assert "summaries" in body
+
+    def test_platform_categories_summary(self):
+        body = _post_ok(_base_body(
+            selectedArticleSources={
+                "closedCatalogVersionIds": [],
+                "catalogVersionIdsOrderedByPreference": [CV_BIG],
+            },
+            summaries=["PLATFORM_CATEGORIES"],
+        ))
+        assert "summaries" in body
+
+    def test_summaries_no_extra_keys(self):
+        body = _post_ok(_base_body(
+            summaries=["VENDORS", "MANUFACTURERS", "FEATURES", "PRICES",
+                        "CATEGORIES", "ECLASS5", "ECLASS7", "S2CLASS"],
+        ))
+        allowed = {
+            "vendorSummaries", "manufacturerSummaries", "featureSummaries",
+            "pricesSummary", "categoriesSummary", "eClass5Categories",
+            "eClass7Categories", "s2ClassCategories", "eClassesAggregations",
+        }
+        assert set(body["summaries"].keys()) <= allowed
 
     def test_summaries_not_requested_are_empty(self):
         body = _post_ok(_base_body(summaries=[]))
@@ -749,8 +811,31 @@ class TestValidation:
         r = _post(body)
         assert r.status_code == 400
 
-    def test_price_filter_currency_required_when_bounds_set(self):
+    def test_price_filter_currency_required_when_min_set(self):
         body = _base_body(priceFilter={"min": 100})
+        r = _post(body)
+        assert r.status_code == 400
+
+    def test_price_filter_currency_required_when_max_set(self):
+        body = _base_body(priceFilter={"max": 500})
+        r = _post(body)
+        assert r.status_code == 400
+
+    def test_unknown_field_in_selected_article_sources_rejected(self):
+        body = _base_body()
+        body["selectedArticleSources"]["unknownField"] = "value"
+        r = _post(body)
+        assert r.status_code == 400
+
+    def test_unknown_field_in_price_filter_rejected(self):
+        body = _base_body(priceFilter={"currencyCode": "EUR", "unknownField": 1})
+        r = _post(body)
+        assert r.status_code == 400
+
+    def test_unknown_field_in_feature_filter_rejected(self):
+        body = _base_body(
+            requiredFeatures=[{"name": "test", "values": [], "unknownField": 1}],
+        )
         r = _post(body)
         assert r.status_code == 400
 
@@ -827,6 +912,30 @@ class TestACLContract:
         ec = body_resp["summaries"].get("eClass5Categories")
         if ec is not None:
             assert "selectedEClassGroup" in ec or "sameLevel" in ec
+
+    def test_current_eclass7_code_accepted(self):
+        body = _base_body(
+            currentEClass7Code=27260701,
+            selectedArticleSources={
+                "closedCatalogVersionIds": [],
+                "catalogVersionIdsOrderedByPreference": [CV_BIG],
+            },
+            summaries=["ECLASS7"],
+        )
+        r = _post(body)
+        assert r.status_code == 200
+
+    def test_current_s2class_code_accepted(self):
+        body = _base_body(
+            currentS2ClassCode=32039090,
+            selectedArticleSources={
+                "closedCatalogVersionIds": [],
+                "catalogVersionIdsOrderedByPreference": [CV_BIG],
+            },
+            summaries=["S2CLASS"],
+        )
+        r = _post(body)
+        assert r.status_code == 200
 
     def test_current_category_path_elements_accepted(self):
         body = _base_body(
