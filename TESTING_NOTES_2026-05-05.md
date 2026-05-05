@@ -219,11 +219,11 @@ term-echoes-query-text test.
 
 ## Final state at suite milestone
 
-* `tests/test_f2_contract_against_catalog.py`: **174 passing,
-  stable across multiple consecutive runs** (~11s wall time per run).
+* `tests/test_f2_contract_against_catalog.py`: **176 passing, 5
+  consecutive runs identical** (~12s wall time per run).
 * Adjacent F2 + ACL suites (search-api contract, search-dedup
   integration, ACL acceptance/skeleton/integration/error/resilience,
-  filter integration): **255 passing, 60 skipped, 0 failed**. The
+  filter integration): **255+ passing, 60 skipped, 0 failed**. The
   skips are environment-gated paths (missing TEI, missing parquet
   fixtures); no regressions from the dedup-path `term` fix.
 * Unrelated repo-wide failures (`test_duckdb_*`, `test_index_*`,
