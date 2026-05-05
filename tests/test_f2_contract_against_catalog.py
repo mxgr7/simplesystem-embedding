@@ -1165,6 +1165,37 @@ class TestPagination:
             "summaries varied across page slices"
         )
 
+    def test_metadata_invariants_hold_for_all_pages(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """For every page from 1 to pageCount: page ≤ pageCount,
+        pageCount = ceil(hitCount / pageSize), pageSize echoes the
+        request."""
+        page_size = 5
+        body = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        r = search_api_app.post(
+            f"{search_path}?page=1&pageSize={page_size}", json=body)
+        assert r.status_code == 200
+        meta = r.json()["metadata"]
+        page_count = meta["pageCount"]
+        if page_count == 0:
+            pytest.skip("vendor produced no hits in this CV scope")
+        # Walk a few representative pages (don't iterate all of them
+        # for a high-volume vendor — keep the test under 1s).
+        for page in (1, max(1, page_count // 2), page_count):
+            r = search_api_app.post(
+                f"{search_path}?page={page}&pageSize={page_size}", json=body)
+            assert r.status_code == 200
+            m = r.json()["metadata"]
+            assert m["page"] == page
+            assert m["pageSize"] == page_size
+            assert m["pageCount"] == page_count, (
+                f"pageCount drifted across pages: {page_count} → {m['pageCount']}"
+            )
+            assert m["hitCount"] == meta["hitCount"], (
+                f"hitCount drifted across pages: {meta['hitCount']} → {m['hitCount']}"
+            )
+
     def test_article_count_never_exceeds_page_size(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
