@@ -2659,6 +2659,23 @@ class TestAuthHeaderAlternatives:
         assert r.status_code == 200, r.text
         assert "text/plain" in r.headers.get("content-type", "")
 
+    def test_metrics_endpoint_serves_prometheus_format(
+        self, authed_app: tuple[TestClient, str]
+    ) -> None:
+        """The /metrics endpoint must return Prometheus exposition
+        format — at least a `# HELP` or `# TYPE` line and a metric
+        with a numeric value."""
+        client, _ = authed_app
+        r = client.get("/metrics")
+        text = r.text
+        assert any(line.startswith(("# HELP", "# TYPE")) for line in text.splitlines()), (
+            "metrics endpoint did not emit Prometheus help/type comments"
+        )
+        # At least one metric line exists (`<metric_name>{...} <value>`).
+        assert re.search(r"^\w+(?:\{[^}]*\})?\s+\S+", text, re.MULTILINE), (
+            "no metric-shaped lines on /metrics"
+        )
+
     def test_openapi_yaml_endpoint_serves_spec(
         self, authed_app: tuple[TestClient, str]
     ) -> None:
