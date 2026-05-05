@@ -1165,6 +1165,44 @@ class TestPagination:
             "summaries varied across page slices"
         )
 
+    def test_returned_article_ids_are_unique_within_a_page(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """The dedup topology selects one representative offer per
+        article_hash. A page must therefore have no duplicate
+        `articleId` values."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=50",
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [a["articleId"] for a in body["articles"]]
+        assert len(set(ids)) == len(ids), (
+            f"duplicate articleIds within page: "
+            f"{[i for i in ids if ids.count(i) > 1][:3]}"
+        )
+
+    def test_summary_buckets_have_unique_keys(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """vendorSummaries' vendorIds and manufacturerSummaries'
+        names must each appear at most once — a single bucket per
+        distinct group is the only way the wire contract can be
+        consumed sensibly."""
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            summaries=["VENDORS", "MANUFACTURERS"],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        vs_ids = [v["vendorId"] for v in out["summaries"].get("vendorSummaries") or []]
+        ms_names = [m["name"] for m in out["summaries"].get("manufacturerSummaries") or []]
+        assert len(set(vs_ids)) == len(vs_ids), f"duplicate vendor ids: {vs_ids}"
+        assert len(set(ms_names)) == len(ms_names), f"duplicate manuf names: {ms_names}"
+
     def test_pages_do_not_overlap(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
