@@ -643,20 +643,27 @@ class TestFilters:
         assert body["articles"] == []
         assert body["metadata"]["hitCount"] == 0
 
-    def test_vendor_filter_narrows_returned_offers(
+    def test_vendor_filter_returns_offers_owned_by_vendor(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
+        """Each `articleId` is the offer-side primary key in the
+        format `{vendor_id}:{base64ArticleNumber}:{cv_id}` (legacy
+        wire format). The vendor-filter narrowing must therefore
+        produce IDs whose first colon-separated segment matches the
+        requested vendor."""
         r = search_api_app.post(
             f"{search_path}?pageSize=20",
-            json=make_body(cvs=all_cvs, vendorIdsFilter=[KNOWN_VENDORS[0]]),
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
         )
         assert r.status_code == 200, r.text
         body = r.json()
         assert_search_response_valid(body)
-        # We can't assert vendor here without a hydrate-vendor lookup;
-        # the integration assertion is "we got something" + "schema OK".
-        # Per-vendor narrowing is exercised in test_search_dedup_integration.
-        assert isinstance(body["articles"], list)
+        for art in body["articles"]:
+            head = art["articleId"].split(":", 1)[0]
+            assert head == HIGH_VOLUME_VENDOR, (
+                f"vendor filter produced offer from a different vendor: "
+                f"{art['articleId']!r} (expected prefix {HIGH_VOLUME_VENDOR!r})"
+            )
 
     def test_manufacturer_filter(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
