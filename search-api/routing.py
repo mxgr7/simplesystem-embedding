@@ -305,7 +305,7 @@ async def dispatch_dedup(
     sorted_items = sort_items(materialised, sort_plan)
     page_offset = max(0, (page - 1) * page_size)
     page_slice = sorted_items[page_offset:page_offset + page_size]
-    hits = _to_hits(page_slice, sort_plan)
+    hits = _to_hits(page_slice, sort_plan, query_active=bool(query_text))
 
     # F5: BOTH mode runs aggregations over the full filtered hit set
     # (independent of the page slice). HITS_ONLY skips. SUMMARIES_ONLY
@@ -865,20 +865,31 @@ def _materialise(
     return out
 
 
-def _to_hits(items: list[_Materialised], sort_plan: SortPlan) -> list[Hit]:
+def _to_hits(
+    items: list[_Materialised], sort_plan: SortPlan, *, query_active: bool,
+) -> list[Hit]:
     """Convert sorted _Materialised items into Hits.
 
-    For relevance sort, score is the RRF score and source is `rrf`.
-    For non-relevance sort, score is None per spec §3 (the wire schema
-    accepts null) and source is `sort` for telemetry."""
-    if sort_plan.is_relevance:
+    Score on the wire is `Article.score: nullable` per spec §3. The
+    wire shape:
+
+      * relevance sort + query active → real RRF score, source="rrf".
+      * relevance sort + no query (browse) → score=None, source="filter".
+      * non-relevance sort → score=None, source="sort".
+
+    Returning `0.0` would falsely place an unranked article at the
+    bottom of the relevance distribution; `None` is the only honest
+    signal that ranking didn't apply.
+    """
+    if sort_plan.is_relevance and query_active:
         return [
             Hit(id=str(m.representative_offer["id"]),
                 score=m.relevance_score, source="rrf")
             for m in items
         ]
+    source = "sort" if not sort_plan.is_relevance else "filter"
     return [
-        Hit(id=str(m.representative_offer["id"]), score=0.0, source="sort")
+        Hit(id=str(m.representative_offer["id"]), score=None, source=source)
         for m in items
     ]
 

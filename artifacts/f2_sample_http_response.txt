@@ -1,30 +1,30 @@
 HTTP/1.1 200 OK
-date: Tue, 05 May 2026 19:20:06 GMT
+date: Tue, 05 May 2026 19:28:59 GMT
 server: uvicorn
-content-length: 4938
+content-length: 4943
 content-type: application/json
 
 {
   "articles": [
     {
       "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:002b162a-f9fe-48b1-a55f-a56f536f02b8",
-      "score": 0.0
+      "score": null
     },
     {
       "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:03999f4b-24ed-4a03-bb32-32ad7cb509f4",
-      "score": 0.0
+      "score": null
     },
     {
       "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:0a6b9840-2784-49d9-8756-26adb0e3cc00",
-      "score": 0.0
+      "score": null
     },
     {
       "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:24286033-261d-4bc8-a7c4-50b3c1fe6e34",
-      "score": 0.0
+      "score": null
     },
     {
       "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:50184ade-2666-4b64-9bc6-02abdca92d70",
-      "score": 0.0
+      "score": null
     }
   ],
   "summaries": {

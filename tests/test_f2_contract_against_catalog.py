@@ -3050,7 +3050,10 @@ class TestDeeperSummaries:
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
         """No `query` → browse path → `score` is null (or absent) on
-        every returned article. We have no ranking signal here."""
+        every returned article. We have no ranking signal here.
+        Returning 0.0 would falsely suggest the article was ranked at
+        the bottom of the relevance distribution — null is the only
+        honest signal."""
         r = search_api_app.post(
             f"{search_path}?pageSize=10",
             json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
@@ -3059,8 +3062,26 @@ class TestDeeperSummaries:
         body = r.json()
         assert_search_response_valid(body)
         for art in body["articles"]:
-            assert art.get("score") in (None, 0.0), (
+            assert art.get("score") is None, (
                 f"browse-path article had non-null score: {art}"
+            )
+
+    def test_article_score_is_null_for_non_relevance_sort(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Even with a query active, sorting by a non-relevance field
+        means the score field carries no ranking information — it
+        must come back null per `routing._to_hits`'s contract."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=5&sort=articleId,asc",
+            json=make_body(cvs=all_cvs, query="schraube"),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        for art in body["articles"]:
+            assert art.get("score") is None, (
+                f"non-relevance sort emitted a score: {art}"
             )
 
     def test_article_score_is_numeric_in_query_path(

@@ -118,8 +118,11 @@ class SearchParams:
 @dataclass(slots=True)
 class Hit:
     id: str
-    score: float
-    source: str                        # "dense" | "bm25" | "rrf"
+    # `None` when the result wasn't ranked (browse path, or non-
+    # relevance sort) — the wire `Article.score` is nullable per
+    # spec §3 / OpenAPI `Article.score`.
+    score: float | None
+    source: str                        # "dense" | "bm25" | "rrf" | "sort" | "filter"
 
 
 # ──────────────────────────────────────────────────────────────────────

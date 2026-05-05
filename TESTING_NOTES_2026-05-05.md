@@ -216,6 +216,13 @@ term-echoes-query-text test.
    while the legacy single-collection path emits `null`. The dedup
    path was wrong — corrected to match the spec (`term: nullable`)
    and the legacy path.
+3. `routing._to_hits` documented (in its docstring) that
+   non-relevance sort emits `score=None` per spec §3, but the code
+   emitted `score=0.0`. The wire was misleading: a hit with no
+   ranking carried the same value as a hit ranked at the bottom of
+   the relevance distribution. Fixed `Hit.score` to be
+   `float | None` and corrected the non-relevance branch to pass
+   `None`. Surfaced when checking the live HTTP response.
 
 ## Final state at suite milestone
 
