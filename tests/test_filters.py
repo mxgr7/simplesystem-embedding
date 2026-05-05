@@ -41,7 +41,7 @@ from models import (  # noqa: E402
 # sentinel open-list and `build_milvus_expr` / `build_offer_expr` here are
 # wrapped to strip that sentinel clause from the emitted expr.
 _TEST_CV = "__test_cv__"
-_TEST_CV_CLAUSE = f'array_contains_any(catalog_version_ids, ["{_TEST_CV}"])'
+_TEST_CV_CLAUSE = f'catalog_version_id in ["{_TEST_CV}"]'
 
 
 def _strip_default_cv(expr: str | None) -> str | None:
@@ -214,7 +214,7 @@ def test_closed_marketplace_only_intersects_closed_cv() -> None:
             closedCatalogVersionIds=["c-1", "c-2"],
         ),
     ))
-    assert expr == 'array_contains_any(catalog_version_ids, ["c-1", "c-2"])'
+    assert expr == 'catalog_version_id in ["c-1", "c-2"]'
 
 
 def test_closed_marketplace_off_intersects_open_list() -> None:
@@ -226,7 +226,7 @@ def test_closed_marketplace_off_intersects_open_list() -> None:
             catalogVersionIdsOrderedByPreference=["o-1", "o-2"],
         ),
     ))
-    assert expr == 'array_contains_any(catalog_version_ids, ["o-1", "o-2"])'
+    assert expr == 'catalog_version_id in ["o-1", "o-2"]'
 
 
 def test_closed_marketplace_off_with_empty_lists_matches_nothing() -> None:
@@ -250,7 +250,7 @@ def test_closed_catalog_versions_with_flag_off_does_not_intersect_closed() -> No
         ),
     ))
     # CV intersection runs on the *open* list, not on closed.
-    assert expr == 'array_contains_any(catalog_version_ids, ["o-9"])'
+    assert expr == 'catalog_version_id in ["o-9"]'
 
 
 def test_relationships_compose_with_and() -> None:
@@ -489,7 +489,7 @@ def test_split_closed_marketplace_is_offer_side() -> None:
         ),
     )
     assert build_article_expr(req) is None
-    assert build_offer_expr(req) == 'array_contains_any(catalog_version_ids, ["c-1"])'
+    assert build_offer_expr(req) == 'catalog_version_id in ["c-1"]'
 
 
 def test_split_relationships_are_offer_side() -> None:

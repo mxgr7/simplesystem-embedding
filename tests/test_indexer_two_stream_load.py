@@ -50,7 +50,7 @@ from indexer.test_loader import load_split, stub_vector  # noqa: E402
 
 MILVUS_URI = "http://localhost:19530"
 ARTICLES = "articles_v4"
-OFFERS = "offers_v5"
+OFFERS = "offers_v6"
 FIXTURE_PATH = REPO_ROOT / "tests/fixtures/mongo_sample/sample_200.json"
 
 # Tag inserted rows with a synthetic offer-id prefix so we can cleanly

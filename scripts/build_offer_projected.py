@@ -12,7 +12,7 @@ Output schema mirrors the offer-derived columns of `_PROJECTION_CTE_SQL`,
 plus carry-through fields for chunk-time JOIN-dependent reconstruction:
   vk, ak (join keys)
   vendor_id, article_number, id
-  name, manufacturerName, ean, catalog_version_ids, delivery_time_days_max
+  name, manufacturerName, ean, catalog_version_id, delivery_time_days_max
   eclass5_code, eclass7_code, s2class_code (INTEGER[])
   relationship_accessory_for, relationship_spare_part_for, relationship_similar_to (VARCHAR[])
   category_l1..l5 (VARCHAR[])

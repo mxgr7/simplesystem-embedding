@@ -30,7 +30,7 @@ Filters are AND-composed at the top level. Within each multi-valued filter the e
 ## In scope
 
 - Filter translator that walks the request and emits a Milvus `expr` string. Per filter:
-  - `selectedArticleSources.closedCatalogVersionIds` → `array_contains_any(catalog_version_ids, [...])`
+  - `selectedArticleSources.closedCatalogVersionIds` → `catalog_version_id in [...]` (scalar per source mongo offer post-F9 correction)
   - `articleIdsFilter` → `id in [...]`
   - `vendorIdsFilter` → `vendor_id in [...]` (single field per F1).
   - `manufacturersFilter` → `manufacturerName in [...]`
@@ -40,7 +40,7 @@ Filters are AND-composed at the top level. Within each multi-valued filter the e
   - `currentEClass5Code` / `currentEClass7Code` / `currentS2ClassCode` → `array_contains(eclassN_code, X)` against the matching `ARRAY<INT>` hierarchy field; matches whether `X` is the leaf or any parent level.
   - `eClassesFilter` → `array_contains_any(eclass5_code, [...])` (legacy `EClassesFilterProvider` operates on the eClass5 code tree; the hierarchy array carries every level so a `terms` query at any depth matches).
   - `coreSortimentOnly` → `array_contains_any(core_marker_enabled_sources, [...])` AND NOT `array_contains_any(core_marker_disabled_sources, [...])`. The source IDs come from `selectedArticleSources` — see `CoreSortimentFilterProvider.java` for the exact field set the legacy uses.
-  - `closedMarketplaceOnly` → always-on `array_contains_any(catalog_version_ids, [<active list>])` (legacy `OfferFilterBuilder`). The flag selects which list drives the intersection: `closedCatalogVersionIds` when true, `catalogVersionIdsOrderedByPreference` when false. Empty active list ⇒ `terms` against `[]` matches nothing — replicated via the `id == ""` sentinel (`MATCH_NOTHING_EXPR`), short-circuited at the dispatch layer to skip the Milvus round-trip. `closedCatalogVersionIds` continues to drive the marker-source set inside `_core_sortiment_inner` (separate concern, same field — legacy quirk).
+  - `closedMarketplaceOnly` → always-on `catalog_version_id in [<active list>]` (legacy `OfferFilterBuilder`; scalar `IN` against the per-source-offer column post-F9 correction). The flag selects which list drives the intersection: `closedCatalogVersionIds` when true, `catalogVersionIdsOrderedByPreference` when false. Empty active list ⇒ `terms` against `[]` matches nothing — replicated via the `id == ""` sentinel (`MATCH_NOTHING_EXPR`), short-circuited at the dispatch layer to skip the Milvus round-trip. `closedCatalogVersionIds` continues to drive the marker-source set inside `_core_sortiment_inner` (separate concern, same field — legacy quirk). The article-side mirror lands as F10 (`articles_v{N}.catalog_version_ids` ARRAY envelope, filtered with `array_contains_any`).
   - `coreArticlesVendorsFilter` → vendor-id intersected with core marker; compose from the two
   - `blockedEClassVendorsFilters` → negative expr (NOT (vendor_id in [...] AND `array_contains_any(eclassN_code, [...])`)) per entry; the hierarchy array means a vendor's row is blocked when *any* level of its eClass tree falls into the block list.
   - `accessoriesForArticleNumber` / `sparePartsForArticleNumber` / `similarToArticleNumber` → `array_contains(relationship_*, "<articleNumber>")`

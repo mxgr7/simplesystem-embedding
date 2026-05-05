@@ -42,17 +42,20 @@ def records() -> list[dict]:
 # ---------- shape against real records -----------------------------------
 
 def test_pk_format_uuid_colon_b64url(records: list[dict]) -> None:
-    """PK shape after dropping friendly_id: `{vendor_uuid_dashed}:{b64url(article_number)}`.
-    DuckDB-native projection produces both halves without a UDF."""
+    """Post-F9-correction PK shape: `{vendor_uuid_dashed}:{b64url(article_number)}:{catalog_version_uuid_dashed}`.
+    DuckDB-native projection produces all three parts without a UDF."""
     row = project(records[0]).row
-    assert ":" in row["id"]
-    head, b64 = row["id"].split(":", 1)
+    assert row["id"].count(":") == 2
+    head, b64, cv = row["id"].split(":", 2)
     # Head is the canonical hyphenated UUID and matches vendor_id verbatim.
     assert head == row["vendor_id"]
     uuid.UUID(head)  # parses
     # b64url part round-trips to article_number.
     pad = "=" * (-len(b64) % 4)
     assert base64.urlsafe_b64decode(b64 + pad).decode("utf-8") == row["article_number"]
+    # Tail is the canonical hyphenated catalog_version UUID and matches verbatim.
+    assert cv == row["catalog_version_id"]
+    uuid.UUID(cv)
 
 
 def test_vendor_id_is_canonical_uuid_string(records: list[dict]) -> None:
@@ -61,10 +64,9 @@ def test_vendor_id_is_canonical_uuid_string(records: list[dict]) -> None:
     assert str(parsed) == row["vendor_id"]
 
 
-def test_catalog_version_ids_single_uuid(records: list[dict]) -> None:
+def test_catalog_version_id_is_uuid_string(records: list[dict]) -> None:
     row = project(records[0]).row
-    assert len(row["catalog_version_ids"]) == 1
-    uuid.UUID(row["catalog_version_ids"][0])  # parses as UUID
+    uuid.UUID(row["catalog_version_id"])  # parses as UUID
 
 
 def _first_where(records: list[dict], pred) -> dict:
@@ -189,14 +191,18 @@ def _minimal_record(**overrides) -> dict:
 
 def test_long_pk_round_trips() -> None:
     """Acceptance: a representative legacy `articleId` (≥80 chars) lands in
-    the PK without truncation and round-trips."""
+    the PK without truncation and round-trips. Post-F9-correction the PK is
+    `{vendor}:{b64url(articleNumber)}:{catalogVersionId}` — the triple-key
+    shape adds 37 chars over the legacy double-key shape."""
     long_article = "INDUSTRIAL-PART-9999/SUB-VARIANT-LONG-ZZZ-OPTION-CHANNEL-EXT"
     rec = _minimal_record(articleNumber=long_article)
     row = project(rec).row
     assert len(row["id"]) >= 80
-    fid, b64 = row["id"].split(":", 1)
+    fid, b64, cv = row["id"].split(":", 2)
     pad = "=" * (-len(b64) % 4)
     assert base64.urlsafe_b64decode(b64 + pad).decode("utf-8") == long_article
+    uuid.UUID(cv)
+    assert cv == row["catalog_version_id"]
 
 
 def test_feature_with_equals_in_value_is_dropped() -> None:
@@ -376,7 +382,7 @@ def test_hash_invariant_to_non_embedded_fields() -> None:
     perturbed = {
         **base,
         "vendor_id": "different-vendor-uuid",
-        "catalog_version_ids": ["different-catalog"],
+        "catalog_version_id": "different-catalog",
         "prices": [{"price": 999.0, "currency": "EUR", "priority": 1, "sourcePriceListId": ""}],
         "ean": "9999999999999",
         "article_number": "DIFFERENT-NUM",
@@ -466,7 +472,7 @@ def test_to_offer_row_keeps_per_offer_fields(records: list[dict]) -> None:
     row = project(records[0]).row
     h = compute_article_hash(row)
     offer = to_offer_row(row, article_hash=h)
-    for k in ("id", "vendor_id", "catalog_version_ids", "ean", "article_number",
+    for k in ("id", "vendor_id", "catalog_version_id", "ean", "article_number",
               "prices", "delivery_time_days_max", "features",
               "core_marker_enabled_sources", "core_marker_disabled_sources",
               "relationship_accessory_for", "relationship_spare_part_for",

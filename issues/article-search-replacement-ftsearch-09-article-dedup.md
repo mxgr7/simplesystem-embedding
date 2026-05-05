@@ -9,7 +9,7 @@ References: spec §6 (indexing pipeline), §7 (schema), §4.3 (filtering), §2.3
 
 ## Status
 
-🟡 **PRs landed; design correction outstanding (2026-05-05)** — see **Correction** section below before reading the rest.
+🟡 **Original PRs landed; design correction implemented 2026-05-05** — see **Correction** section below before reading the rest. A fresh bulk reindex against `offers_v6` is still required to pick up the corrected schema/PK/projection (the old `offers_v5` collection still carries the pre-correction shape and must be dropped or paired-aliased away during cutover).
 
   - **PR1** (schema): `scripts/create_articles_collection.py` + revised `scripts/create_offers_collection.py` + paired alias workflow in `scripts/MILVUS_ALIAS_WORKFLOW.md`. Schema tests in `tests/test_articles_collection_schema.py` (17) + `tests/test_offers_collection_schema.py` (22).
   - **PR2** (indexer two-stream): `indexer/projection.py:compute_article_hash`/`aggregate_article`/`to_offer_row` + `indexer/test_loader.py:load_split` for stub-vector tests.
@@ -31,11 +31,12 @@ The original F9 design (and PR2b's implementation) inherited the legacy ES doc s
 
 Concretely:
 
-- **PK** changes from `{vendor_uuid_dashed}:{base64Url(articleNumber)}` to `{vendor_uuid_dashed}:{base64Url(articleNumber)}:{catalogVersionId}` (or another shape that uniquely keys a source mongo offer; see "Open questions" below).
+- **PK** changes from `{vendor_uuid_dashed}:{base64Url(articleNumber)}` to `{vendor_uuid_dashed}:{base64Url(articleNumber)}:{catalogVersionUuidDashed}`. `outer.catalogVersionId` is required in the source data (never NULL), so the third segment is always present.
 - **`catalog_version_ids ARRAY<VARCHAR>`** → **`catalog_version_id VARCHAR`** (singular, INVERTED).
 - Per-offer scalars (`prices`, `ean`, `delivery_time_days_max`, core markers, relationships, features, F8 envelope columns) are computed from the **single source mongo offer**, not unioned across a `(vendor, articleNumber)` group.
 - F3 filter form for catalog scoping changes from `array_contains_any(catalog_version_ids, [...])` to `catalog_version_id IN [...]`.
 - The `articles_v{N}` side is unaffected: same hash function, same embedded-field set, same per-currency envelope (now aggregated across all offers sharing the hash, no intermediate `(vendor, articleNumber)` rollup).
+- **Naming caveat for reviewers:** the column name `catalog_version_ids` (plural ARRAY) is *removed from `offers_v{N}`* by this correction and *re-introduced on `articles_v{N}`* by F10 (article-side union envelope). The per-offer side now carries the singular `catalog_version_id`; the article side will carry the plural `catalog_version_ids` once F10 ships.
 
 **Scale impact** (vs. original spec numbers below):
 
@@ -48,14 +49,17 @@ Concretely:
 
 Vector storage and HNSW RAM are still bounded by the 130M unique-embedding count — F9's core value proposition is preserved. What grows is `offers_v{N}` row count and per-offer scalar storage (3.21× more offer rows than the original design). TEI cache hit rate at bulk reindex improves (~74% vs. ~18%) since the cache is keyed by hash, not by offer.
 
-**Implementation status of the correction:**
+**Implementation status of the correction (landed 2026-05-05):**
 
-- `indexer/duckdb_projection.py` — the `offers_pre_dedup → offers WHERE _rn = 1` CTE (line ~921) must be removed. Currently it picks one row non-deterministically per `(vendor, articleNumber)`, dropping the others without unioning anything (so the implementation didn't even faithfully execute the original spec — it just discarded duplicate-key rows so Milvus wouldn't reject the upsert batch).
-- `indexer/collection_specs.py:build_offers_schema` — change `catalog_version_ids` ARRAY to `catalog_version_id` scalar; widen PK `id` if the chosen shape exceeds 256 chars.
-- `scripts/create_offers_collection.py` (and the offers index params) — adjust accordingly.
-- `search-api/filters.py:build_offer_expr` — change catalog filter to `IN`.
-- Cascading updates in `issues/article-search-replacement-spec.md` (§7), `article-search-replacement-ftsearch-01-milvus-schema.md`, `article-search-replacement-ftsearch-03-filtering.md`, `article-search-replacement-indexer-01-bulk-rebuild.md` — all reference the old `catalog_version_ids ARRAY` shape.
-- A fresh bulk reindex is required; the alias-swing playbook handles the transition.
+- `indexer/duckdb_projection.py` — `offers_pre_dedup → offers WHERE _rn = 1` CTE removed; `offers` CTE reads directly from `with_hash` joined with `offer_ccy_envelope`. PK construction in both `_PROJECTION_CTE_SQL` (offer-side projection) and `_OFFER_PROJECTED_BUILD_SELECT_SQL` (chunk-time precomputed projection) appends `|| ':' || uuid_str(outer.catalogVersionId)`. `_FINALIZED_CTE_SQL`, `_OFFERS_CTE_SQL` and `_PROJECTION_FROM_OP_CTE_SQL` rename the column from `catalog_version_ids` to `catalog_version_id`.
+- `indexer/projection.py:project` — PK formula updated to `f"{vendor_uuid}:{_b64url_no_pad(article_number)}:{catalog_version_uuid}"`; row dict carries scalar `catalog_version_id`. The pre-correction local `catalog_version_ids = [str(catalog_version_uuid)] if catalog_version_uuid else []` branch is removed (the field is required by domain).
+- `indexer/collection_specs.py:build_offers_schema` — schema field `catalog_version_id VARCHAR(64)` (singular). `OFFER_SCALAR_INDEX_FIELDS` updated. PK `id` stays at `VARCHAR(256)` (worst observed length in fixtures ~123 chars, well under the cap).
+- `indexer/bulk_insert.py` — `offers_parquet_schema` carries `("catalog_version_id", pa.string())`; `_offers_batch_to_arrow` encodes the scalar.
+- `scripts/build_offer_projected.py` — module docstring updated; SQL is centralised in `duckdb_projection.py` and inherits the change.
+- `search-api/filters.py:_closed_marketplace` — emits `catalog_version_id in [<active list>]` (was `array_contains_any(catalog_version_ids, [...])`). Composes cleanly with the in-flight CV-list-by-flag switch.
+- Cascading docs updated (`spec.md` §7 + §4.3 tables, `ftsearch-01-milvus-schema.md`, `ftsearch-03-filtering.md`, `indexer-01-bulk-rebuild.md`, `RUNBOOK.md` sizing block).
+- Tests updated: `tests/test_offers_collection_schema.py` (collection bumped to `offers_v6`; expected fields/indexes; parametrised filter expressions), `tests/test_projection.py` (PK shape, scalar field, hash invariance, long-PK round-trip), `tests/test_filters.py` (sentinel constant + 3 explicit-list assertions + the split-offer-side test), `tests/test_duckdb_aggregate_parity.py` (per_id parity now byte-exact: tolerance dropped to 0; `py_offers` no longer dedupes), `tests/test_acl_acceptance_e2e.py` and `tests/test_swing_aliases.py` (synthetic schema scaffolding), `tests/test_indexer_two_stream_load.py` (collection pin bumped), `tests/test_search_dedup_integration.py` (collection pin + scalar projection), `tests/fixtures/offers_schema_smoke.json` (per-row scalar + a 3-row group sharing `(vendor, articleNumber)` to validate per-offer granularity).
+- **Operator pre-flight before reindex:** delete stale `offer_projected.parquet/` artifacts on the indexer host (the cache is keyed on the pre-correction PK + column shape). Documented in `indexer/RUNBOOK.md`. Existing `offers_v5` Milvus collection cannot accept the corrected rows; create `offers_v6` via `scripts/create_offers_collection.py --version 6` and follow the paired alias-swing playbook (`scripts/MILVUS_ALIAS_WORKFLOW.md`).
 
 The remainder of this packet describes the **original** (incorrect) design — kept verbatim as historical context. Where the original text contradicts this Correction, the Correction wins.
 

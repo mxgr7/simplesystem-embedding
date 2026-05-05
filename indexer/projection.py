@@ -335,7 +335,8 @@ def project(record: dict[str, Any]) -> ProjectionResult:
 
     vendor_uuid = _decode_uuid(outer["vendorId"])
     article_number = outer["articleNumber"]
-    pk = f"{vendor_uuid}:{_b64url_no_pad(article_number)}"
+    catalog_version_uuid = _decode_uuid(outer["catalogVersionId"])
+    pk = f"{vendor_uuid}:{_b64url_no_pad(article_number)}:{catalog_version_uuid}"
 
     # Prices: built-in `pricings.{open,closed}` + joined `pricings[]` rows.
     prices_out: list[dict[str, Any]] = []
@@ -356,10 +357,6 @@ def project(record: dict[str, Any]) -> ProjectionResult:
 
     related = inner.get("relatedArticleNumbers") or {}
 
-    catalog_version_id = outer.get("catalogVersionId")
-    catalog_version_uuid = _decode_uuid(catalog_version_id) if catalog_version_id else None
-    catalog_version_ids = [str(catalog_version_uuid)] if catalog_version_uuid else []
-
     customer_numbers = _project_customer_numbers(
         record.get("customerArticleNumbers"),
         catalog_value=params.get("customerArticleNumber"),
@@ -373,7 +370,7 @@ def project(record: dict[str, Any]) -> ProjectionResult:
         "ean": params.get("ean") or "",
         "article_number": article_number,
         "vendor_id": str(vendor_uuid),
-        "catalog_version_ids": catalog_version_ids,
+        "catalog_version_id": str(catalog_version_uuid),
         **categories,
         "prices": prices_out,
         "delivery_time_days_max": int(params.get("deliveryTime") or 0),

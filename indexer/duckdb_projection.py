@@ -495,18 +495,17 @@ projected AS (
         -- ---- PK + identifiers ----
         uuid_str(outer_offer.vendorId) AS vendor_id,
         outer_offer.articleNumber AS article_number,
-        uuid_str(outer_offer.vendorId) || ':' || b64url_no_pad(outer_offer.articleNumber) AS id,
+        uuid_str(outer_offer.vendorId)
+            || ':' || b64url_no_pad(outer_offer.articleNumber)
+            || ':' || uuid_str(outer_offer.catalogVersionId) AS id,
 
         -- ---- article-level retrieval / display ----
         COALESCE(params."name", '') AS "name",
         COALESCE(params.manufacturerName, '') AS manufacturerName,
         COALESCE(params.ean, '') AS ean,
 
-        -- ---- catalog version ----
-        CASE
-            WHEN outer_offer.catalogVersionId IS NULL THEN []::VARCHAR[]
-            ELSE [uuid_str(outer_offer.catalogVersionId)]
-        END AS catalog_version_ids,
+        -- ---- catalog version (singular per source mongo offer post-F9 correction) ----
+        uuid_str(outer_offer.catalogVersionId) AS catalog_version_id,
 
         -- ---- delivery ----
         -- `unwrap_int` handles both raw EJSON `{"$numberInt": "5"}` and
@@ -687,7 +686,7 @@ _FINALIZED_CTE_SQL = """
 finalized AS (
     SELECT
         id, "name", manufacturerName, ean, article_number, vendor_id,
-        catalog_version_ids,
+        catalog_version_id,
         category_l1, category_l2, category_l3, category_l4, category_l5,
         -- Drop NULL price entries (no resolvable single_unit_price).
         list_filter(prices_raw, p -> p IS NOT NULL) AS prices,
@@ -860,7 +859,11 @@ offer_ccy_envelope AS (
     FROM offer_prices_exploded
     GROUP BY id
 ),
-offers_pre_dedup AS (
+-- One row per source mongo offer post-F9-correction (2026-05-05). The PK
+-- is `(vendor, articleNumber, catalogVersionId)`-keyed, so a `(vendor,
+-- articleNumber)`-level dedup is no longer required (and was wrong: it
+-- silently dropped rows that differed only on catalogVersionId).
+offers AS (
     SELECT
         wh.id,
         wh.article_hash,
@@ -870,7 +873,7 @@ offers_pre_dedup AS (
         -- carries a 2-dim FLOAT placeholder (see
         -- `scripts/create_offers_collection.py`).
         [0.0, 0.0]::FLOAT[] AS _placeholder_vector,
-        wh.ean, wh.article_number, wh.vendor_id, wh.catalog_version_ids,
+        wh.ean, wh.article_number, wh.vendor_id, wh.catalog_version_id,
         wh.prices, wh.delivery_time_days_max,
         wh.core_marker_enabled_sources, wh.core_marker_disabled_sources,
         -- eclass / s2class / categories / customer_article_numbers are
@@ -907,23 +910,6 @@ offers_pre_dedup AS (
         )}
     FROM with_hash wh
     LEFT JOIN offer_ccy_envelope oe USING (id)
-),
--- Atlas snapshots can carry duplicate (vendorId, articleNumber) tuples
--- for the same offer when multiple shards or staging variants overlap.
--- Milvus rejects upserts that contain duplicate primary keys within a
--- single batch, so we collapse to one row per `id` here. The choice of
--- representative is non-deterministic (no `updated_at` column on the
--- offer schema); for two snapshots taken simultaneously this is
--- well-defined enough — operators wanting "latest" semantics need to
--- carry an explicit timestamp through. Per-row parity (sample_10k)
--- explicitly tested via multi-set comparison since the dedup happens
--- at this CTE boundary, not in the upstream projection.
-offers AS (
-    SELECT * EXCLUDE (_rn) FROM (
-        SELECT *, row_number() OVER (PARTITION BY id) AS _rn
-        FROM offers_pre_dedup
-    )
-    WHERE _rn = 1
 )"""
 
 
@@ -960,18 +946,17 @@ WITH offer_derived AS (
         -- ---- PK + identifiers ----
         uuid_str(o.vendorId) AS vendor_id,
         o.articleNumber AS article_number,
-        uuid_str(o.vendorId) || ':' || b64url_no_pad(o.articleNumber) AS id,
+        uuid_str(o.vendorId)
+            || ':' || b64url_no_pad(o.articleNumber)
+            || ':' || uuid_str(o.catalogVersionId) AS id,
 
         -- ---- article-level retrieval / display ----
         COALESCE(o."offer".offerParams."name", '') AS "name",
         COALESCE(o."offer".offerParams.manufacturerName, '') AS manufacturerName,
         COALESCE(o."offer".offerParams.ean, '') AS ean,
 
-        -- ---- catalog version ----
-        CASE
-            WHEN o.catalogVersionId IS NULL THEN []::VARCHAR[]
-            ELSE [uuid_str(o.catalogVersionId)]
-        END AS catalog_version_ids,
+        -- ---- catalog version (singular per source mongo offer post-F9 correction) ----
+        uuid_str(o.catalogVersionId) AS catalog_version_id,
 
         -- ---- delivery ----
         CAST(COALESCE(unwrap_int(o."offer".offerParams.deliveryTime), 0) AS INTEGER) AS delivery_time_days_max,
@@ -1113,7 +1098,7 @@ projected AS (
     SELECT
         op.vendor_id, op.article_number, op.id,
         op."name", op.manufacturerName, op.ean,
-        op.catalog_version_ids, op.delivery_time_days_max,
+        op.catalog_version_id, op.delivery_time_days_max,
         op.eclass5_code, op.eclass7_code, op.s2class_code,
         op.relationship_accessory_for, op.relationship_spare_part_for, op.relationship_similar_to,
         op.category_l1, op.category_l2, op.category_l3, op.category_l4, op.category_l5,

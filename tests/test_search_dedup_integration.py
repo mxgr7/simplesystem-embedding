@@ -40,7 +40,7 @@ from indexer.test_loader import load_split  # noqa: E402
 
 MILVUS_URI = "http://localhost:19530"
 ARTICLES = "articles_v4"
-OFFERS = "offers_v5"
+OFFERS = "offers_v6"
 FIXTURE_PATH = REPO_ROOT / "tests/fixtures/mongo_sample/sample_200.json"
 ID_NAMESPACE = "pr3:"
 
@@ -52,7 +52,7 @@ def _all_fixture_cvs() -> list[str]:
     open-list scope."""
     raw = json.loads(FIXTURE_PATH.read_text())["records"]
     rows = [project(r).row for r in raw]
-    return sorted({cv for r in rows for cv in r.get("catalog_version_ids", [])})
+    return sorted({r["catalog_version_id"] for r in rows if r.get("catalog_version_id")})
 
 
 _BASE_BODY = {

@@ -147,8 +147,7 @@ def _create_pair(client: MilvusClient, articles: str, offers: str) -> None:
     schema.add_field("ean", DataType.VARCHAR, max_length=64)
     schema.add_field("article_number", DataType.VARCHAR, max_length=256)
     schema.add_field("vendor_id", DataType.VARCHAR, max_length=64)
-    schema.add_field("catalog_version_ids", DataType.ARRAY,
-                     element_type=DataType.VARCHAR, max_capacity=2048, max_length=64)
+    schema.add_field("catalog_version_id", DataType.VARCHAR, max_length=64)
     schema.add_field("prices", DataType.JSON)
     schema.add_field("delivery_time_days_max", DataType.INT32)
     for f in ("core_marker_enabled_sources", "core_marker_disabled_sources"):

@@ -112,25 +112,10 @@ def py_articles(py_flat_rows: list[dict]) -> dict[str, dict]:
 
 @pytest.fixture(scope="module")
 def py_offers(py_flat_rows: list[dict]) -> list[dict]:
-    """One row per unique `id` — mirrors the SQL `offers` CTE which
-    dedupes via `row_number() PARTITION BY id` to satisfy Milvus's
-    "duplicate primary keys not allowed in batch" constraint. Atlas
-    snapshots can carry duplicate `(vendorId, articleNumber)` tuples
-    (~30% of sample_10k); both implementations must collapse them
-    consistently. Choice of representative is non-deterministic on
-    both sides — the multiset comparison tolerates any consistent
-    winner as long as the SQL and Python pick equivalent rows.
-
-    Where the duplicates have differing projected content (catalog
-    versions / prices in sample_10k), the multiset will diverge by
-    those exact rows. That divergence is the indexer's deferred
-    problem (no `updated_at` to break the tie) — not a parity bug."""
-    by_id: dict[str, dict] = {}
-    for r in py_flat_rows:
-        if r["id"] in by_id:
-            continue
-        by_id[r["id"]] = to_offer_row(r, article_hash=compute_article_hash(r))
-    return list(by_id.values())
+    """One row per source mongo offer. Post-F9-correction the PK is
+    `{vendor}:{b64url(articleNumber)}:{catalogVersionId}` — unique per
+    source row by construction, so no dedup CTE on either side."""
+    return [to_offer_row(r, article_hash=compute_article_hash(r)) for r in py_flat_rows]
 
 
 @pytest.fixture(scope="module")
@@ -183,18 +168,9 @@ def test_offer_id_set_matches(py_offers: list, db_offers: list) -> None:
 def test_offer_per_id_content_parity(
     fixture_path: Path, py_offers: list, db_offers: list
 ) -> None:
-    """Per-id content parity. When both implementations dedupe by `id`,
-    they may pick different input records as the representative; this
-    is fine when the source duplicates have identical projected content
-    (sample_200 case), and surfaces real differences only when the
-    duplicates differ on per-offer fields (sample_10k catalog/price
-    cases — documented in `py_offers` docstring).
-
-    Compares dicts side-by-side keyed by `id` and reports field-level
-    diffs. A non-trivial diff *count* on sample_10k is expected and
-    fine; the test fails only if the two paths disagree on rows whose
-    ids appear once in the source. We allow up to 1% of rows to
-    diverge on sample_10k to absorb the non-deterministic dedup."""
+    """Per-id content parity, byte-exact. Post-F9-correction the PK keys
+    each source mongo offer 1:1, so neither side dedupes — every row
+    must match on every field across both implementations."""
     py_by_id = {r["id"]: r for r in py_offers}
     db_by_id = {r["id"]: r for r in db_offers}
     diffs: dict[str, dict] = {}
@@ -205,19 +181,12 @@ def test_offer_per_id_content_parity(
         if d:
             diffs[pk] = d
 
-    # On a no-duplicates fixture every diff is a real bug. On a
-    # duplicates fixture some are inherent to the non-deterministic
-    # dedup tie-break — sample_10k has 2899/7101 (~41%) ids with
-    # multiple input records that differ on `catalog_version_ids` and
-    # prices, so the chosen-representative diff rate caps near that.
-    tolerance = 0 if fixture_path.stem == "sample_200" else 0.45
-    diff_rate = len(diffs) / max(len(py_by_id), 1)
-    if diff_rate > tolerance:
+    if diffs:
         diff_path = DIFF_OUT.with_suffix(f".offer_per_id.{fixture_path.stem}.json")
         diff_path.write_text(json.dumps(dict(list(diffs.items())[:10]), indent=2, default=str))
         pytest.fail(
-            f"{fixture_path.name}: {len(diffs)}/{len(py_by_id)} ({diff_rate:.1%}) offer "
-            f"rows differ — exceeds tolerance {tolerance:.0%}. Full sample at {diff_path}."
+            f"{fixture_path.name}: {len(diffs)}/{len(py_by_id)} offer rows differ. "
+            f"Full sample at {diff_path}."
         )
 
 

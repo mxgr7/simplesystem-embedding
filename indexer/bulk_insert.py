@@ -300,7 +300,7 @@ def offers_parquet_schema() -> pa.Schema:
         ("ean", pa.string()),
         ("article_number", pa.string()),
         ("vendor_id", pa.string()),
-        ("catalog_version_ids", pa.list_(pa.string())),
+        ("catalog_version_id", pa.string()),
         # JSON column.
         ("prices", pa.string()),
         ("delivery_time_days_max", pa.int32()),
@@ -375,8 +375,8 @@ def _offers_batch_to_arrow(batch: list[dict]) -> pa.RecordBatch:
     cols["ean"] = pa.array([r["ean"] for r in batch], type=pa.string())
     cols["article_number"] = pa.array([r["article_number"] for r in batch], type=pa.string())
     cols["vendor_id"] = pa.array([r["vendor_id"] for r in batch], type=pa.string())
-    cols["catalog_version_ids"] = pa.array(
-        [r.get("catalog_version_ids") or [] for r in batch], type=pa.list_(pa.string()),
+    cols["catalog_version_id"] = pa.array(
+        [r["catalog_version_id"] for r in batch], type=pa.string(),
     )
     cols["prices"] = pa.array(
         [json.dumps(r.get("prices") or [], ensure_ascii=False) for r in batch],

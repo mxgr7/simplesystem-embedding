@@ -28,7 +28,7 @@ from pymilvus import MilvusClient
 from pymilvus.exceptions import MilvusException
 
 MILVUS_URI = "http://localhost:19530"
-COLLECTION = "offers_v5"
+COLLECTION = "offers_v6"
 ALIAS = "offers_v_alias"
 
 # Per-offer scope after the F9 split. Article-level fields (name,
@@ -45,7 +45,7 @@ EXPECTED_FIELDS = {
     "id", "_placeholder_vector",
     "article_hash",
     "ean", "article_number",
-    "vendor_id", "catalog_version_ids",
+    "vendor_id", "catalog_version_id",
     "prices", "delivery_time_days_max",
     "core_marker_enabled_sources", "core_marker_disabled_sources",
     "features",
@@ -56,7 +56,7 @@ EXPECTED_FIELDS = {
 }
 EXPECTED_SCALAR_INDEXES = {
     "article_hash",
-    "vendor_id", "catalog_version_ids",
+    "vendor_id", "catalog_version_id",
     "delivery_time_days_max", "features",
     "core_marker_enabled_sources", "core_marker_disabled_sources",
     "relationship_accessory_for", "relationship_spare_part_for", "relationship_similar_to",
@@ -190,8 +190,9 @@ def test_query_via_alias_works(client: MilvusClient) -> None:
     ('vendor_id == "44444444-4444-4444-4444-444444444444"',     "vendor equality"),
     ('vendor_id in ["aaa", "bbb"]',                             "vendor IN"),
     ('delivery_time_days_max <= 7',                             "delivery range — maxDeliveryTime"),
-    ('array_contains(catalog_version_ids, "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa")',
-                                                                "array membership"),
+    ('catalog_version_id == "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"', "catalog_version_id equality"),
+    ('catalog_version_id in ["aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa", "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb"]',
+                                                                "catalog_version_id IN"),
     ('array_contains_any(features, ["Werkstoff=Stahl", "Größe=M8x40"])',
                                                                 "features OR-within / AND-across (one name)"),
     ('array_contains_any(core_marker_enabled_sources, ["11111111-aaaa-aaaa-aaaa-111111111111"])',

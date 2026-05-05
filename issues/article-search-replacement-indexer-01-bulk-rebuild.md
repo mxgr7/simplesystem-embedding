@@ -40,11 +40,11 @@ This packet establishes the indexer surface in the repo. Today the repo has bulk
 ## In scope
 
 - **Projection module** (`indexer/projection.py` or similar): pure function `mongo_record → milvus_row`:
-  - **PK / `id`**: construct `{friendlyId}:{base64Url(articleNumber)}` (§9 #4). `friendlyId` is **derived from the `vendorId` UUID** — port `FriendlyId.toFriendlyId` from next-gen `commons/.../FriendlyId.java`. The base64Url uses URL-safe alphabet, no padding.
+  - **PK / `id`**: post-F9-correction the offer-side PK is `{vendorUuidDashed}:{base64Url(articleNumber)}:{catalogVersionUuidDashed}` — one row per source mongo offer. `friendlyId` (legacy port from `commons/.../FriendlyId.java`) is no longer used inside the offer-side PK; the wire-level legacy shape `{friendlyId}:{base64Url(articleNumber)}` is reconstructed at the ACL boundary if needed. The base64Url uses URL-safe alphabet, no padding.
   - **`offer_embedding`**: produce via the existing TEI service (`EMBED_URL` env). Reuse `search-api/embed_client.py` patterns to avoid embedding-model drift between indexer and query path.
   - **`name`, `manufacturerName`, `ean`, `article_number`**: straight projections.
   - **`vendor_id`**: single UUID (per F1's locked schema; legacy is single `UUID vendorId`).
-  - **`catalog_version_ids`**: as today.
+  - **`catalog_version_id`**: singular VARCHAR per source mongo offer (post-F9 correction). Populated from `outer.catalogVersionId` directly; the field is required in the source data and never NULL. Replaces the legacy aggregated `catalog_version_ids ARRAY` shape on `offers_v{N}`.
   - **`category_l1..l5`**: `¦` (U+00A6) separator; if a path element itself contains `¦`, replace it with `|` (U+007C) before joining (per legacy `CategoryPath.java`).
   - **`prices`**: project the legacy nested `prices` array verbatim into JSON: `[{"price": float, "currency": "EUR", "priority": int, "sourcePriceListId": "uuid"}, ...]`. Do NOT collapse — ftsearch resolves at query time (§7).
   - **`delivery_time_days_max`**: straight projection.

@@ -86,7 +86,7 @@ ARTICLE_SCALAR_INDEX_FIELDS = (
 OFFER_SCALAR_INDEX_FIELDS = (
     "article_hash",
     "vendor_id",
-    "catalog_version_ids",
+    "catalog_version_id",
     "delivery_time_days_max",
     "features",
     "core_marker_enabled_sources",
@@ -174,9 +174,11 @@ def build_offers_schema(client: MilvusClient):
     paired articles collection)."""
     schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
 
-    # PK: `{vendor_uuid_dashed}:{base64Url(articleNumber)}`. 256 leaves
-    # ample headroom — UUID head is 36 chars, observed b64 tail tops out
-    # ~65 chars in fixtures.
+    # PK: `{vendor_uuid_dashed}:{base64Url(articleNumber)}:{catalog_version_uuid_dashed}`.
+    # One row per source mongo offer (the F9 correction landed 2026-05-05);
+    # `catalogVersionId` widens the key so distinct CVs under the same
+    # `(vendorId, articleNumber)` stay distinct rows. 256 leaves headroom —
+    # the UUID + UUID heads are 73 chars, observed b64 tail tops out ~65 chars.
     schema.add_field("id", DataType.VARCHAR, max_length=256, is_primary=True)
 
     # Milvus 2.6 requires every collection to declare at least one vector
@@ -191,10 +193,11 @@ def build_offers_schema(client: MilvusClient):
     schema.add_field("article_number", DataType.VARCHAR, max_length=256)
     schema.add_field("vendor_id", DataType.VARCHAR, max_length=64)
 
-    schema.add_field(
-        "catalog_version_ids", DataType.ARRAY,
-        element_type=DataType.VARCHAR, max_capacity=2048, max_length=64,
-    )
+    # Singular per-offer scalar (post-F9-correction). One row per source
+    # mongo offer means one CV per row; F3 emits `catalog_version_id IN [...]`.
+    # The article-side union (across offers in a hash group) lives on
+    # `articles_v{N}.catalog_version_ids` (added by F10).
+    schema.add_field("catalog_version_id", DataType.VARCHAR, max_length=64)
 
     schema.add_field("prices", DataType.JSON)
     schema.add_field("delivery_time_days_max", DataType.INT32)

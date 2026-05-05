@@ -14,7 +14,9 @@ Within multi-valued filters, semantics match legacy:
     always-on intersection (legacy `OfferFilterBuilder`):
     `closedCatalogVersionIds` when the flag is true,
     `catalogVersionIdsOrderedByPreference` when false. Either way:
-    `array_contains_any(catalog_version_ids, [<list>])`. On an empty
+    `catalog_version_id in [<list>]`. (Scalar IN, not array_contains_any:
+    post-F9-correction `offers_v{N}` carries one row per source mongo
+    offer with `catalog_version_id` as a singular VARCHAR.) On an empty
     list legacy emits a `terms` query against `[]` which matches
     nothing — we replicate via the always-false `id == ""` sentinel.
     `closedCatalogVersionIds` is also read by `_core_sortiment_inner`
@@ -189,7 +191,7 @@ def _closed_marketplace(req: SearchRequest) -> str | None:
     )
     if not cv:
         return MATCH_NOTHING_EXPR
-    return f"array_contains_any(catalog_version_ids, {_str_array(cv)})"
+    return f"catalog_version_id in {_str_array(cv)}"
 
 
 def _relationships(req: SearchRequest) -> str | None:

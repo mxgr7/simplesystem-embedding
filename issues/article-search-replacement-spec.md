@@ -291,7 +291,7 @@ The ACL forwards filters as structured fields on the ftsearch request. ftsearch 
 
 | Filter                                                                                  | Source field today (legacy)                                                         | ftsearch implementation hint                                                                          |
 | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `selectedArticleSources.closedCatalogVersionIds`                                        | nested `offers.catalogVersionIds`                                                   | Milvus expr filter (`array_contains_any(catalog_version_ids, [...])`) — already present in collection |
+| `selectedArticleSources.closedCatalogVersionIds`                                        | nested `offers.catalogVersionIds`                                                   | Milvus expr filter (`catalog_version_id in [...]` — scalar per source mongo offer post-F9 correction) |
 | `catalogVersionIdsOrderedByPreference`                                                  | same, but order matters for which offer wins                                        | Post-process / pick min by preference                                                                 |
 | `sourcePriceListIds`                                                                    | nested `prices.priceListId` term filter                                             | Filter the row's `prices` JSON array by `sourcePriceListId ∈ request.sourcePriceListIds`              |
 | `articleIdsFilter`                                                                      | terms on `articleId`                                                                | Milvus expr `id in [...]`                                                                             |
@@ -304,7 +304,7 @@ The ACL forwards filters as structured fields on the ftsearch request. ftsearch 
 | `currentCategoryPathElements`                                                           | path prefix match                                                                   | Milvus `category_l1..l5` already there but separator is `¦`; needs translation                        |
 | `currentEClass5Code` / `currentEClass7Code` / `currentS2ClassCode`                      | terms on eClass group fields                                                        | Add eClass fields to collection                                                                       |
 | `coreSortimentOnly`                                                                     | terms on `enabledCoreArticleMarkerSources` minus `disabledCoreArticleMarkerSources` | Add core-marker fields to collection                                                                  |
-| `closedMarketplaceOnly`                                                                 | switches the CV-list source: `closedCatalogVersionIds` when true, otherwise `catalogVersionIdsOrderedByPreference` | Always-on intersection (`array_contains_any(catalog_version_ids, [<active list>])`). Empty active list ⇒ match nothing (legacy `OfferFilterBuilder`). No row-level flag exists. |
+| `closedMarketplaceOnly`                                                                 | switches the CV-list source: `closedCatalogVersionIds` when true, otherwise `catalogVersionIdsOrderedByPreference` | Always-on intersection (`catalog_version_id in [<active list>]` — scalar per source mongo offer post-F9 correction). Empty active list ⇒ match nothing (legacy `OfferFilterBuilder`). No row-level flag exists. |
 | `coreArticlesVendorsFilter`                                                             | vendor + core marker combo                                                          | Same as above                                                                                         |
 | `blockedEClassVendorsFilters`                                                           | inverse filter (vendorId × eClassGroup)                                             | Negative Milvus expr once eClass + vendor are in the collection                                       |
 
@@ -428,13 +428,13 @@ Per §6, every query-time lookup must be served from Milvus. Expand the dense `o
 The field list below is the *logical* union of what the search service must have access to; storage-internally it is split between `articles_v{N}` (article-level fields + the vector + BM25 codes + per-currency price envelope) and `offers_v{N}` (per-offer scalars + `article_hash` join key) per F9. The wire contract is unaffected.
 
 ```text
-id                            STRING (legacy composite `{friendlyId}:{base64Url(articleNumber)}` — projected by the indexer; wire value matches legacy)
+id                            STRING (post-F9-correction triple-key composite `{vendorUuid}:{base64Url(articleNumber)}:{catalogVersionUuid}` — one row per source mongo offer on the offer side; the wire value carried back to clients is the legacy `{friendlyId}:{base64Url(articleNumber)}` shape, mapped at the ACL boundary)
 offer_embedding               FLOAT_VECTOR(dim) — exists
 name                          STRING — exists
 manufacturerName              STRING — exists
 ean                           STRING — exists
 article_number                STRING — exists
-catalog_version_ids           ARRAY<STRING> — exists
+catalog_version_id            STRING — singular, per source mongo offer (post-F9 correction; replaces the legacy `catalog_version_ids ARRAY` shape on `offers_v{N}`. The article-side union under the same name lands as F10 on `articles_v{N}`.)
 category_l1..l5               STRING (¦-separated paths) — exists
 
 # NEW
@@ -468,8 +468,8 @@ relationship_similar_to       ARRAY<STRING>
 ```
 
 (`closedMarketplaceOnly` does not need a row-level flag — legacy filters
-by intersecting `catalog_version_ids` with the request's
-`closedCatalogVersionIds` list, see §4.3.)
+by intersecting the per-offer `catalog_version_id` against the request's
+active CV list, see §4.3.)
 
 This puts every parity-critical filter into the search call with no external lookups. Aggregations beyond hierarchical category/eClass can run as Milvus `query` (no vector) with `group_by_field` on the filtered set.
 

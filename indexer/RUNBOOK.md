@@ -144,8 +144,21 @@ AWS_PROFILE=simplesystem uv run python scripts/indexer_bulk.py \
 
 ## Sizing
 
-At full production scale (~510M offers → ~159M articles → ~130M unique
-embeddings per the F9 dedup ratio):
+At full production scale (~510M source mongo offers → ~510M offer rows
+on `offers_v{N}` → ~130M unique embeddings on `articles_v{N}`).
+Post-F9-correction (2026-05-05) the offer side is one row per source
+mongo offer (no `(vendor, articleNumber)` aggregation); the article-side
+hash dedup ratio is 510M / 130M ≈ 3.92×. The vector + HNSW cost is
+still bounded by the 130M unique-embedding count.
+
+**Operator pre-flight after applying the F9 correction.** Existing
+`offer_projected.parquet/chunk_*.parquet` artifacts on the indexer host
+were built with the pre-correction PK shape and the `catalog_version_ids`
+ARRAY column; they MUST be deleted before the corrected pipeline runs:
+`rm -rf $ROOT/offer_projected.parquet/`. `offers.parquet/`,
+`articles.parquet/`, `pricings_grouped.parquet/`,
+`markers_grouped.parquet/`, `cans_grouped.parquet/` are all upstream of
+the projection and remain valid.
 
 | Stage | Estimate | Bottleneck |
 | --- | --- | --- |
