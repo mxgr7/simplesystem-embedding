@@ -19,6 +19,7 @@ response mapper (A3) implement against it.
 from __future__ import annotations
 
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -143,6 +144,9 @@ async def healthz() -> dict:
     return {"status": "ok"}
 
 
+_SORT_RE = re.compile(r"^(articleId|name|price),(asc|desc)$")
+
+
 @app.post("/article-features/search")
 async def search(
     body: LegacySearchRequest,
@@ -161,6 +165,17 @@ async def search(
     `http_error_handler` below — A4 will categorise them (4xx from
     bad input, 5xx from upstream).
     """
+    invalid_sorts = [s for s in sort if not _SORT_RE.match(s)]
+    if invalid_sorts:
+        return _error(
+            status=400,
+            message="Validation failure",
+            details=[
+                f"field=sort: value {s!r} does not match pattern "
+                "'^(articleId|name|price),(asc|desc)$'"
+                for s in invalid_sorts
+            ],
+        )
     ftsearch_request = map_request(
         body, page=page, page_size=page_size, sort=sort,
     )

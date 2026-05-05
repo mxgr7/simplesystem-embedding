@@ -12,16 +12,19 @@ mapper can validate input + translate to the ftsearch DTO.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints, field_validator, model_validator
+
+_UUID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+UuidStr = Annotated[str, StringConstraints(pattern=_UUID_PATTERN)]
 
 
 class _Strict(BaseModel):
-    """All ACL DTOs reject unknown fields and accept either the
-    legacy camelCase wire name or the snake_case Python name."""
+    """All ACL DTOs reject unknown fields. Only camelCase aliases
+    accepted on input (per OpenAPI additionalProperties: false)."""
     model_config = ConfigDict(
         extra="forbid",
-        populate_by_name=True,
     )
 
 
@@ -57,21 +60,21 @@ class EClassVersion(str, Enum):
 
 
 class SelectedArticleSources(_Strict):
-    closed_catalog_version_ids: list[str] = Field(alias="closedCatalogVersionIds")
-    catalog_version_ids_ordered_by_preference: list[str] = Field(
+    closed_catalog_version_ids: list[UuidStr] = Field(alias="closedCatalogVersionIds")
+    catalog_version_ids_ordered_by_preference: list[UuidStr] = Field(
         default_factory=list, alias="catalogVersionIdsOrderedByPreference",
     )
-    source_price_list_ids: list[str] = Field(default_factory=list, alias="sourcePriceListIds")
-    customer_article_numbers_indexing_source_ids: list[str] = Field(
+    source_price_list_ids: list[UuidStr] = Field(default_factory=list, alias="sourcePriceListIds")
+    customer_article_numbers_indexing_source_ids: list[UuidStr] = Field(
         default_factory=list, alias="customerArticleNumbersIndexingSourceIds",
     )
-    customer_uploaded_core_article_list_source_ids: list[str] = Field(
+    customer_uploaded_core_article_list_source_ids: list[UuidStr] = Field(
         default_factory=list, alias="customerUploadedCoreArticleListSourceIds",
     )
-    customer_managed_article_number_list_id: str | None = Field(
+    customer_managed_article_number_list_id: UuidStr | None = Field(
         default=None, alias="customerManagedArticleNumberListId",
     )
-    ui_customer_article_number_source_id: str | None = Field(
+    ui_customer_article_number_source_id: UuidStr | None = Field(
         default=None, alias="uiCustomerArticleNumberSourceId",
     )
 
@@ -89,8 +92,8 @@ class PriceFilter(_Strict):
     Cross-field rule (§3): `currencyCode` is required (non-null)
     whenever `min` or `max` is set — without it ftsearch can't decode
     the integer minor units into a decimal amount."""
-    min: int | None = None
-    max: int | None = None
+    min: StrictInt | None = None
+    max: StrictInt | None = None
     currency_code: str | None = Field(
         default=None, alias="currencyCode", pattern=r"^[A-Z]{3}$",
     )
@@ -107,12 +110,12 @@ class PriceFilter(_Strict):
 
 
 class BlockedEClassGroup(_Strict):
-    e_class_group_code: int = Field(alias="eClassGroupCode")
-    value: bool
+    e_class_group_code: StrictInt = Field(alias="eClassGroupCode")
+    value: StrictBool
 
 
 class BlockedEClassVendorsFilter(_Strict):
-    vendor_ids: list[str] = Field(alias="vendorIds")
+    vendor_ids: list[UuidStr] = Field(alias="vendorIds")
     e_class_version: EClassVersion = Field(alias="eClassVersion")
     blocked_e_class_groups: list[BlockedEClassGroup] = Field(
         default_factory=list, alias="blockedEClassGroups",
@@ -121,7 +124,7 @@ class BlockedEClassVendorsFilter(_Strict):
 
 class EClassesAggregation(_Strict):
     id: str
-    e_classes: list[int] = Field(default_factory=list, alias="eClasses")
+    e_classes: list[StrictInt] = Field(default_factory=list, alias="eClasses")
 
 
 class LegacySearchRequest(_Strict):
@@ -135,9 +138,9 @@ class LegacySearchRequest(_Strict):
     query_string: str | None = Field(default=None, alias="queryString")
 
     article_ids_filter: list[str] = Field(default_factory=list, alias="articleIdsFilter")
-    vendor_ids_filter: list[str] = Field(default_factory=list, alias="vendorIdsFilter")
+    vendor_ids_filter: list[UuidStr] = Field(default_factory=list, alias="vendorIdsFilter")
     manufacturers_filter: list[str] = Field(default_factory=list, alias="manufacturersFilter")
-    max_delivery_time: int = Field(alias="maxDeliveryTime", ge=0)
+    max_delivery_time: StrictInt = Field(alias="maxDeliveryTime", ge=0)
     required_features: list[FeatureFilter] = Field(default_factory=list, alias="requiredFeatures")
     price_filter: PriceFilter | None = Field(default=None, alias="priceFilter")
 
@@ -154,15 +157,15 @@ class LegacySearchRequest(_Strict):
     current_category_path_elements: list[str] = Field(
         default_factory=list, alias="currentCategoryPathElements",
     )
-    current_e_class5_code: int | None = Field(default=None, alias="currentEClass5Code")
-    current_e_class7_code: int | None = Field(default=None, alias="currentEClass7Code")
-    current_s2_class_code: int | None = Field(default=None, alias="currentS2ClassCode")
+    current_e_class5_code: StrictInt | None = Field(default=None, alias="currentEClass5Code")
+    current_e_class7_code: StrictInt | None = Field(default=None, alias="currentEClass7Code")
+    current_s2_class_code: StrictInt | None = Field(default=None, alias="currentS2ClassCode")
 
-    core_sortiment_only: bool = Field(alias="coreSortimentOnly")
-    closed_marketplace_only: bool = Field(alias="closedMarketplaceOnly")
+    core_sortiment_only: StrictBool = Field(alias="coreSortimentOnly")
+    closed_marketplace_only: StrictBool = Field(alias="closedMarketplaceOnly")
 
     summaries: list[SummaryKind] = Field(default_factory=list)
-    core_articles_vendors_filter: list[str] = Field(
+    core_articles_vendors_filter: list[UuidStr] = Field(
         default_factory=list, alias="coreArticlesVendorsFilter",
     )
     blocked_e_class_vendors_filters: list[BlockedEClassVendorsFilter] = Field(
@@ -173,13 +176,13 @@ class LegacySearchRequest(_Strict):
 
     # §2.2 — accepted but ftsearch never sees it. Response mapper (A3)
     # stubs `articles[].explanation = "N/A"` when this is True.
-    explain: bool
+    explain: StrictBool
 
-    e_classes_filter: list[int] = Field(default_factory=list, alias="eClassesFilter")
+    e_classes_filter: list[StrictInt] = Field(default_factory=list, alias="eClassesFilter")
     e_classes_aggregations: list[EClassesAggregation] = Field(
         default_factory=list, alias="eClassesAggregations",
     )
-    s2_class_for_product_categories: bool = Field(
+    s2_class_for_product_categories: StrictBool = Field(
         default=False, alias="s2ClassForProductCategories",
     )
 
