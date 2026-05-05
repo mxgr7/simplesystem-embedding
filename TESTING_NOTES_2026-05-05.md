@@ -265,3 +265,49 @@ term-echoes-query-text test.
 | `TestPageSizeZero` | pageSize=0 keeps real hitCount |
 | `TestMinimalBody` | Request with only the spec-required fields |
 | `TestDeeperSummaries` | Per-summary content invariants |
+
+---
+
+## ACL OpenAPI Contract Suite (`test_acl_openapi_catalog.py`)
+
+### Run: 89 passed, 0 failed (2.5s)
+
+Comprehensive end-to-end tests of `acl/openapi.yaml` against the real
+loaded catalog, hitting ACL on 8081 -> search-api on 8001 -> Milvus.
+
+| Category | Count | Notes |
+|---|---|---|
+| Health & OpenAPI | 2 | /healthz, /openapi.yaml serving |
+| Response Schema | 8 | Top-level keys, article shape, metadata, no extra fields |
+| Article ID Format | 2 | Colon-separated, base64 decodable |
+| Search Modes | 3 | HITS_ONLY, SUMMARIES_ONLY, BOTH |
+| Pagination | 6 | page/pageSize, beyond-range, zero, consistency, stability |
+| Sorting | 8 | articleId/name/price asc/desc, invalid field/direction |
+| Explain (section 2.2) | 2 | explain=true stubs "N/A", false omits |
+| Filters | 15 | vendor, manufacturer, deliveryTime, closedMarketplace, multi-CV, empty scope, nonexistent CV, articleIds, accessories, similar_to, eclass, features, priceFilter |
+| Text Search | 5 | query with results, null browse, nonsense query, query+sort, term echo |
+| Summaries | 14 | All SummaryKinds, shape validation, aggregations |
+| Currency | 2 | EUR, CHF with CHF catalog |
+| Validation | 12 | Missing fields, error envelope, all legacy enums rejected |
+| ACL Contract | 6 | Dropped fields accepted, blocked eclass, category path |
+| Core Sortiment | 2 | coreSortimentOnly, coreArticlesVendorsFilter |
+| Stability | 2 | Idempotent hitCount, deterministic ordering |
+
+### Findings
+
+**Price sort requires sourcePriceListIds**: `resolve_price()` returns
+`None` when `sourcePriceListIds` is empty. With `sort=price`,
+`pick_representative()` drops all offers. Result: `hitCount=113,
+articles=[]` — metadata counts filter-scoped articles but materialisation
+drops them all.
+
+**hitCount on zero-match queries**: When BM25+dense finds zero ranked
+articles, Path B hitCount still reflects the full filter-scoped count.
+
+**Dense search always returns neighbors**: Nonsense queries still return
+articles because HNSW always finds nearest neighbors.
+
+**ACL collection path naming confusion**: The ACL's
+`MILVUS_ARTICLES_COLLECTION` env var is used as the URL path collection
+for ftsearch calls. In dedup topology, this must be the *offers*
+collection. Same env var name means different things in the two services.
