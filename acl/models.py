@@ -81,7 +81,7 @@ class SelectedArticleSources(_Strict):
 
 class FeatureFilter(_Strict):
     name: str
-    values: list[str] = Field(default_factory=list)
+    values: list[str]
 
 
 class PriceFilter(_Strict):
@@ -117,14 +117,12 @@ class BlockedEClassGroup(_Strict):
 class BlockedEClassVendorsFilter(_Strict):
     vendor_ids: list[UuidStr] = Field(alias="vendorIds")
     e_class_version: EClassVersion = Field(alias="eClassVersion")
-    blocked_e_class_groups: list[BlockedEClassGroup] = Field(
-        default_factory=list, alias="blockedEClassGroups",
-    )
+    blocked_e_class_groups: list[BlockedEClassGroup] = Field(alias="blockedEClassGroups")
 
 
 class EClassesAggregation(_Strict):
     id: str
-    e_classes: list[StrictInt] = Field(default_factory=list, alias="eClasses")
+    e_classes: list[StrictInt] = Field(alias="eClasses")
 
 
 class LegacySearchRequest(_Strict):

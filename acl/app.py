@@ -26,11 +26,12 @@ from pathlib import Path
 
 import httpx
 import yaml
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -191,13 +192,11 @@ async def search(
             headers=forward_headers,
         )
     except httpx.HTTPStatusError as exc:
-        # ftsearch returned 4xx or 5xx — wrap in the legacy envelope.
-        # A4 will categorise each upstream code into a corresponding
-        # legacy status; for now we forward the status code verbatim.
+        mapped = 400 if 400 <= exc.response.status_code < 500 else 500
         return _error(
-            status=exc.response.status_code,
-            message="ftsearch returned a non-2xx response",
-            details=[exc.response.text[:200]],
+            status=mapped,
+            message="Upstream request failed",
+            details=[f"upstream_status={exc.response.status_code}"],
         )
     except httpx.RequestError as exc:
         # Network-level failure (connect refused, timeout, etc.).
@@ -251,12 +250,11 @@ async def validation_error_handler(
     )
 
 
-@app.exception_handler(HTTPException)
-async def http_error_handler(_request: Request, exc: HTTPException) -> JSONResponse:
-    """Wrap explicit HTTPException raises (e.g. from upstream-failure
-    handlers) in the legacy envelope. The handler in `search()` for
-    httpx errors uses `_error` directly — this catches anything that
-    bubbles up via `raise HTTPException(...)`."""
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(_request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Wrap all HTTP exceptions (including Starlette's 404/405 from the
+    router) in the legacy envelope. Catches both `fastapi.HTTPException`
+    and `starlette.exceptions.HTTPException`."""
     detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
     return _error(status=exc.status_code, message=detail)
 
