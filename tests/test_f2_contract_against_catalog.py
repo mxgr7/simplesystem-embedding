@@ -1702,3 +1702,123 @@ class TestPageSizeZero:
             zero.json()["metadata"]["hitCount"]
             == normal.json()["metadata"]["hitCount"]
         )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class U — Minimal valid body (only the spec-required fields)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestMinimalBody:
+    """SearchRequest's `required: [searchMode, selectedArticleSources,
+    currency]` is the contract. A request that ships only these three
+    must validate (even if the always-on CV intersection collapses to
+    match-nothing because the CV list is empty)."""
+
+    def test_minimal_body_accepted(
+        self, search_api_app: TestClient, search_path: str
+    ) -> None:
+        body = {
+            "searchMode": "HITS_ONLY",
+            "selectedArticleSources": {},
+            "currency": "EUR",
+        }
+        r = search_api_app.post(search_path, json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert_search_response_valid(out)
+        # Empty SAS → empty CV list → match-nothing → 0 hits.
+        assert out["articles"] == []
+        assert out["metadata"]["hitCount"] == 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class V — Deeper summary content checks
+# ──────────────────────────────────────────────────────────────────────
+
+class TestDeeperSummaries:
+    """One per summary kind, asserting concrete structural invariants
+    on the bucket payload, not just the envelope shape."""
+
+    def test_categories_summary_echoes_current_path(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            currentCategoryPathElements=[KNOWN_CATEGORY_L1[0]],
+            summaries=["CATEGORIES"],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert_search_response_valid(out)
+        cs = out["summaries"].get("categoriesSummary")
+        if cs is not None:
+            # Spec: `currentCategoryPathElements` echoes the request's path.
+            assert cs.get("currentCategoryPathElements") == [KNOWN_CATEGORY_L1[0]]
+            # `children` are buckets one level deeper than the request path.
+            for bucket in cs.get("children") or []:
+                assert isinstance(bucket["count"], int) and bucket["count"] >= 0
+                assert isinstance(bucket["categoryPathElements"], list)
+
+    def test_eclass5_summary_buckets_are_well_formed(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            currentEClass5Code=KNOWN_ECLASS5_CODES[0],
+            summaries=["ECLASS5"],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert_search_response_valid(out)
+        cats = out["summaries"].get("eClass5Categories")
+        if cats is not None:
+            # selectedEClassGroup either echoes the requested code or is null.
+            sel = cats.get("selectedEClassGroup")
+            assert sel is None or isinstance(sel, int)
+            for bucket in (cats.get("children") or []) + (cats.get("sameLevel") or []):
+                assert isinstance(bucket["group"], int)
+                assert isinstance(bucket["count"], int) and bucket["count"] >= 0
+
+    def test_prices_summary_buckets_have_currency(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            summaries=["PRICES"],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert_search_response_valid(out)
+        for bucket in out["summaries"].get("pricesSummary") or []:
+            # All currencyCode values are 3-letter uppercase per spec pattern.
+            assert re.fullmatch(r"^[A-Z]{3}$", bucket["currencyCode"])
+            # min ≤ max for every bucket.
+            assert bucket["min"] <= bucket["max"]
+
+    def test_features_summary_value_counts_sum_consistent(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """For each feature summary entry, the parent `count` should be ≥
+        the maximum sub-`values[].count` (sub-counts are per-value
+        within the same feature; parent is articles having any value
+        for that feature)."""
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            summaries=["FEATURES"],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert_search_response_valid(out)
+        for fs in out["summaries"].get("featureSummaries") or []:
+            sub_counts = [v["count"] for v in fs.get("values", [])]
+            if sub_counts:
+                assert fs["count"] >= max(sub_counts), (
+                    f"feature {fs['name']}: parent count {fs['count']} "
+                    f"< max value count {max(sub_counts)}"
+                )
