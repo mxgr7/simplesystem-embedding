@@ -1001,6 +1001,26 @@ class TestPagination:
         assert r1.status_code == 200 and r2.status_code == 200
         assert r1.json() == r2.json(), "non-idempotent response"
 
+    def test_summaries_stable_across_pages(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Spec: summaries are computed over the full filtered hit set,
+        not the page slice. Page 1 and page 2 of the same query must
+        therefore return byte-identical `summaries`."""
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            summaries=["VENDORS", "MANUFACTURERS"],
+        )
+        r1 = search_api_app.post(
+            f"{search_path}?page=1&pageSize=5&sort=articleId,asc", json=body)
+        r2 = search_api_app.post(
+            f"{search_path}?page=2&pageSize=5&sort=articleId,asc", json=body)
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert r1.json()["summaries"] == r2.json()["summaries"], (
+            "summaries varied across page slices"
+        )
+
     def test_pages_do_not_overlap(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
@@ -1367,6 +1387,63 @@ class TestBehaviour:
         assert h_open != h_closed, (
             f"closedMarketplaceOnly toggle did not change CV scope: "
             f"both halves report hitCount={h_open}"
+        )
+
+    def test_summaries_only_with_empty_summaries_list_returns_no_articles(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """SUMMARIES_ONLY mode + empty `summaries` list is a degenerate
+        request. The contract is unambiguous: no articles. The
+        summaries envelope should still be valid."""
+        r = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, searchMode="SUMMARIES_ONLY",
+                           vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                           summaries=[]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["articles"] == []
+
+    def test_closed_marketplace_only_empty_closed_list_match_nothing(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """`closedMarketplaceOnly=True` + empty `closedCatalogVersionIds`
+        is the legacy match-nothing pattern: zero hits regardless of
+        every other filter."""
+        body = make_body(
+            cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            closedMarketplaceOnly=True,
+        )
+        body["selectedArticleSources"]["closedCatalogVersionIds"] = []
+        r = search_api_app.post(search_path, json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert_search_response_valid(out)
+        assert out["articles"] == []
+        assert out["metadata"]["hitCount"] == 0
+
+    def test_filter_intersection_narrows_more_than_each(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """The intersection of two filters must be ≤ the cardinality
+        of either filter alone (vendorIdsFilter ∩ manufacturersFilter)."""
+        body_v = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        body_m = make_body(cvs=all_cvs, manufacturersFilter=["Würth"])
+        body_both = make_body(
+            cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            manufacturersFilter=["Würth"],
+        )
+        r_v = search_api_app.post(search_path, json=body_v)
+        r_m = search_api_app.post(search_path, json=body_m)
+        r_both = search_api_app.post(search_path, json=body_both)
+        assert (r_v.status_code == r_m.status_code == r_both.status_code == 200)
+        v = r_v.json()["metadata"]["hitCount"]
+        m = r_m.json()["metadata"]["hitCount"]
+        b = r_both.json()["metadata"]["hitCount"]
+        assert b <= v and b <= m, (
+            f"intersection {b} not ≤ each: vendor={v} manufacturer={m}"
         )
 
     def test_max_delivery_time_does_not_grow_hits(
@@ -2168,6 +2245,23 @@ class TestDeeperSummaries:
                 assert isinstance(art.get("score"), (int, float)), (
                     f"query-path article missing numeric score: {art}"
                 )
+
+    def test_query_path_scores_are_non_negative(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """RRF + cosine + BM25 are all non-negative on this corpus
+        (cosine is normalised to [0, 2] in the dense leg, BM25 is
+        non-negative, RRF is by construction). Any negative score
+        means the path is corrupting the score plumbing."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(cvs=all_cvs, query="schraube"),
+        )
+        assert r.status_code == 200, r.text
+        for art in r.json()["articles"]:
+            s = art.get("score")
+            if s is not None:
+                assert s >= 0, f"negative score: {art}"
 
     def test_features_summary_value_counts_sum_consistent(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
