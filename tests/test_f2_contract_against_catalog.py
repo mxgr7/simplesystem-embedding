@@ -935,6 +935,38 @@ class TestPriceFilter:
         )
         assert r.status_code == 422
 
+    def test_price_filter_float_bound_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """`min` and `max` are minor units (integer cents). A float
+        like 1.5 is out of contract — pydantic must reject."""
+        r = search_api_app.post(
+            search_path,
+            json=make_body(
+                cvs=all_cvs,
+                priceFilter={"min": 1.5, "max": 200, "currencyCode": "EUR"},
+            ),
+        )
+        assert r.status_code == 422
+
+    def test_price_filter_currency_only_no_bounds_is_no_op(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """priceFilter with just `currencyCode` set (no min/max) is a
+        well-formed request that adds no actual filter. Result count
+        should equal the same request without priceFilter."""
+        body_with = make_body(
+            cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            priceFilter={"currencyCode": "EUR"},
+        )
+        body_without = make_body(
+            cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+        )
+        r1 = search_api_app.post(search_path, json=body_with)
+        r2 = search_api_app.post(search_path, json=body_without)
+        assert r1.status_code == 200 and r2.status_code == 200, (r1.text, r2.text)
+        assert r1.json()["metadata"]["hitCount"] == r2.json()["metadata"]["hitCount"]
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Class H — Sort orderings (deeper than parameter accept-test)
