@@ -404,6 +404,17 @@ class TestValidator:
 # ──────────────────────────────────────────────────────────────────────
 
 class TestParameters:
+    def test_response_content_type_is_json(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Spec declares `application/json` on the success response;
+        the served Content-Type must match."""
+        r = search_api_app.post(search_path, json=make_body(cvs=all_cvs))
+        assert r.status_code == 200, r.text
+        assert "application/json" in r.headers.get("content-type", ""), (
+            f"Content-Type drift: {r.headers.get('content-type')!r}"
+        )
+
     def test_default_pagination_returns_envelope(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
