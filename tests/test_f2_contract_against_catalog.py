@@ -1200,6 +1200,39 @@ class TestPagination:
             "summaries varied across page slices"
         )
 
+    @pytest.mark.parametrize("scenario", [
+        "vendor_only", "manufacturer_only", "category_only",
+        "eclass_only", "delivery_only", "vendor_and_query",
+        "summaries_with_vendor", "summaries_only_with_eclass",
+    ])
+    def test_canonical_scenarios_each_validate(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str], scenario: str
+    ) -> None:
+        """One spec-conformance validation per canonical scenario shape.
+        Every response, regardless of which dispatch path it lands on,
+        must validate against the OpenAPI SearchResponse schema."""
+        scenarios = {
+            "vendor_only": dict(vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+            "manufacturer_only": dict(manufacturersFilter=["Würth"]),
+            "category_only": dict(currentCategoryPathElements=[KNOWN_CATEGORY_L1[0]]),
+            "eclass_only": dict(currentEClass5Code=KNOWN_ECLASS5_CODES[0]),
+            "delivery_only": dict(maxDeliveryTime=3, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+            "vendor_and_query": dict(vendorIdsFilter=[HIGH_VOLUME_VENDOR], query="schraube"),
+            "summaries_with_vendor": dict(
+                vendorIdsFilter=[HIGH_VOLUME_VENDOR], searchMode="BOTH",
+                summaries=["VENDORS"],
+            ),
+            "summaries_only_with_eclass": dict(
+                searchMode="SUMMARIES_ONLY",
+                currentEClass5Code=KNOWN_ECLASS5_CODES[0],
+                summaries=["ECLASS5"],
+            ),
+        }
+        body = make_body(cvs=all_cvs, **scenarios[scenario])
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
     def test_realistic_user_journey(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
