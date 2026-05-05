@@ -17,8 +17,8 @@ sys.path.insert(0, str(SEARCH_API_DIR))
 
 from filters import (  # noqa: E402
     build_article_expr,
-    build_milvus_expr,
-    build_offer_expr,
+    build_milvus_expr as _raw_build_milvus_expr,
+    build_offer_expr as _raw_build_offer_expr,
     encode_category_path,
     has_per_vendor_blocked_eclass,
 )
@@ -34,13 +34,72 @@ from models import (  # noqa: E402
 )
 
 
-def _req(**overrides) -> SearchRequest:
+# `_closed_marketplace` is now an always-on intersection per legacy
+# `OfferFilterBuilder` (switching `closedCatalogVersionIds` ↔
+# `catalogVersionIdsOrderedByPreference` based on the `closedMarketplaceOnly`
+# flag). To keep atom-level assertions readable, `_req()` injects a
+# sentinel open-list and `build_milvus_expr` / `build_offer_expr` here are
+# wrapped to strip that sentinel clause from the emitted expr.
+_TEST_CV = "__test_cv__"
+_TEST_CV_CLAUSE = f'array_contains_any(catalog_version_ids, ["{_TEST_CV}"])'
+
+
+def _strip_default_cv(expr: str | None) -> str | None:
+    """Remove the sentinel CV clause `_req()` injects, regardless of its
+    position in a paren-wrapped AND composition. No-op if `expr` doesn't
+    contain it (e.g., explicit-CV tests or non-AND outputs)."""
+    if expr is None:
+        return None
+    if expr == _TEST_CV_CLAUSE:
+        return None
+    paren_cv = f"({_TEST_CV_CLAUSE})"
+    parts: list[str] = []
+    i = 0
+    n = len(expr)
+    while i < n:
+        if expr[i] != "(":
+            return expr
+        depth = 1
+        j = i + 1
+        while j < n and depth > 0:
+            if expr[j] == "(":
+                depth += 1
+            elif expr[j] == ")":
+                depth -= 1
+            j += 1
+        atom = expr[i:j]
+        if atom != paren_cv:
+            parts.append(atom)
+        i = j
+        if expr[i:i + 5] == " and ":
+            i += 5
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0][1:-1]
+    return " and ".join(parts)
+
+
+def build_milvus_expr(req: SearchRequest) -> str | None:
+    return _strip_default_cv(_raw_build_milvus_expr(req))
+
+
+def build_offer_expr(req: SearchRequest) -> str | None:
+    return _strip_default_cv(_raw_build_offer_expr(req))
+
+
+def _req(_default_cv: bool = True, **overrides) -> SearchRequest:
     base = {
         "search_mode": SearchMode.HITS_ONLY,
         "selected_article_sources": SelectedArticleSources(),
         "currency": "EUR",
     }
     base.update(overrides)
+    sas: SelectedArticleSources = base["selected_article_sources"]
+    if _default_cv and not sas.catalog_version_ids_ordered_by_preference:
+        base["selected_article_sources"] = sas.model_copy(update={
+            "catalog_version_ids_ordered_by_preference": [_TEST_CV],
+        })
     return SearchRequest(**base)
 
 
@@ -158,15 +217,40 @@ def test_closed_marketplace_only_intersects_closed_cv() -> None:
     assert expr == 'array_contains_any(catalog_version_ids, ["c-1", "c-2"])'
 
 
-def test_closed_catalog_versions_alone_is_noop() -> None:
-    """Without `closedMarketplaceOnly=True`, `closedCatalogVersionIds` is
-    metadata for the core-sortiment logic only. Legacy never intersects on
-    it standalone (`OfferFilterBuilder` switches lists by the flag)."""
-    assert build_milvus_expr(_req(
+def test_closed_marketplace_off_intersects_open_list() -> None:
+    """Legacy `OfferFilterBuilder` switches the CV-list source by the
+    flag: `closedMarketplaceOnly=false` intersects on
+    `catalogVersionIdsOrderedByPreference`."""
+    expr = build_milvus_expr(_req(
+        selected_article_sources=SelectedArticleSources(
+            catalogVersionIdsOrderedByPreference=["o-1", "o-2"],
+        ),
+    ))
+    assert expr == 'array_contains_any(catalog_version_ids, ["o-1", "o-2"])'
+
+
+def test_closed_marketplace_off_with_empty_lists_matches_nothing() -> None:
+    """Legacy parity: an empty active CV list emits `terms` against `[]`,
+    which matches nothing. Holds for `closedMarketplaceOnly=false` with an
+    empty open list too — same `OfferFilterBuilder` behaviour."""
+    expr = _raw_build_milvus_expr(_req(_default_cv=False))
+    assert expr == 'id == ""'
+
+
+def test_closed_catalog_versions_with_flag_off_does_not_intersect_closed() -> None:
+    """`closedCatalogVersionIds` only drives the intersection when
+    `closedMarketplaceOnly=true`; with the flag off, the *open* list
+    drives it. This test pins that the closed list alone is irrelevant
+    to the CV intersection branch — it stays available as the marker
+    source set for `_core_sortiment_inner` (see that filter's tests)."""
+    expr = build_milvus_expr(_req(
         selected_article_sources=SelectedArticleSources(
             closedCatalogVersionIds=["c-1", "c-2"],
+            catalogVersionIdsOrderedByPreference=["o-9"],
         ),
-    )) is None
+    ))
+    # CV intersection runs on the *open* list, not on closed.
+    assert expr == 'array_contains_any(catalog_version_ids, ["o-9"])'
 
 
 def test_relationships_compose_with_and() -> None:
@@ -183,9 +267,12 @@ def test_relationships_compose_with_and() -> None:
 
 
 def test_core_sortiment_uses_closed_catalog_version_ids() -> None:
-    # `closedCatalogVersionIds` drives the core-sortiment source set when
-    # `coreSortimentOnly=true`; ftsearch does not impose a standalone
-    # CV intersection on it (see _closed_marketplace docstring).
+    # `closedCatalogVersionIds` drives the core-sortiment marker-source
+    # set when `coreSortimentOnly=true`. The CV-intersection branch runs
+    # on the *open* list when the flag is off, so the closed list here
+    # serves only the core-sortiment role (the test fixture's default
+    # open list provides the unrelated CV intersection, stripped by the
+    # `_strip_default_cv` wrapper).
     expr = build_milvus_expr(_req(
         core_sortiment_only=True,
         selected_article_sources=SelectedArticleSources(

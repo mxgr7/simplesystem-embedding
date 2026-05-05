@@ -234,19 +234,27 @@ def test_closed_marketplace_only_intersects_closed_cv(
     assert _ids(body) == {fixture_rows[2]["id"], fixture_rows[4]["id"]}
 
 
-def test_closed_catalog_versions_alone_is_noop(
+def test_closed_marketplace_off_intersects_open_list(
     client: TestClient, fixture_rows: list[dict],
 ) -> None:
-    """Without `closedMarketplaceOnly=true`, ftsearch treats the closed-CV
-    list as request metadata only — no standalone CV intersection. (The
-    ACL re-adds always-intersect for legacy parity.)"""
-    body = _post(client,
-                 vendorIdsFilter=[r["vendor_id"] for r in fixture_rows],
-                 selectedArticleSources={
-                     "closedCatalogVersionIds": ["aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa"],
-                 })
-    # All fixture rows pass — closedCatalogVersionIds did not narrow.
-    assert len(_ids(body)) == len(fixture_rows)
+    """Legacy switch: `closedMarketplaceOnly=false` intersects on
+    `catalogVersionIdsOrderedByPreference`. `eeeeeeee-5555-...` is on
+    rows 2 and 4 — both should pass."""
+    body = _post(client, selectedArticleSources={
+        "catalogVersionIdsOrderedByPreference": [
+            "eeeeeeee-5555-5555-5555-eeeeeeeeeeee",
+        ],
+    })
+    assert _ids(body) == {fixture_rows[2]["id"], fixture_rows[4]["id"]}
+
+
+def test_closed_marketplace_off_with_empty_lists_matches_nothing(
+    client: TestClient,
+) -> None:
+    """Legacy parity: empty active CV list (open list, flag=false) emits
+    a `terms` query against `[]` which matches nothing."""
+    body = _post(client, selectedArticleSources={})
+    assert _ids(body) == set()
 
 
 def test_relationship_accessory_for(client: TestClient, fixture_rows: list[dict]) -> None:

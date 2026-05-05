@@ -189,6 +189,8 @@ else:
 
 Probe overflow → Path A fallback **accepts under-recall** for selective-but-not-tight filters (those matching > 25 k unique hashes but < ~5 % of articles). Documented as a deviation in spec §2.4 and surfaced via a per-request `recall_clipped: true` metadata flag so callers and telemetry can distinguish.
 
+**Note (post-F3 always-on CV parity).** F3's `_closed_marketplace` legacy-parity fix made `offer_expr` always non-`None` for parity-compliant requests (the always-on CV intersection is offer-side), so Path A is currently unreachable in production traffic — every search lands on Path B, including CV-only browses that previously triggered probe overflow on broad-scope tenants. **F10** revives Path A by projecting the CV scope onto `articles_v{N}` as an array envelope (`catalog_version_ids`) and adding a matching article-side filter atom; the dispatcher's routing rule (`offer_expr is None → Path A`) is unchanged but now actually fires for CV-only requests. See `article-search-replacement-ftsearch-10-cv-article-envelope.md`.
+
 ### Sort=price + queryString
 Per spec §2.3 (relevance-pool bound), Path A's `k_oversample` is capped at `RELEVANCE_POOL_MAX`. The article-level `{ccy}_price_min/max` columns on `articles_v{N}` are *not* used here — relevance-bounded ANN dominates and per-article exact resolution happens in step 3.
 

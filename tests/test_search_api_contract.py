@@ -98,7 +98,14 @@ def test_full_shape_request_validates(client: TestClient, full_request_body: dic
     body = {**full_request_body}
     body["query"] = None
     body["currentCategoryPathElements"] = []  # also avoid scalar filter → no Milvus query
-    body["selectedArticleSources"] = {**body["selectedArticleSources"], "closedCatalogVersionIds": []}
+    # Both CV lists empty → always-on `_closed_marketplace` collapses to
+    # the match-nothing sentinel; dispatcher short-circuits without
+    # touching Milvus.
+    body["selectedArticleSources"] = {
+        **body["selectedArticleSources"],
+        "closedCatalogVersionIds": [],
+        "catalogVersionIdsOrderedByPreference": [],
+    }
     body["requiredFeatures"] = []
     body["currentEClass5Code"] = None
     body["eClassesFilter"] = []

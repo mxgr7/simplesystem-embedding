@@ -61,6 +61,7 @@ import aggregations
 from filters import (
     build_article_expr,
     build_offer_expr,
+    is_match_nothing,
     has_per_vendor_blocked_eclass,
 )
 from hybrid import Hit, is_strict_identifier, rrf_merge
@@ -180,6 +181,17 @@ async def dispatch_dedup(
         sort_field=sort_plan.field.value,
     )
     query_text = (req.query or "").strip()
+
+    # The always-on legacy CV intersection (`OfferFilterBuilder` parity)
+    # collapses to the match-nothing sentinel when the active CV list is
+    # empty. Skip Milvus entirely.
+    if is_match_nothing(offer_expr):
+        timings.path = "match_nothing"
+        return DispatchResult(
+            hits=[], debug=_debug(timings),
+            recall_clipped=False, hit_count=0, hit_count_clipped=False,
+            route="match_nothing",
+        )
 
     # F5: SUMMARIES_ONLY skips the rank/materialise/sort/page work entirely
     # and just fetches summary data + count. Returns empty hits.

@@ -44,9 +44,22 @@ OFFERS = "offers_v5"
 FIXTURE_PATH = REPO_ROOT / "tests/fixtures/mongo_sample/sample_200.json"
 ID_NAMESPACE = "pr3:"
 
+def _all_fixture_cvs() -> list[str]:
+    """Every distinct `catalog_version_id` in the projected sample. The
+    `_closed_marketplace` filter is always-on (legacy `OfferFilterBuilder`
+    parity), so requests without an active CV list match nothing — these
+    tests aren't testing CV scoping, so we inject the full set as the
+    open-list scope."""
+    raw = json.loads(FIXTURE_PATH.read_text())["records"]
+    rows = [project(r).row for r in raw]
+    return sorted({cv for r in rows for cv in r.get("catalog_version_ids", [])})
+
+
 _BASE_BODY = {
     "searchMode": "HITS_ONLY",
-    "selectedArticleSources": {},
+    "selectedArticleSources": {
+        "catalogVersionIdsOrderedByPreference": _all_fixture_cvs(),
+    },
     "currency": "EUR",
 }
 

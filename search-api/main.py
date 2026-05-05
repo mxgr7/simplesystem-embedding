@@ -75,7 +75,7 @@ from pydantic import BaseModel, Field
 from pymilvus import MilvusClient
 
 from embed_client import EmbedClient
-from filters import build_milvus_expr
+from filters import build_milvus_expr, is_match_nothing
 from metrics import record_search, record_search_error
 from milvus_helpers import BoundedMilvusClient
 from tracing import extract_trace_context, log_request_context
@@ -652,9 +652,13 @@ async def search(
     effective_k = page_size * overfetch_n if price_active and page_size > 0 else max(page_size, 1)
 
     query_text = (body.query or "").strip()
-    if not query_text:
+    if is_match_nothing(expr):
+        # Always-on CV intersection (legacy `OfferFilterBuilder`) collapsed
+        # to the match-nothing sentinel — skip Milvus entirely.
+        hits: list[Hit] = []
+    elif not query_text:
         if not expr:
-            hits: list[Hit] = []
+            hits = []
         else:
             hits = await asyncio.to_thread(
                 _filter_only_browse, dense_client, collection,

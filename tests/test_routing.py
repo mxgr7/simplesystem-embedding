@@ -108,6 +108,20 @@ def _req(**overrides) -> SearchRequest:
     return SearchRequest(**base)
 
 
+@pytest.fixture(autouse=True)
+def _bypass_closed_marketplace(monkeypatch):
+    """The legacy `OfferFilterBuilder` always-on CV intersection forces
+    every request to non-None `offer_expr`, which would route everything
+    through Path B. These tests target the dispatcher's path-A-vs-path-B
+    decision and the sort / filter / summary plumbing on each path —
+    not CV scoping, which has its own coverage in `test_filters.py`.
+    Stub `_closed_marketplace` to None for the routing-test scope so the
+    fixture-built requests still reach Path A when no other offer-side
+    filters apply."""
+    import filters
+    monkeypatch.setattr(filters, "_closed_marketplace", lambda req: None)
+
+
 async def _embed_dummy(text: str) -> list[float]:
     return [0.0] * 128
 

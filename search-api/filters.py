@@ -10,15 +10,15 @@ The returned expression is AND-composed across filters at the top level.
 Within multi-valued filters, semantics match legacy:
 
   * `requiredFeatures` — AND across feature names, OR within values
-  * `closedMarketplaceOnly` — `array_contains_any(catalog_version_ids,
-    [closedCatalogVersionIds])`. Per legacy `OfferFilterBuilder`: when
-    the flag is set, intersect on the closed-CV list; on an empty list
-    legacy emits a `terms` query against `[]` which matches nothing —
-    we replicate via the always-false `id == ""` sentinel.
-    `closedCatalogVersionIds` on its own (without the flag) is treated
-    as request-side metadata for the core-sortiment logic; ftsearch
-    does not impose a standalone CV intersection. The ACL is the layer
-    that re-adds always-intersect semantics for legacy parity.
+  * `closedMarketplaceOnly` — switches which CV list drives the
+    always-on intersection (legacy `OfferFilterBuilder`):
+    `closedCatalogVersionIds` when the flag is true,
+    `catalogVersionIdsOrderedByPreference` when false. Either way:
+    `array_contains_any(catalog_version_ids, [<list>])`. On an empty
+    list legacy emits a `terms` query against `[]` which matches
+    nothing — we replicate via the always-false `id == ""` sentinel.
+    `closedCatalogVersionIds` is also read by `_core_sortiment_inner`
+    as the marker-source set, independently of this filter.
   * `coreSortimentOnly` — `enabled ∋ closedCatalogVersionIds` OR (with
     customer-uploaded sources) `enabled ∋ uploaded` OR
     (`enabled ∋ closedCatalogVersionIds` AND NOT `disabled ∋ uploaded`).
@@ -165,15 +165,30 @@ def _eclasses_filter(req: SearchRequest) -> str | None:
     return f"array_contains_any({field}, {_int_array(req.eclasses_filter)})"
 
 
-_MATCH_NOTHING_EXPR = 'id == ""'
+MATCH_NOTHING_EXPR = 'id == ""'
+
+
+def is_match_nothing(expr: str | None) -> bool:
+    """True iff `expr` is the match-nothing sentinel or AND-composes it
+    as one of its top-level clauses. AND with always-false ⇒ always-false,
+    so the dispatcher can skip Milvus entirely. The paren shape comes
+    from `_and`'s multi-atom composition (`(p1) and (p2)`)."""
+    if expr is None:
+        return False
+    if expr == MATCH_NOTHING_EXPR:
+        return True
+    return f"({MATCH_NOTHING_EXPR})" in expr
 
 
 def _closed_marketplace(req: SearchRequest) -> str | None:
-    if not req.closed_marketplace_only:
-        return None
-    cv = req.selected_article_sources.closed_catalog_version_ids
+    sas = req.selected_article_sources
+    cv = (
+        sas.closed_catalog_version_ids
+        if req.closed_marketplace_only
+        else sas.catalog_version_ids_ordered_by_preference
+    )
     if not cv:
-        return _MATCH_NOTHING_EXPR
+        return MATCH_NOTHING_EXPR
     return f"array_contains_any(catalog_version_ids, {_str_array(cv)})"
 
 
