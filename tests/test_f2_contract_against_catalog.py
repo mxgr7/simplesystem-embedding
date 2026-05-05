@@ -869,6 +869,28 @@ class TestSortOrderings:
         ids = [a["articleId"] for a in body["articles"]]
         assert ids == sorted(ids, reverse=True), f"articleId,desc not in order: {ids[:5]}…"
 
+    def test_relevance_sort_returns_descending_scores(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Default sort is relevance (DESC). With a free-text query
+        active, every page of results should carry monotonically
+        non-increasing scores."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=20",
+            json=make_body(cvs=all_cvs, query="schraube"),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        scores = [a.get("score") for a in body["articles"]]
+        # Drop None values; the "score nullable in browse" test pins
+        # that semantic separately. Here we just need the present
+        # scores to be in non-increasing order.
+        present = [s for s in scores if s is not None]
+        assert present == sorted(present, reverse=True), (
+            f"relevance sort not descending: {present}"
+        )
+
     def test_multi_key_sort_only_first_key_applies(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
@@ -1572,6 +1594,18 @@ class TestOpenAPIDocument:
         walk(OPENAPI_SPEC, "$")
         assert not missing, "Dangling $refs:\n  " + "\n  ".join(missing)
 
+    def test_openapi_document_validates_against_3x_meta_spec(self) -> None:
+        """Hand-written OpenAPI must parse + validate against the
+        OpenAPI 3.x meta-spec — guards against typos that yaml-load
+        accepts (missing `responses`, malformed `parameters`, etc.).
+        Mirrors the parity test that exists for the ACL spec."""
+        pytest.importorskip("openapi_spec_validator")
+        import warnings
+        from openapi_spec_validator import validate_spec
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            validate_spec(OPENAPI_SPEC)
+
     def test_every_path_response_references_declared_schemas(self) -> None:
         """Each documented response on each path operation must point
         to a schema (no stub placeholders)."""
@@ -1759,6 +1793,19 @@ class TestAuthHeaderAlternatives:
         served = r.text.strip()
         on_disk = OPENAPI_PATH.read_text().strip()
         assert served == on_disk, "GET /openapi.yaml drifted from openapi.yaml file"
+
+    def test_openapi_json_endpoint_matches_yaml(
+        self, authed_app: tuple[TestClient, str]
+    ) -> None:
+        """FastAPI exposes /openapi.json by default. We installed a
+        custom openapi() that returns the YAML-parsed spec, so the
+        JSON endpoint must serve the same document."""
+        client, _ = authed_app
+        r = client.get("/openapi.json")
+        assert r.status_code == 200, r.text
+        served = r.json()
+        on_disk = yaml.safe_load(OPENAPI_PATH.read_text())
+        assert served == on_disk, "GET /openapi.json drifted from openapi.yaml on disk"
 
 
 # ──────────────────────────────────────────────────────────────────────
