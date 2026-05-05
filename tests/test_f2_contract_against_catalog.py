@@ -1497,6 +1497,50 @@ class TestBehaviour:
         assert r1.status_code == 200 and r2.status_code == 200
         assert r1.json()["metadata"]["hitCount"] == r2.json()["metadata"]["hitCount"]
 
+    def test_omitted_default_fields_match_explicit_defaults(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Spec marks `coreSortimentOnly`, `closedMarketplaceOnly`,
+        `s2ClassForProductCategories` with `default: false`. Omitting
+        them must equal explicitly setting them to false."""
+        common_kwargs = {"cvs": all_cvs, "vendorIdsFilter": [HIGH_VOLUME_VENDOR]}
+        body_explicit = make_body(
+            **common_kwargs,
+            coreSortimentOnly=False, closedMarketplaceOnly=False,
+            s2ClassForProductCategories=False,
+        )
+        body_omitted: dict = {
+            "searchMode": "HITS_ONLY",
+            "selectedArticleSources": {
+                "catalogVersionIdsOrderedByPreference": all_cvs,
+                "closedCatalogVersionIds": [],
+                "sourcePriceListIds": [],
+                "customerUploadedCoreArticleListSourceIds": [],
+            },
+            "currency": "EUR",
+            "vendorIdsFilter": [HIGH_VOLUME_VENDOR],
+        }
+        r1 = search_api_app.post(search_path, json=body_explicit)
+        r2 = search_api_app.post(search_path, json=body_omitted)
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert r1.json()["metadata"]["hitCount"] == r2.json()["metadata"]["hitCount"]
+
+    def test_negative_eclass_code_returns_zero_hits(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """eClass codes are non-negative in the catalog. A negative
+        code is syntactically valid (spec: `type: integer`, no
+        minimum) but matches nothing."""
+        r = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, eClassesFilter=[-1]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["articles"] == []
+        assert body["metadata"]["hitCount"] == 0
+
     def test_long_vendor_list_accepted(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
