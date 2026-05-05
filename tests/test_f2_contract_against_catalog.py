@@ -2098,6 +2098,43 @@ class TestOpenAPIDocument:
         impl_enum = {m.value for m in ImplEClassVersion}
         assert spec_enum == impl_enum
 
+    def test_no_snake_case_keys_in_live_response(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """The wire format is exclusively camelCase. A snake_case key
+        in the response means the model serializer leaked a Python
+        field name without applying its alias — a class of bug that's
+        easy to introduce with `populate_by_name=True` + pydantic."""
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            summaries=["VENDORS", "MANUFACTURERS", "FEATURES",
+                       "PRICES", "CATEGORIES", "ECLASS5"],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+
+        snake_case_keys: list[str] = []
+
+        def walk(node: Any, path: str) -> None:
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    # Allow snake_case under fields whose values are
+                    # opaque user data (none on this contract today,
+                    # but be conservative).
+                    if "_" in k and k != "_debug":
+                        snake_case_keys.append(f"{path}.{k}")
+                    walk(v, f"{path}.{k}")
+            elif isinstance(node, list):
+                for i, item in enumerate(node):
+                    walk(item, f"{path}[{i}]")
+
+        walk(r.json(), "$")
+        assert not snake_case_keys, (
+            "wire response contains snake_case keys: "
+            + ", ".join(snake_case_keys)
+        )
+
     def test_every_internal_ref_resolves(self) -> None:
         """Every `$ref: '#/components/schemas/<X>'` in the spec must
         point to a declared schema. This is dumb-but-load-bearing —
