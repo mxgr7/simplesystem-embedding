@@ -370,3 +370,64 @@ validation in ACL before forwarding.
 codes (4xx→400, 5xx→500), sanitized error messages.
 
 **Total: 167 tests (113 main + 41 red-team v1 + 13 red-team v2), all passing.**
+
+### Red-team round 2: 6 parallel agents (93 new tests)
+
+Launched 6 specialized red-team agents simultaneously:
+
+#### Response mapper fixes (3 bugs fixed)
+1. **eClassesAggregations rename missing**: ftsearch returns `{id, count}`,
+   legacy spec requires `{name, count}` — 3 agents independently found this
+2. **Metadata field leak**: denylist only stripped 2 keys; changed to allowlist
+   of the 5 spec-defined keys
+3. **Summaries field leak**: same pattern; allowlist of 9 spec-defined keys
+4. **pageCount < 1 for empty results**: legacy always returns `max(1, totalPages)`;
+   ACL now clamps
+
+#### Next-gen legacy caller analysis (15 findings)
+Key findings from reading `../next-gen/article/search/` Java/Kotlin code:
+- **articleId format**: ftsearch returns 3-part `vendorId:b64num:cvId`, legacy
+  expects 2-part `friendlyId:b64num`. **OPEN BUG** — ftsearch/indexer issue.
+- **pageCount >= 1**: fixed (see above)
+- **searchArticlesBy**: only `STANDARD` accepted, but portal-bff sends `ALL_ATTRIBUTES`
+  via mapper — routing must filter before ACL
+- **Price filter minor units**: prices are cents on the wire; ACL must match
+- **PLATFORM_CATEGORIES**: never sent on wire (mapped to ECLASS5SET in portal-bff)
+- **Error wrapping**: portal-bff wraps ALL errors as `SearchServiceUnavailableException`,
+  can't distinguish 400 from 500
+
+#### Security findings (20 tests, 10 categories)
+High severity:
+- No request body size limit (20MB accepted)
+- No maxItems on filter arrays (100k UUIDs accepted)
+- No maxLength on queryString (1MB accepted)
+- No rate limiting
+
+Medium severity:
+- Prometheus /metrics on app port (should be 9090)
+- Swagger UI/ReDoc exposed
+- Error messages leak "ftsearch unreachable" + upstream status codes
+
+#### ftsearch/search-api edge cases (25 tests, 4 bugs)
+- **Page overflow crash**: `page*pageSize > 16384` → unhandled 500 or connection reset
+- **hitCount lies with price sort**: hitCount=113, articles=[] when no prices resolve
+- **Whitespace-only query**: `query="   "` → `term="   "` instead of null
+- **Category depth > 5 silently ignored**: no error, returns unfiltered results
+
+#### Data integrity (13 tests, 1 warning)
+All clean except: 95% of `relationship_accessory_for` targets don't resolve
+(incomplete catalog load, not a runtime issue).
+
+**Total: 260 tests across 10 suites. 259 pass, 1 known failure (articleId format).**
+
+### Open issues (not yet fixed)
+
+| Issue | Severity | Owner | Notes |
+|-------|----------|-------|-------|
+| articleId 3-part format | HIGH | ftsearch/indexer | Offer `id` indexed as `vendorId:b64num:cvId`, legacy expects 2 parts |
+| Page overflow crash (page*pageSize > 16384) | HIGH | search-api | Needs rank_limit clamp or page upper bound |
+| No request body size limit | MEDIUM | ACL | Add middleware or proxy limit |
+| No rate limiting | MEDIUM | ACL/infra | Add rate limiter or rely on upstream proxy |
+| hitCount lies with price sort | MEDIUM | search-api | hitCount computed before price-drop filtering |
+| /metrics on app port | LOW | ACL | Should be on separate port 9090 per spec |
+| Swagger UI exposed | LOW | ACL | Disable in production |
