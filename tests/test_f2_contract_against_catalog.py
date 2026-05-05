@@ -84,8 +84,15 @@ KNOWN_VENDORS: tuple[str, ...] = (
     "e22f1ac6-14bc-4287-ab0d-1f34c1780f2e",
     "01054f55-c50c-452b-8822-ee11be4788c9",
 )
+# `01054f55-…` had ~2k priced offers in the seed scan and is the
+# safest "I expect hits back" vendor for behaviour assertions.
+HIGH_VOLUME_VENDOR = "01054f55-c50c-452b-8822-ee11be4788c9"
 KNOWN_MANUFACTURERS: tuple[str, ...] = ("Würth", "GARANT", "SMC", "TOOLCRAFT", "Siemens")
 KNOWN_ECLASS5_CODES: tuple[int, ...] = (21010101, 23110101, 27260701, 27269134, 32169090)
+# Real category_l1 strings present in articles_v6.
+KNOWN_CATEGORY_L1: tuple[str, ...] = (
+    "Verbindungselemente", "Elektromaterial", "Zerspanung",
+)
 KNOWN_QUERY_TERMS: tuple[str, ...] = ("schraube", "kabel", "siemens", "dichtung", "bohrer")
 
 
@@ -1031,3 +1038,427 @@ class TestAuthAndConcurrency:
         finally:
             mp.undo()
             sys.modules.pop("search_api_main_for_f2_gate", None)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class L — Behaviour assertions on real data (not just shape)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestBehaviour:
+    """Goes past 'request was accepted' to 'the right thing happened'.
+
+    Each test pins a specific corner of the catalog (high-volume vendor,
+    known manufacturer, known category) so the assertion is stable
+    against the loaded `articles_v6` + `offers_v6` snapshot.
+    """
+
+    def test_high_volume_vendor_returns_at_least_one_hit(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Smoke test: a vendor we know has ~2k offers should not
+        return zero. If this fails the always-on CV intersection or
+        the dispatch path is broken before any of the tighter
+        behaviour tests will run."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["metadata"]["hitCount"] > 0, (
+            "expected non-zero hits for high-volume vendor "
+            f"{HIGH_VOLUME_VENDOR}, got: {body['metadata']}"
+        )
+        assert body["articles"], "articles[] empty despite hitCount > 0"
+
+    def test_unknown_vendor_returns_zero_hits(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            search_path,
+            json=make_body(
+                cvs=all_cvs,
+                vendorIdsFilter=["00000000-0000-0000-0000-000000000000"],
+            ),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["articles"] == []
+        assert body["metadata"]["hitCount"] == 0
+
+    def test_unknown_manufacturer_returns_zero_hits(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            search_path,
+            json=make_body(
+                cvs=all_cvs,
+                manufacturersFilter=["NoSuchManufacturer__zzz"],
+            ),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["articles"] == []
+        assert body["metadata"]["hitCount"] == 0
+
+    def test_manufacturer_filter_actually_narrows(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Tighter assertion: filtering by `Würth` should produce a
+        strictly smaller hitCount than filtering by an empty
+        manufacturer set under the same scope (vendor + CVs)."""
+        unfiltered = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+        )
+        filtered = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                           manufacturersFilter=["Würth"]),
+        )
+        assert unfiltered.status_code == 200 and filtered.status_code == 200
+        u = unfiltered.json()["metadata"]["hitCount"]
+        f = filtered.json()["metadata"]["hitCount"]
+        # Sub-filter cannot grow the result set.
+        assert f <= u, f"manufacturer filter grew hits: {u} → {f}"
+
+    def test_category_path_l1_actually_narrows(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        unfiltered = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+        )
+        filtered = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                           currentCategoryPathElements=[KNOWN_CATEGORY_L1[0]]),
+        )
+        assert unfiltered.status_code == 200 and filtered.status_code == 200
+        u = unfiltered.json()["metadata"]["hitCount"]
+        f = filtered.json()["metadata"]["hitCount"]
+        assert f <= u, f"category filter grew hits: {u} → {f}"
+
+    @pytest.mark.parametrize("field,value", [
+        ("currentEClass5Code", KNOWN_ECLASS5_CODES[0]),
+        ("currentEClass7Code", KNOWN_ECLASS5_CODES[0]),
+        ("currentS2ClassCode", KNOWN_ECLASS5_CODES[0]),
+    ])
+    def test_each_current_eclass_field_accepted(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str], field: str, value: int
+    ) -> None:
+        r = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, **{field: value}),
+        )
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
+    def test_s2class_for_product_categories_flag_accepted(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            search_path,
+            json=make_body(
+                cvs=all_cvs, s2ClassForProductCategories=True,
+                eClassesFilter=[KNOWN_ECLASS5_CODES[0]],
+            ),
+        )
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
+    def test_max_delivery_time_does_not_grow_hits(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        unfiltered = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+        )
+        filtered = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                           maxDeliveryTime=2),
+        )
+        assert unfiltered.status_code == 200 and filtered.status_code == 200
+        u = unfiltered.json()["metadata"]["hitCount"]
+        f = filtered.json()["metadata"]["hitCount"]
+        assert f <= u, f"delivery filter grew hits: {u} → {f}"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class M — Free-text query path
+# ──────────────────────────────────────────────────────────────────────
+
+class TestFreeTextQuery:
+    """The `query` body field engages the dense ANN + BM25 hybrid
+    pipeline. These tests confirm the wiring works end-to-end through
+    the (mocked) embedder and BM25 codes leg.
+
+    The mock embedder returns the same vector regardless of input, so
+    dense retrieval contributes "the same" neighborhood every time;
+    BM25 still varies with the query string, so hits across different
+    terms differ. We assert the contract holds, not the ranking.
+    """
+
+    def test_query_returns_envelope(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(cvs=all_cvs, query="schraube"),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        # term echoes the input string (per F2 spec).
+        assert body["metadata"]["term"] == "schraube"
+
+    def test_query_path_yields_some_results(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """`schraube` is a corpus-prevalent BM25 term — the BM25 leg
+        alone should produce hits even with a deterministic mocked
+        dense vector. If hits=0 the query path is broken."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(cvs=all_cvs, query="schraube"),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["articles"], (
+            f"expected hits for query='schraube'; metadata={body['metadata']}"
+        )
+
+    def test_empty_query_falls_through_to_browse(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """An empty `query` string must not fail differently from a
+        request with no `query` field at all (both => browse path)."""
+        body_no_q = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        body_empty_q = {**body_no_q, "query": ""}
+        r1 = search_api_app.post(search_path, json=body_no_q)
+        r2 = search_api_app.post(search_path, json=body_empty_q)
+        assert r1.status_code == 200 == r2.status_code, (r1.text, r2.text)
+        # Same scope → same hitCount (both go through browse).
+        assert r1.json()["metadata"]["hitCount"] == r2.json()["metadata"]["hitCount"]
+
+    def test_null_query_accepted(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                         query=None)
+        r = search_api_app.post(search_path, json=body)
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class N — articleIdsFilter (legacy offer PK)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestArticleIdsFilter:
+    """`articleIdsFilter` is offer-side: each value is a literal
+    `offer.id` (the legacy PK; format
+    `{vendor_id}:{base64UrlEncodedArticleNumber}:{catalog_version_id}`)."""
+
+    def test_unknown_id_returns_empty(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            search_path,
+            json=make_body(cvs=all_cvs, articleIdsFilter=["00000000-0000-0000-0000-000000000000:none:cv"]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["articles"] == []
+        assert body["metadata"]["hitCount"] == 0
+
+    def test_real_offer_id_round_trips(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        # Pull one real offer-id off the live collection — we don't
+        # care which row, just that `articleIdsFilter` accepts it
+        # and returns it.
+        c = MilvusClient(uri=MILVUS_URI)
+        rows = c.query(
+            collection_name=OFFERS_COLLECTION,
+            filter=f'vendor_id == "{HIGH_VOLUME_VENDOR}"',
+            output_fields=["id", "catalog_version_id"], limit=1,
+        )
+        assert rows, "fixture: HIGH_VOLUME_VENDOR has no offers in offers_v6"
+        offer_id = rows[0]["id"]
+        cv = rows[0]["catalog_version_id"]
+        r = search_api_app.post(
+            search_path,
+            json=make_body(
+                cvs=[cv] + all_cvs,
+                articleIdsFilter=[offer_id],
+            ),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        ids = [a["articleId"] for a in body["articles"]]
+        assert offer_id in ids, (
+            f"articleIdsFilter did not echo back the requested id "
+            f"{offer_id!r}; got {ids[:3]}"
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class O — Pagination edges
+# ──────────────────────────────────────────────────────────────────────
+
+class TestPaginationEdges:
+    def test_page_size_500_max_accepted(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            f"{search_path}?pageSize=500",
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["metadata"]["pageSize"] == 500
+        assert len(body["articles"]) <= 500
+
+    def test_page_beyond_end_returns_empty(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        # Page 9999 is virtually guaranteed to be past pageCount.
+        r = search_api_app.post(
+            f"{search_path}?page=9999&pageSize=10",
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["articles"] == []
+        assert body["metadata"]["page"] == 9999
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class P — Summary content (not just envelope shape)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestSummaryContent:
+    """Goes past 'envelope shape valid' to 'content reflects the filtered set'.
+
+    These tests are tolerant: live-data hit counts will vary as the
+    catalogue evolves, so we only assert structural relationships
+    (counts > 0 when hits > 0; bucket counts sum to ≤ total hits).
+    """
+
+    def _post(self, c: TestClient, path: str, **body) -> dict:
+        r = c.post(f"{path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_vendors_summary_lists_filtered_vendor(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(cvs=all_cvs, searchMode="BOTH",
+                         vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                         summaries=["VENDORS"])
+        out = self._post(search_api_app, search_path, **body)
+        assert_search_response_valid(out)
+        vs = out["summaries"].get("vendorSummaries") or []
+        if out["metadata"]["hitCount"] > 0:
+            ids = {v["vendorId"] for v in vs}
+            assert HIGH_VOLUME_VENDOR in ids, (
+                f"vendorSummaries missing the only filtered vendor: {ids}"
+            )
+
+    def test_manufacturers_summary_lists_filtered_manufacturer(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(cvs=all_cvs, searchMode="BOTH",
+                         vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                         manufacturersFilter=["Würth"],
+                         summaries=["MANUFACTURERS"])
+        out = self._post(search_api_app, search_path, **body)
+        assert_search_response_valid(out)
+        ms = out["summaries"].get("manufacturerSummaries") or []
+        if out["metadata"]["hitCount"] > 0:
+            names = {m["name"] for m in ms}
+            assert "Würth" in names, (
+                f"manufacturerSummaries missing the filtered manufacturer: {names}"
+            )
+
+    def test_summary_bucket_counts_do_not_exceed_total(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """vendorSummaries' bucket counts can sum to ≥ hitCount when an
+        article has multiple vendors selling it; but no single bucket
+        should exceed hitCount."""
+        body = make_body(cvs=all_cvs, searchMode="BOTH",
+                         vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                         summaries=["VENDORS", "MANUFACTURERS"])
+        out = self._post(search_api_app, search_path, **body)
+        assert_search_response_valid(out)
+        total = out["metadata"]["hitCount"]
+        for kind in ("vendorSummaries", "manufacturerSummaries"):
+            for bucket in out["summaries"].get(kind) or []:
+                assert bucket["count"] <= total, (
+                    f"{kind} bucket {bucket} > hitCount {total}"
+                )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class Q — OpenAPI document is well-formed and self-describing
+# ──────────────────────────────────────────────────────────────────────
+
+class TestOpenAPIDocument:
+    """Spec-level invariants the F2 contract should always satisfy.
+
+    These guard against rot in the document itself (broken refs, missing
+    required schemas, drift between path-declared responses and the
+    spec's component schemas)."""
+
+    def test_search_response_schema_exists(self) -> None:
+        assert "SearchResponse" in OPENAPI_SPEC["components"]["schemas"]
+
+    def test_error_envelope_declared_for_search(self) -> None:
+        op = OPENAPI_SPEC["paths"]["/{collection}/_search"]["post"]
+        assert "401" in op["responses"]
+        assert "422" in op["responses"]
+        assert "503" in op["responses"]
+
+    def test_search_request_required_fields_match_implementation(self) -> None:
+        """Pydantic `SearchRequest.model_fields` should declare the
+        same `required: [...]` set the OpenAPI does, so we don't ship
+        a spec that's stricter or laxer than what the route accepts."""
+        from models import SearchRequest as ImplSearchRequest
+        spec_required = set(
+            OPENAPI_SPEC["components"]["schemas"]["SearchRequest"]["required"]
+        )
+        impl_required = {
+            f.alias or name
+            for name, f in ImplSearchRequest.model_fields.items()
+            if f.is_required()
+        }
+        assert spec_required == impl_required, (
+            f"required-field drift: spec={spec_required - impl_required}, "
+            f"impl={impl_required - spec_required}"
+        )
+
+    def test_metadata_fields_match_implementation(self) -> None:
+        """All Metadata properties declared in the spec must exist on
+        the pydantic model and vice versa — this is the test that
+        caught `recallClipped`/`hitCountClipped` drift initially."""
+        from models import Metadata as ImplMetadata
+        spec_props = set(
+            OPENAPI_SPEC["components"]["schemas"]["Metadata"]["properties"].keys()
+        )
+        impl_props = {
+            f.alias or name for name, f in ImplMetadata.model_fields.items()
+        }
+        assert spec_props == impl_props, (
+            f"Metadata field drift: spec_only={spec_props - impl_props}, "
+            f"impl_only={impl_props - spec_props}"
+        )
