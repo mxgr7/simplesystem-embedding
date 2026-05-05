@@ -1018,6 +1018,24 @@ class TestSortOrderings:
             f"sort=articleId,asc with query did not order by articleId: {ids[:5]}…"
         )
 
+    def test_relevance_sort_holds_across_pages(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Page 1 scores must all be ≥ page 2 scores under relevance
+        sort — the page boundary is just a slice of one global
+        ordering."""
+        body = make_body(cvs=all_cvs, query="schraube")
+        r1 = search_api_app.post(f"{search_path}?page=1&pageSize=5", json=body)
+        r2 = search_api_app.post(f"{search_path}?page=2&pageSize=5", json=body)
+        assert r1.status_code == 200 and r2.status_code == 200
+        s1 = [a.get("score") for a in r1.json()["articles"] if a.get("score") is not None]
+        s2 = [a.get("score") for a in r2.json()["articles"] if a.get("score") is not None]
+        if s1 and s2:
+            assert min(s1) >= max(s2), (
+                f"page 1 min {min(s1)} < page 2 max {max(s2)} — "
+                f"page boundary leaks ordering"
+            )
+
     def test_relevance_sort_returns_descending_scores(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
