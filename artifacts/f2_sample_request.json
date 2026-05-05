@@ -1,0 +1,78 @@
+{
+  "method": "POST",
+  "url": "/offers_v6/_search",
+  "queryParameters": {
+    "page": 1,
+    "pageSize": 5,
+    "sort": "articleId,asc"
+  },
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "searchMode": "BOTH",
+    "selectedArticleSources": {
+      "catalogVersionIdsOrderedByPreference": [
+        "866b4863-8799-4046-9e84-0985a665c1c7",
+        "8927bef2-8c15-404a-bfae-eb389deb67f2",
+        "8ee05f28-54d5-46b9-8e4c-7892b54ea2a2",
+        "900f3532-7ca1-4fe0-9a39-908ea4de13cd",
+        "9d70ea15-02bb-49fa-ae7b-06ce7a8aa356",
+        "9f250c80-dc42-4c1c-b3eb-2b1a15b241c3",
+        "baf61065-0bad-4118-a6f3-a1f6562e6472",
+        "c92c232f-997a-4761-9d7c-bfe243fd5371",
+        "d05e766e-3019-4cab-bcef-a0f34ef67d77",
+        "e83d1fe3-1915-4a26-9c60-9b3f59bb046d",
+        "002b162a-f9fe-48b1-a55f-a56f536f02b8",
+        "03999f4b-24ed-4a03-bb32-32ad7cb509f4",
+        "0a6b9840-2784-49d9-8756-26adb0e3cc00",
+        "1d6ac25b-c6a4-4e96-aa87-b341fee0a2af",
+        "24286033-261d-4bc8-a7c4-50b3c1fe6e34",
+        "28c195ea-ac10-4279-b788-70ad7f503926",
+        "31b3a68b-1f19-4316-9b9a-6b7bade9d2b0",
+        "38633e53-d3dc-4601-9699-cde2deebecdb",
+        "397020b1-4ad1-4dad-961a-00857c7bb463",
+        "417bd43b-0f93-4594-8951-9406872a565a",
+        "4cfb4b75-2afa-42f3-b348-6ccc9cb431e1",
+        "4d3e4378-8454-4f1f-a711-9c956a02031c",
+        "50184ade-2666-4b64-9bc6-02abdca92d70",
+        "56dc6796-2cdb-470b-9772-2335aefdd1f2",
+        "6d2d0690-d811-4e75-a823-269a5e7c7c09",
+        "6e5fd0de-b51b-4685-a985-165b7d40d379",
+        "71faaf28-a01a-4e67-b31c-38f2a49792e5",
+        "8154cc83-5b11-4a10-9c0c-c03c30c0be6e",
+        "8929b227-3809-4e7c-a4c5-4a0086902024",
+        "8cf3aa80-f33a-46c3-a7ae-cbee23bab98b",
+        "a41e9438-6672-4724-bcfa-1aaf6cd20db8",
+        "aee897ed-4194-42e3-ab7f-62a4d17174b4",
+        "b7ba10b5-5451-4f15-b118-79fc20e8978f",
+        "cb9e9f9f-3a96-4eec-b80d-0989b073b992",
+        "d208d69a-535f-4678-a1c8-374b170ffa2b",
+        "d3743f78-cc9a-4ef7-a6e1-b5a1bda5167d",
+        "d5635fae-0dbd-4b9a-9b0e-93cb99caad22",
+        "dde2cb3d-e9ac-423e-9529-7e7a4027d5ee",
+        "df002fb8-dc1a-4ba3-9fcf-34162958cda0",
+        "eb40cff6-4814-4a64-8a31-a8465ff87046",
+        "eeeb9e1b-b8dd-41b6-b722-22aecbef28ee",
+        "f022bc2f-0b8e-4cd0-bb73-60675f7cbf29",
+        "f93d7d77-b778-4c58-ae7d-41926e2b1e6c"
+      ],
+      "closedCatalogVersionIds": [],
+      "sourcePriceListIds": [],
+      "customerUploadedCoreArticleListSourceIds": []
+    },
+    "query": "schraube",
+    "vendorIdsFilter": [
+      "01054f55-c50c-452b-8822-ee11be4788c9"
+    ],
+    "currency": "EUR",
+    "maxDeliveryTime": 0,
+    "coreSortimentOnly": false,
+    "closedMarketplaceOnly": false,
+    "summaries": [
+      "VENDORS",
+      "MANUFACTURERS",
+      "PRICES"
+    ]
+  }
+}
