@@ -132,6 +132,17 @@ class TestArticleIdFormat:
                 f"legacy expects exactly 2 (friendlyId:base64ArticleNumber)"
             )
 
+    def test_article_id_first_part_is_not_raw_uuid(self):
+        """The first part must be a FriendlyId (base62), not a raw UUID."""
+        r = _post(_base_body(), page_size=5)
+        assert r.status_code == 200
+        for art in r.json()["articles"]:
+            first_part = art["articleId"].split(":")[0]
+            assert "-" not in first_part, (
+                f"articleId first part {first_part!r} looks like a raw UUID; "
+                f"legacy expects base62-encoded FriendlyId"
+            )
+
 
 # =========================================================================
 # Finding 14: Empty catalogVersionIdsOrderedByPreference → empty results

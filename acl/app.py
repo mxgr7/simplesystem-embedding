@@ -110,6 +110,18 @@ async def openapi_yaml() -> Response:
     return Response(content=_OPENAPI_YAML_TEXT, media_type="application/yaml")
 
 
+_MAX_BODY_BYTES = 1_048_576  # 1 MB
+
+
+@app.middleware("http")
+async def body_size_limit(request: Request, call_next):
+    """Reject request bodies larger than _MAX_BODY_BYTES."""
+    cl = request.headers.get("content-length")
+    if cl and int(cl) > _MAX_BODY_BYTES:
+        return _error(413, "Request body too large", details=[f"max={_MAX_BODY_BYTES}"])
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def trace_context(request: Request, call_next):
     """A5 — extract W3C trace context + propagated baggage from the
@@ -192,11 +204,12 @@ async def search(
             headers=forward_headers,
         )
     except httpx.HTTPStatusError as exc:
-        mapped = 400 if 400 <= exc.response.status_code < 500 else 500
+        upstream = exc.response.status_code
+        mapped = 400 if 400 <= upstream < 500 else upstream
         return _error(
             status=mapped,
-            message="Upstream request failed",
-            details=[f"upstream_status={exc.response.status_code}"],
+            message="Upstream non-2xx response",
+            details=[f"upstream_status={upstream}"],
         )
     except httpx.RequestError as exc:
         # Network-level failure (connect refused, timeout, etc.).

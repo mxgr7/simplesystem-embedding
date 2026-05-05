@@ -108,7 +108,20 @@ def _vendor_ids(req: SearchRequest) -> str | None:
 def _article_ids(req: SearchRequest) -> str | None:
     if not req.article_ids_filter:
         return None
-    return f"id in {_str_array(req.article_ids_filter)}"
+    # IDs may be prefixes (vendor:b64num without catalog version suffix).
+    # Use `like "prefix%"` for partial IDs, exact match for full IDs.
+    clauses: list[str] = []
+    exact: list[str] = []
+    for aid in req.article_ids_filter:
+        if aid.count(":") < 2:
+            clauses.append(f"id like {_quote(aid + '%')}")
+        else:
+            exact.append(aid)
+    if exact:
+        clauses.append(f"id in {_str_array(exact)}")
+    if len(clauses) == 1:
+        return clauses[0]
+    return "(" + " or ".join(clauses) + ")"
 
 
 def _manufacturers(req: SearchRequest) -> str | None:

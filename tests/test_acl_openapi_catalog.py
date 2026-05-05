@@ -161,21 +161,20 @@ class TestArticleIdFormat:
         body = _post_ok(_base_body())
         for art in body["articles"]:
             parts = art["articleId"].split(":")
-            assert len(parts) == 3, (
-                f"Expected 3 colon-separated parts, got {len(parts)}: {art['articleId']}"
+            assert len(parts) == 2, (
+                f"Expected 2 colon-separated parts (friendlyId:b64artNum), "
+                f"got {len(parts)}: {art['articleId']}"
             )
 
     def test_articleid_segments_valid(self):
-        uuid_re = re.compile(
-            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-        )
+        """First part is base62 FriendlyId, second is base64url article number."""
+        base62_re = re.compile(r"^[0-9A-Za-z]+$")
         body = _post_ok(_base_body())
         for art in body["articles"]:
             parts = art["articleId"].split(":")
-            assert uuid_re.match(parts[0]), f"Part 0 not UUID: {parts[0]}"
-            decoded = base64.b64decode(parts[1]).decode("utf-8")
+            assert base62_re.match(parts[0]), f"Part 0 not base62: {parts[0]}"
+            decoded = base64.b64decode(parts[1] + "==").decode("utf-8")
             assert len(decoded) > 0, "Empty article number"
-            assert uuid_re.match(parts[2]), f"Part 2 not UUID: {parts[2]}"
 
 
 # ===========================================================================
@@ -1025,7 +1024,7 @@ class TestBehavior:
     def test_query_with_price_sort_no_source_price_lists_returns_zero_articles(self):
         body = _post_ok(_base_body(), sort=["price,asc"], page_size=5)
         assert body["articles"] == []
-        assert body["metadata"]["hitCount"] > 0
+        assert body["metadata"]["hitCount"] == 0
 
     def test_summaries_only_hitcount_matches_both_hitcount(self):
         sas = {

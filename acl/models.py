@@ -133,13 +133,13 @@ class LegacySearchRequest(_Strict):
     search_articles_by: SearchArticlesBy = Field(alias="searchArticlesBy")
     selected_article_sources: SelectedArticleSources = Field(alias="selectedArticleSources")
 
-    query_string: str | None = Field(default=None, alias="queryString")
+    query_string: str | None = Field(default=None, alias="queryString", max_length=10_000)
 
-    article_ids_filter: list[str] = Field(default_factory=list, alias="articleIdsFilter")
-    vendor_ids_filter: list[UuidStr] = Field(default_factory=list, alias="vendorIdsFilter")
-    manufacturers_filter: list[str] = Field(default_factory=list, alias="manufacturersFilter")
+    article_ids_filter: list[str] = Field(default_factory=list, alias="articleIdsFilter", max_length=1_000)
+    vendor_ids_filter: list[UuidStr] = Field(default_factory=list, alias="vendorIdsFilter", max_length=500)
+    manufacturers_filter: list[str] = Field(default_factory=list, alias="manufacturersFilter", max_length=500)
     max_delivery_time: StrictInt = Field(alias="maxDeliveryTime", ge=0)
-    required_features: list[FeatureFilter] = Field(default_factory=list, alias="requiredFeatures")
+    required_features: list[FeatureFilter] = Field(default_factory=list, alias="requiredFeatures", max_length=100)
     price_filter: PriceFilter | None = Field(default=None, alias="priceFilter")
 
     accessories_for_article_number: str | None = Field(
@@ -176,7 +176,7 @@ class LegacySearchRequest(_Strict):
     # stubs `articles[].explanation = "N/A"` when this is True.
     explain: StrictBool
 
-    e_classes_filter: list[StrictInt] = Field(default_factory=list, alias="eClassesFilter")
+    e_classes_filter: list[StrictInt] = Field(default_factory=list, alias="eClassesFilter", max_length=500)
     e_classes_aggregations: list[EClassesAggregation] = Field(
         default_factory=list, alias="eClassesAggregations",
     )

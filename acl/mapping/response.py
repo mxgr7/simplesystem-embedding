@@ -24,7 +24,35 @@ real work:
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
+
+_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def _uuid_to_friendly(u: uuid.UUID) -> str:
+    """Devskiller FriendlyId-compatible base62 encoding of a UUID."""
+    n = int.from_bytes(u.bytes, "big", signed=False)
+    if n == 0:
+        return "0"
+    digits: list[str] = []
+    while n:
+        n, rem = divmod(n, 62)
+        digits.append(_BASE62[rem])
+    return "".join(reversed(digits))
+
+
+def _to_legacy_article_id(ftsearch_id: str) -> str:
+    """Convert ftsearch's 3-part articleId to legacy 2-part format.
+
+    ftsearch: ``{rawUUID}:{b64url(artNum)}:{rawUUID}``
+    legacy:   ``{friendlyId(vendorUUID)}:{b64url(artNum)}``
+    """
+    parts = ftsearch_id.split(":")
+    if len(parts) == 3:
+        vendor_uuid = uuid.UUID(parts[0])
+        return f"{_uuid_to_friendly(vendor_uuid)}:{parts[1]}"
+    return ftsearch_id
 
 
 def map_response(
@@ -41,7 +69,7 @@ def map_response(
     raw_articles = ftsearch_body.get("articles") or []
     articles_out: list[dict[str, Any]] = []
     for raw in raw_articles:
-        legacy: dict[str, Any] = {"articleId": raw["articleId"]}
+        legacy: dict[str, Any] = {"articleId": _to_legacy_article_id(raw["articleId"])}
         if explain:
             # §2.2 — stub. The legacy schema lets clients parse a
             # non-null string here without trying to deserialize a

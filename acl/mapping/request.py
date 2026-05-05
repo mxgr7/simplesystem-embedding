@@ -27,10 +27,41 @@ matter of legacy semantics that ftsearch implements.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from acl.models import LegacySearchRequest
+
+_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+_BASE62_MAP = {c: i for i, c in enumerate(_BASE62)}
+
+
+def _friendly_to_uuid(friendly: str) -> uuid.UUID:
+    """Decode a Devskiller FriendlyId (base62) back to a UUID."""
+    n = 0
+    for c in friendly:
+        n = n * 62 + _BASE62_MAP[c]
+    return uuid.UUID(int=n)
+
+
+def _convert_legacy_article_id(legacy_id: str) -> str:
+    """Convert a legacy 2-part articleId to the ftsearch offer-id prefix.
+
+    Legacy: ``{friendlyId}:{b64url(artNum)}``
+    ftsearch PK prefix: ``{rawUUID}:{b64url(artNum)}``
+
+    Returns a prefix (without the catalog version suffix) that ftsearch
+    can match with ``like "prefix%"`` expressions.
+    """
+    parts = legacy_id.split(":")
+    if len(parts) != 2:
+        return legacy_id
+    try:
+        vendor_uuid = _friendly_to_uuid(parts[0])
+    except (KeyError, ValueError):
+        return legacy_id
+    return f"{vendor_uuid}:{parts[1]}"
 
 
 @dataclass(frozen=True)
@@ -79,6 +110,13 @@ def map_request(
     # §2.2 — `explain` never reaches ftsearch. A3 fills in the
     # `articles[].explanation` field on the way back.
     body.pop("explain", None)
+
+    # Convert legacy articleIds (friendlyId:b64num) to ftsearch prefix format.
+    if body.get("articleIdsFilter"):
+        body["articleIdsFilter"] = [
+            _convert_legacy_article_id(aid)
+            for aid in body["articleIdsFilter"]
+        ]
 
     # Strip fields the ftsearch SelectedArticleSources doesn't accept
     # (see `_DROPPED_SELECTED_ARTICLE_SOURCES_FIELDS` above).

@@ -303,6 +303,13 @@ async def dispatch_dedup(
     # representative offer + sort-key data; sort_items applies the
     # primary sort with the universal articleId-asc tiebreak.
     sorted_items = sort_items(materialised, sort_plan)
+
+    # Materialisation drops articles whose offers all fail the price
+    # post-pass (e.g. sort=price with no sourcePriceListIds). Adjust
+    # hit_count so callers don't see "113 results" with empty pages.
+    if len(sorted_items) < hit_count and not hit_count_clipped:
+        hit_count = len(sorted_items)
+
     page_offset = max(0, (page - 1) * page_size)
     page_slice = sorted_items[page_offset:page_offset + page_size]
     hits = _to_hits(page_slice, sort_plan, query_active=bool(query_text))
@@ -364,7 +371,7 @@ def _rank_limit(
     page_window = max(page * page_size, 1) * (overfetch_n if price_active else 1)
     if sort_plan.is_relevance:
         if query_text:
-            return max(page_window, dense_pool)
+            return min(max(page_window, dense_pool), _MILVUS_MAX_QUERY_WINDOW)
         return hitcount_cap
     if query_text:
         return relevance_pool_max

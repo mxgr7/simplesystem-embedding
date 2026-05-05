@@ -102,15 +102,11 @@ def _check_services():
 # VULN 1: No request body size limit -- memory exhaustion DoS
 # =========================================================================
 
-class TestNoRequestBodySizeLimit:
-    """The ACL has no Content-Length / body-size cap.  A caller can POST
-    a 20MB+ JSON payload that the server must fully buffer, parse, and
-    validate, consuming unbounded memory."""
+class TestRequestBodySizeLimit:
+    """The ACL enforces a 1MB body size limit to prevent memory exhaustion."""
 
-    def test_20mb_payload_accepted(self):
-        """A ~20MB request with 100k articleIdsFilter entries is
-        accepted (200).  An internal service should reject payloads
-        above a reasonable threshold (e.g. 1MB) with 413."""
+    def test_20mb_payload_rejected(self):
+        """A ~20MB request is rejected with 413."""
         body = _base_body(
             articleIdsFilter=["A" * 200] * 100_000,
         )
@@ -122,43 +118,36 @@ class TestNoRequestBodySizeLimit:
             headers={"Content-Type": "application/json"},
             timeout=60,
         )
-        # The vulnerability is that this SUCCEEDS -- it should be rejected
-        assert r.status_code == 200, (
-            f"Expected the oversized payload to be accepted (proving "
-            f"the vulnerability); got {r.status_code}"
-        )
+        assert r.status_code == 413
 
 
 # =========================================================================
 # VULN 2: No maxItems on filter arrays -- resource exhaustion
 # =========================================================================
 
-class TestNoArrayLengthLimits:
-    """Filter array fields (vendorIdsFilter, articleIdsFilter,
-    manufacturersFilter, requiredFeatures) have no `maxItems` constraint.
-    A caller can send 100k+ items, generating a correspondingly large
-    Milvus expression string and downstream database load."""
+class TestArrayLengthLimits:
+    """Filter array fields enforce maxItems constraints to prevent
+    resource exhaustion from oversized Milvus expressions."""
 
-    def test_100k_vendor_ids_accepted(self):
-        """100,000 UUIDs in vendorIdsFilter are accepted.  The resulting
-        Milvus `vendor_id in [...]` expression is ~4MB of text."""
+    def test_100k_vendor_ids_rejected(self):
+        """100,000 UUIDs in vendorIdsFilter exceed the 500 limit."""
         body = _base_body(
             vendorIdsFilter=[CV_EUR] * 100_000,
         )
         r = _post(body)
-        assert r.status_code == 200
+        assert r.status_code in (400, 413)
 
-    def test_50k_manufacturers_accepted(self):
-        """50,000 manufacturer names in manufacturersFilter are accepted."""
+    def test_50k_manufacturers_rejected(self):
+        """50,000 manufacturer names exceed the array limit."""
         body = _base_body(
             manufacturersFilter=[f"Manufacturer_{i}" for i in range(50_000)],
         )
         r = _post(body)
-        assert r.status_code == 200
+        assert r.status_code == 400
 
     def test_100_features_x_100_values_accepted(self):
         """100 feature filters, each with 100 values (10,000 total
-        array_contains_any atoms) are accepted."""
+        array_contains_any atoms) are accepted — within limits."""
         body = _base_body(
             requiredFeatures=[
                 {"name": f"feat_{i}", "values": [f"val_{j}" for j in range(100)]}
@@ -173,16 +162,14 @@ class TestNoArrayLengthLimits:
 # VULN 3: No queryString length limit -- embedding service abuse
 # =========================================================================
 
-class TestNoQueryStringLengthLimit:
-    """The `queryString` field has no `maxLength` constraint.  A 1MB
-    string is accepted and forwarded to the embedding model, consuming
-    GPU/CPU time for a single request."""
+class TestQueryStringLengthLimit:
+    """The `queryString` field enforces a maxLength of 10,000 characters."""
 
-    def test_1mb_query_string_accepted(self):
-        """A 1MB queryString is accepted and produces results."""
+    def test_1mb_query_string_rejected(self):
+        """A 1MB queryString exceeds the body size limit."""
         body = _base_body(queryString="A" * (1024 * 1024))
         r = _post(body)
-        assert r.status_code == 200
+        assert r.status_code == 413
 
 
 # =========================================================================

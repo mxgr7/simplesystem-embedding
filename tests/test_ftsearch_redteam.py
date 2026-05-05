@@ -101,30 +101,18 @@ class TestPageOverflow:
             params={"page": 1639, "pageSize": 10},
             json=_base_body(query="screw"),
         )
-        # BUG: returns 500 instead of a graceful empty page or 400.
-        # A correct implementation would either clamp rank_limit to
-        # 16384 and return an empty page, or return 400 with
-        # "page out of range".
-        assert r.status_code == 500, (
-            f"Expected 500 from Milvus overflow, got {r.status_code}"
-        )
+        # Fixed: rank_limit is clamped to 16384, returns empty page.
+        assert r.status_code == 200
 
-    def test_max_pagesize_moderate_page_crashes(self, client):
-        """pageSize=500 (the schema max), page=33 → rank_limit = 16500.
-        This crashes so hard it resets the TCP connection (worse than 500)."""
-        try:
-            r = client.post(
-                "/offers_v6/_search",
-                params={"page": 33, "pageSize": 500},
-                json=_base_body(query="screw"),
-            )
-            # If we get a response at all, it should be a 500.
-            assert r.status_code == 500
-        except (httpx.ReadError, httpx.RemoteProtocolError):
-            # BUG: the server crashes so hard the TCP connection resets.
-            # This is even worse than a 500 — the client gets no
-            # response at all.
-            pass
+    def test_max_pagesize_moderate_page_handled(self, client):
+        """pageSize=500 (the schema max), page=33 → rank_limit clamped
+        to 16384, returns empty page gracefully."""
+        r = client.post(
+            "/offers_v6/_search",
+            params={"page": 33, "pageSize": 500},
+            json=_base_body(query="screw"),
+        )
+        assert r.status_code == 200
 
     def test_just_below_boundary_succeeds(self, client):
         """page=1638, pageSize=10 → rank_limit = max(16380, 200) = 16380
@@ -213,12 +201,9 @@ class TestPriceSortHitCountMismatch:
         hit_count = data["metadata"]["hitCount"]
         page_count = data["metadata"]["pageCount"]
 
-        # BUG: articles is empty, but hitCount > 0 and pageCount > 0.
+        # Fixed: hitCount now correctly reflects 0 when no articles materialise.
         assert len(articles) == 0, "Expected 0 articles (no prices resolve)"
-        assert hit_count > 0, f"Expected hitCount > 0, got {hit_count}"
-        assert page_count > 0, f"Expected pageCount > 0, got {page_count}"
-        # The combination articles=[] + pageCount>0 is the bug:
-        # a UI paging through would see empty pages everywhere.
+        assert hit_count == 0, f"Expected hitCount == 0, got {hit_count}"
 
     def test_price_sort_browse_also_mismatches(self, client):
         """Browse (no query) + sort=price,asc has the same bug."""
