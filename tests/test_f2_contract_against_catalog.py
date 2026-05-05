@@ -2206,6 +2206,33 @@ class TestNegativeBodies:
         r = search_api_app.post(search_path, json=bad)
         assert r.status_code == 422
 
+    def test_eclasses_aggregation_extra_field_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs, eClassesAggregations=[{
+            "id": "agg", "eClasses": [123], "extra": True,
+        }])
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_price_filter_currency_two_roles_request_accepted(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Spec §3 'Currency fields — two roles': priceFilter.currencyCode
+        decodes minor units (USD cents have 2 fraction digits). Top-level
+        `currency` drives matching against the offer's price column.
+        These two values may legitimately differ (e.g., bound in USD,
+        matching against the catalog's EUR prices). The request must
+        validate even when they differ."""
+        body = make_body(
+            cvs=all_cvs,
+            currency="EUR",  # match against EUR prices
+            priceFilter={"min": 100, "max": 100000, "currencyCode": "USD"},
+        )
+        r = search_api_app.post(search_path, json=body)
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
     def test_legacy_explain_field_rejected(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
