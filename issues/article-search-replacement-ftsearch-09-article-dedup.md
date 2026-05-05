@@ -9,7 +9,7 @@ References: spec §6 (indexing pipeline), §7 (schema), §4.3 (filtering), §2.3
 
 ## Status
 
-✅ **Done — all 4 PRs landed** across multiple commits (see git log).
+🟡 **PRs landed; design correction outstanding (2026-05-05)** — see **Correction** section below before reading the rest.
 
   - **PR1** (schema): `scripts/create_articles_collection.py` + revised `scripts/create_offers_collection.py` + paired alias workflow in `scripts/MILVUS_ALIAS_WORKFLOW.md`. Schema tests in `tests/test_articles_collection_schema.py` (17) + `tests/test_offers_collection_schema.py` (22).
   - **PR2** (indexer two-stream): `indexer/projection.py:compute_article_hash`/`aggregate_article`/`to_offer_row` + `indexer/test_loader.py:load_split` for stub-vector tests.
@@ -20,6 +20,44 @@ References: spec §6 (indexing pipeline), §7 (schema), §4.3 (filtering), §2.3
 Operational follow-ons that landed alongside (not strictly part of F9):
   - `scripts/swing_aliases.py` — paired alias-swing CLI per the F9 protocol (5 e2e tests).
   - F7 operational glue — bounded consistency, retry+timeout, RED metrics, W3C tracing baggage.
+
+## Correction (2026-05-05) — `offers_v{N}` granularity
+
+The original F9 design (and PR2b's implementation) inherited the legacy ES doc shape: aggregate raw mongo offers by `(vendorId, articleNumber)` and union per-offer fields (`catalogVersionIds[]`, `prices[]`, …) into arrays. **This is wrong for ftsearch's correlated per-offer filtering.** Multiple raw mongo offers can share `(vendorId, articleNumber)` but differ on `catalogVersionId` (and other per-offer fields); aggregating them collapses distinct offers into one row, defeating the purpose of the F9 split.
+
+**Why the legacy ES PK shape can't be ported as-is.** Legacy ES uses the same `(vendorId, articleNumber)`-aggregated PK (`articleId = {friendlyId}:{base64Url(articleNumber)}`, see `ArticleId.java:22-37`), but it stores the per-catalog-version variants as a **nested `offers[]` array within one doc** and matches correlated per-offer predicates via ES's `nested` query type — which evaluates predicates against the same array element, not the union. Milvus has no equivalent: `ARRAY<STRUCT>` does not support filtering on inner fields (see "Why two collections" survey above, lines 42–51). So porting only the PK shape (without the nested-filter mechanism that makes aggregation safe in ES) is what produced the broken design. The "Why two collections" survey already pinned this constraint; the implementation just failed to draw the right consequence — collapsing offers without preserving correlated semantics is strictly worse than either keeping ES nesting (impossible in Milvus) or flattening (the corrected design).
+
+**Corrected design**: `offers_v{N}` carries **one row per source mongo offer** — no `(vendorId, articleNumber)` aggregation. Catalog version is a first-class per-offer scalar, not an array. Granularity is therefore **finer** than legacy ES (one offer per source mongo doc, vs. one ES doc per `(vendor, articleNumber)` group with nested offers); the row-count cost (3.21× legacy) is the price of replacing ES nested-doc semantics with flat-row equivalence on a system that lacks nested filtering.
+
+Concretely:
+
+- **PK** changes from `{vendor_uuid_dashed}:{base64Url(articleNumber)}` to `{vendor_uuid_dashed}:{base64Url(articleNumber)}:{catalogVersionId}` (or another shape that uniquely keys a source mongo offer; see "Open questions" below).
+- **`catalog_version_ids ARRAY<VARCHAR>`** → **`catalog_version_id VARCHAR`** (singular, INVERTED).
+- Per-offer scalars (`prices`, `ean`, `delivery_time_days_max`, core markers, relationships, features, F8 envelope columns) are computed from the **single source mongo offer**, not unioned across a `(vendor, articleNumber)` group.
+- F3 filter form for catalog scoping changes from `array_contains_any(catalog_version_ids, [...])` to `catalog_version_id IN [...]`.
+- The `articles_v{N}` side is unaffected: same hash function, same embedded-field set, same per-currency envelope (now aggregated across all offers sharing the hash, no intermediate `(vendor, articleNumber)` rollup).
+
+**Scale impact** (vs. original spec numbers below):
+
+| Step                              | Original (aggregated)               | Corrected (per-offer)              |
+| --------------------------------- | ----------------------------------- | ---------------------------------- |
+| Source mongo offers               | 510M                                | 510M                               |
+| `offers_v{N}` rows                | 159M (after `(vendor,art#)` group)  | **510M** (one per source row)      |
+| `articles_v{N}` rows              | 130M unique embeddings              | 130M unique embeddings (unchanged) |
+| Hash dedup ratio (offers→article) | 159M / 130M = **1.22×**             | 510M / 130M = **3.92×**            |
+
+Vector storage and HNSW RAM are still bounded by the 130M unique-embedding count — F9's core value proposition is preserved. What grows is `offers_v{N}` row count and per-offer scalar storage (3.21× more offer rows than the original design). TEI cache hit rate at bulk reindex improves (~74% vs. ~18%) since the cache is keyed by hash, not by offer.
+
+**Implementation status of the correction:**
+
+- `indexer/duckdb_projection.py` — the `offers_pre_dedup → offers WHERE _rn = 1` CTE (line ~921) must be removed. Currently it picks one row non-deterministically per `(vendor, articleNumber)`, dropping the others without unioning anything (so the implementation didn't even faithfully execute the original spec — it just discarded duplicate-key rows so Milvus wouldn't reject the upsert batch).
+- `indexer/collection_specs.py:build_offers_schema` — change `catalog_version_ids` ARRAY to `catalog_version_id` scalar; widen PK `id` if the chosen shape exceeds 256 chars.
+- `scripts/create_offers_collection.py` (and the offers index params) — adjust accordingly.
+- `search-api/filters.py:build_offer_expr` — change catalog filter to `IN`.
+- Cascading updates in `issues/article-search-replacement-spec.md` (§7), `article-search-replacement-ftsearch-01-milvus-schema.md`, `article-search-replacement-ftsearch-03-filtering.md`, `article-search-replacement-indexer-01-bulk-rebuild.md` — all reference the old `catalog_version_ids ARRAY` shape.
+- A fresh bulk reindex is required; the alias-swing playbook handles the transition.
+
+The remainder of this packet describes the **original** (incorrect) design — kept verbatim as historical context. Where the original text contradicts this Correction, the Correction wins.
 
 ## Background — the gap this packet closes
 
