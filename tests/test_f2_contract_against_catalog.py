@@ -780,6 +780,24 @@ class TestFilters:
         assert r.status_code == 200, r.text
         assert_search_response_valid(r.json())
 
+    def test_required_features_with_empty_values_is_no_op(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """`requiredFeatures` entry with empty `values` is filtered
+        out by `filters._required_features`. The request must still
+        succeed and produce the same hitCount as omitting the entry."""
+        body_with_empty = make_body(
+            cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            requiredFeatures=[{"name": "any", "values": []}],
+        )
+        body_without = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        r1 = search_api_app.post(search_path, json=body_with_empty)
+        r2 = search_api_app.post(search_path, json=body_without)
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert (
+            r1.json()["metadata"]["hitCount"] == r2.json()["metadata"]["hitCount"]
+        )
+
     def test_blocked_eclass_vendors_filter(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
