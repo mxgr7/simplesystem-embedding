@@ -370,6 +370,28 @@ class TestValidator:
         with pytest.raises(AssertionError):
             assert_search_response_valid(bad)
 
+    def test_validator_catches_missing_required(self) -> None:
+        # Spec marks `articleId` required on Article; an article
+        # missing it must fail validation.
+        bad = {
+            "articles": [{"score": 0.5}],
+            "summaries": {},
+            "metadata": {"page": 1, "pageSize": 10, "pageCount": 0, "hitCount": 0},
+        }
+        with pytest.raises(AssertionError):
+            assert_search_response_valid(bad)
+
+    def test_validator_catches_negative_count(self) -> None:
+        bad = {
+            "articles": [],
+            "summaries": {
+                "vendorSummaries": [{"vendorId": "v", "count": -1}],
+            },
+            "metadata": {"page": 1, "pageSize": 10, "pageCount": 0, "hitCount": 0},
+        }
+        with pytest.raises(AssertionError):
+            assert_search_response_valid(bad)
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Class B — Parameter coverage
@@ -461,6 +483,24 @@ class TestParameters:
         # only 401/422/503 explicitly for /_search but a known-bad sort
         # is a request error. We accept either 400 or 422 — the
         # important assertion is "rejected, with an Error envelope".
+        assert r.status_code in (400, 422)
+
+    def test_empty_sort_value_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            f"{search_path}?sort=",
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[KNOWN_VENDORS[0]]),
+        )
+        assert r.status_code in (400, 422)
+
+    def test_sort_missing_direction_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            f"{search_path}?sort=name",
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[KNOWN_VENDORS[0]]),
+        )
         assert r.status_code in (400, 422)
 
     def test_unknown_sort_direction_rejected(
