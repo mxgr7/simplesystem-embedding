@@ -814,6 +814,26 @@ class TestFilters:
         assert r.status_code == 200, r.text
         assert_search_response_valid(r.json())
 
+    def test_empty_array_filters_are_no_ops(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Each list-shaped filter (vendorIdsFilter, manufacturersFilter,
+        articleIdsFilter, currentCategoryPathElements, eClassesFilter)
+        is a no-op when empty — the spec allows the field but
+        ergonomically passing `[]` should be identical to omitting it."""
+        body_with_empties = make_body(
+            cvs=all_cvs, vendorIdsFilter=[], manufacturersFilter=[],
+            articleIdsFilter=[], currentCategoryPathElements=[],
+            eClassesFilter=[],
+        )
+        body_without = make_body(cvs=all_cvs)
+        r1 = search_api_app.post(search_path, json=body_with_empties)
+        r2 = search_api_app.post(search_path, json=body_without)
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert (
+            r1.json()["metadata"]["hitCount"] == r2.json()["metadata"]["hitCount"]
+        )
+
     def test_eclasses_aggregations_passthrough(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
