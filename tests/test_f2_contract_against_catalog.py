@@ -1965,15 +1965,22 @@ class TestFreeTextQuery:
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
         """The TEI client passes `truncate=true`, so the embedder won't
-        413 on a 10KB query. Spec doesn't cap query length, so this
-        should round-trip."""
+        413 on a 10KB query. Spec doesn't cap query length — the
+        request must round-trip *and* the term must echo the full
+        original string (only the embedder side truncates; the wire
+        format keeps the original)."""
         long = "schraube " * 200  # ≈1.8KB, well past most token limits.
         r = search_api_app.post(
             f"{search_path}?pageSize=3",
             json=make_body(cvs=all_cvs, query=long),
         )
         assert r.status_code == 200, r.text
-        assert_search_response_valid(r.json())
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["metadata"]["term"] == long, (
+            "long query was truncated on the wire; only the embedder "
+            "side should truncate"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────
