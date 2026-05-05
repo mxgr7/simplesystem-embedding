@@ -2024,6 +2024,30 @@ class TestNegativeBodies:
         r = search_api_app.post(search_path, json=bad)
         assert r.status_code == 422
 
+    def test_currency_with_trailing_space_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Pattern `^[A-Z]{3}$` — anything other than three uppercase
+        letters must reject."""
+        bad = make_body(cvs=all_cvs, currency="EUR ")
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_category_path_too_deep_no_op(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Schema only stores l1..l5 — the implementation treats depth
+        >5 as a no-op rather than rejecting (filters.py defensive
+        path). The request must still succeed and return a valid
+        envelope; the unmatched-path filter just doesn't narrow."""
+        body = make_body(
+            cvs=all_cvs,
+            currentCategoryPathElements=["l1", "l2", "l3", "l4", "l5", "l6"],
+        )
+        r = search_api_app.post(search_path, json=body)
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Class S — Auth header alternatives
