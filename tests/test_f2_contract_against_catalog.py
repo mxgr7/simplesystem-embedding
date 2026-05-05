@@ -1462,3 +1462,243 @@ class TestOpenAPIDocument:
             f"Metadata field drift: spec_only={spec_props - impl_props}, "
             f"impl_only={impl_props - spec_props}"
         )
+
+    def test_search_request_property_set_matches_implementation(self) -> None:
+        """SearchRequest properties on the spec must map 1:1 to the
+        pydantic model's field aliases. Catches *any* new field added
+        on either side without the matching update."""
+        from models import SearchRequest as ImplSearchRequest
+        spec_props = set(
+            OPENAPI_SPEC["components"]["schemas"]["SearchRequest"]["properties"].keys()
+        )
+        impl_props = {
+            f.alias or name for name, f in ImplSearchRequest.model_fields.items()
+        }
+        assert spec_props == impl_props, (
+            f"SearchRequest field drift: spec_only={spec_props - impl_props}, "
+            f"impl_only={impl_props - spec_props}"
+        )
+
+    def test_summaries_field_set_matches_implementation(self) -> None:
+        from models import Summaries as ImplSummaries
+        spec_props = set(
+            OPENAPI_SPEC["components"]["schemas"]["Summaries"]["properties"].keys()
+        )
+        impl_props = {
+            f.alias or name for name, f in ImplSummaries.model_fields.items()
+        }
+        assert spec_props == impl_props, (
+            f"Summaries field drift: spec_only={spec_props - impl_props}, "
+            f"impl_only={impl_props - spec_props}"
+        )
+
+    def test_summary_kind_enum_matches_implementation(self) -> None:
+        from models import SummaryKind as ImplSummaryKind
+        spec_enum = set(OPENAPI_SPEC["components"]["schemas"]["SummaryKind"]["enum"])
+        impl_enum = {m.value for m in ImplSummaryKind}
+        assert spec_enum == impl_enum, f"SummaryKind drift: {spec_enum ^ impl_enum}"
+
+    def test_search_mode_enum_matches_implementation(self) -> None:
+        from models import SearchMode as ImplSearchMode
+        spec_enum = set(OPENAPI_SPEC["components"]["schemas"]["SearchMode"]["enum"])
+        impl_enum = {m.value for m in ImplSearchMode}
+        assert spec_enum == impl_enum, f"SearchMode drift: {spec_enum ^ impl_enum}"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class R — Negative request bodies (sub-schema validation)
+# ──────────────────────────────────────────────────────────────────────
+
+class TestNegativeBodies:
+    def test_price_filter_without_currency_code_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(cvs=all_cvs, priceFilter={"min": 100, "max": 200})
+        r = search_api_app.post(search_path, json=body)
+        assert r.status_code == 422
+        assert_validation_error_valid(r.json())
+
+    def test_required_features_extra_field_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs, requiredFeatures=[
+            {"name": "x", "values": ["v"], "extraField": True},
+        ])
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_blocked_eclass_groups_extra_field_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs, blockedEClassVendorsFilters=[{
+            "vendorIds": [],
+            "eClassVersion": "ECLASS_5_1",
+            "blockedEClassGroups": [
+                {"eClassGroupCode": 1, "value": True, "extra": 1},
+            ],
+        }])
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_unknown_eclass_version_enum_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs, blockedEClassVendorsFilters=[{
+            "vendorIds": [],
+            "eClassVersion": "ECLASS_BANANA",
+            "blockedEClassGroups": [],
+        }])
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_selected_article_sources_extra_field_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs)
+        bad["selectedArticleSources"]["totallyMadeUp"] = []
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_summaries_unknown_kind_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs, summaries=["VENDORS", "BANANAS"])
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_legacy_explain_field_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """`explain` is a legacy ACL field that must NOT appear on the
+        ftsearch contract (§2.2 spec note: ftsearch returns `score`
+        per article, not `explanation`)."""
+        bad = make_body(cvs=all_cvs)
+        bad["explain"] = True
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_legacy_search_articles_by_field_rejected(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """`searchArticlesBy` is the legacy enum we dropped at this
+        layer (§2.1 — only STANDARD survives, enforced upstream by
+        the ACL)."""
+        bad = make_body(cvs=all_cvs)
+        bad["searchArticlesBy"] = "STANDARD"
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class S — Auth header alternatives
+# ──────────────────────────────────────────────────────────────────────
+
+class TestAuthHeaderAlternatives:
+    """Spec lists two equivalent auth headers: `X-API-Key` and
+    `Authorization: ApiKey <key>`. Both must work; both must reject
+    when wrong."""
+
+    @pytest.fixture()
+    def authed_app(self, all_cvs: list[str]) -> Iterator[tuple[TestClient, str]]:
+        from _pytest.monkeypatch import MonkeyPatch
+        mp = MonkeyPatch()
+        api_key = "test-key-zenith-alt"
+        mp.setenv("USE_DEDUP_TOPOLOGY", "1")
+        mp.setenv("MILVUS_ARTICLES_COLLECTION", ARTICLES_COLLECTION)
+        mp.setenv("EMBED_URL", "http://embed.invalid")
+        mp.setenv("MILVUS_URI", MILVUS_URI)
+        mp.setenv("API_KEY", api_key)
+        spec = importlib.util.spec_from_file_location(
+            "search_api_main_for_f2_auth_alt", SEARCH_API_DIR / "main.py",
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["search_api_main_for_f2_auth_alt"] = mod
+        try:
+            spec.loader.exec_module(mod)
+            with TestClient(mod.app) as client:
+                mod.app.state.embed.embed = AsyncMock(return_value=[_stable_vector()])
+                yield client, api_key
+        finally:
+            mp.undo()
+            sys.modules.pop("search_api_main_for_f2_auth_alt", None)
+
+    def test_authorization_apikey_form_accepted(
+        self, authed_app: tuple[TestClient, str], all_cvs: list[str]
+    ) -> None:
+        client, api_key = authed_app
+        r = client.post(
+            f"/{OFFERS_COLLECTION}/_search",
+            json=make_body(cvs=all_cvs),
+            headers={"Authorization": f"ApiKey {api_key}"},
+        )
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
+    def test_x_api_key_header_form_accepted(
+        self, authed_app: tuple[TestClient, str], all_cvs: list[str]
+    ) -> None:
+        client, api_key = authed_app
+        r = client.post(
+            f"/{OFFERS_COLLECTION}/_search",
+            json=make_body(cvs=all_cvs),
+            headers={"X-API-Key": api_key},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_wrong_api_key_rejected(
+        self, authed_app: tuple[TestClient, str], all_cvs: list[str]
+    ) -> None:
+        client, _ = authed_app
+        r = client.post(
+            f"/{OFFERS_COLLECTION}/_search",
+            json=make_body(cvs=all_cvs),
+            headers={"X-API-Key": "totally-wrong"},
+        )
+        assert r.status_code == 401
+
+    def test_metrics_endpoint_bypasses_auth(
+        self, authed_app: tuple[TestClient, str]
+    ) -> None:
+        """Spec carves out `/metrics`, `/openapi.json`, `/openapi.yaml`,
+        `/docs` from the API-key requirement."""
+        client, _ = authed_app
+        r = client.get("/metrics")
+        assert r.status_code == 200, r.text
+        assert "text/plain" in r.headers.get("content-type", "")
+
+    def test_openapi_yaml_endpoint_serves_spec(
+        self, authed_app: tuple[TestClient, str]
+    ) -> None:
+        client, _ = authed_app
+        r = client.get("/openapi.yaml")
+        assert r.status_code == 200, r.text
+        # Ground-truth comparison against the file on disk.
+        served = r.text.strip()
+        on_disk = OPENAPI_PATH.read_text().strip()
+        assert served == on_disk, "GET /openapi.yaml drifted from openapi.yaml file"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Class T — pageSize=0 sanity
+# ──────────────────────────────────────────────────────────────────────
+
+class TestPageSizeZero:
+    """Per spec, `pageSize=0` is allowed (`minimum: 0`). The article
+    list must come back empty, but `hitCount` should still be the real
+    total — not artificially zeroed by short-circuit logic."""
+
+    def test_page_size_zero_keeps_real_hit_count(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        normal = search_api_app.post(f"{search_path}?pageSize=10", json=body)
+        zero = search_api_app.post(f"{search_path}?pageSize=0", json=body)
+        assert normal.status_code == 200 and zero.status_code == 200
+        assert zero.json()["articles"] == []
+        # Both requests scope to the same filtered set; pageSize only
+        # affects the page slice. hitCount must agree.
+        assert (
+            zero.json()["metadata"]["hitCount"]
+            == normal.json()["metadata"]["hitCount"]
+        )
