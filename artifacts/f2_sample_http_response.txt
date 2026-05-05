@@ -1,0 +1,480 @@
+HTTP/1.1 200 OK
+date: Tue, 05 May 2026 19:20:06 GMT
+server: uvicorn
+content-length: 4938
+content-type: application/json
+
+{
+  "articles": [
+    {
+      "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:002b162a-f9fe-48b1-a55f-a56f536f02b8",
+      "score": 0.0
+    },
+    {
+      "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:03999f4b-24ed-4a03-bb32-32ad7cb509f4",
+      "score": 0.0
+    },
+    {
+      "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:0a6b9840-2784-49d9-8756-26adb0e3cc00",
+      "score": 0.0
+    },
+    {
+      "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:24286033-261d-4bc8-a7c4-50b3c1fe6e34",
+      "score": 0.0
+    },
+    {
+      "articleId": "01054f55-c50c-452b-8822-ee11be4788c9:MTAxNzQ2ODEw:50184ade-2666-4b64-9bc6-02abdca92d70",
+      "score": 0.0
+    }
+  ],
+  "summaries": {
+    "vendorSummaries": [
+      {
+        "vendorId": "01054f55-c50c-452b-8822-ee11be4788c9",
+        "count": 631
+      }
+    ],
+    "manufacturerSummaries": [
+      {
+        "name": "Soennecken",
+        "count": 64
+      },
+      {
+        "name": "C + P Möbelsysteme",
+        "count": 62
+      },
+      {
+        "name": "LEITZ ACCO Brands",
+        "count": 51
+      },
+      {
+        "name": "Soennecken eG",
+        "count": 34
+      },
+      {
+        "name": "Legamaster",
+        "count": 24
+      },
+      {
+        "name": "Hammerbacher GmbH",
+        "count": 23
+      },
+      {
+        "name": "BI-SILQUE-Produtos de",
+        "count": 18
+      },
+      {
+        "name": "PK Beratung und Beteiligung GmbH",
+        "count": 16
+      },
+      {
+        "name": "Conrad Electronic SE",
+        "count": 15
+      },
+      {
+        "name": "HERMA",
+        "count": 13
+      },
+      {
+        "name": "Magnetoplan Holtz",
+        "count": 11
+      },
+      {
+        "name": "Scholz Regalsysteme GmbH",
+        "count": 11
+      },
+      {
+        "name": "Your Green Print",
+        "count": 11
+      },
+      {
+        "name": "Söhngen",
+        "count": 10
+      },
+      {
+        "name": "Your Green Mix",
+        "count": 10
+      },
+      {
+        "name": "Lexmark",
+        "count": 9
+      },
+      {
+        "name": "EPIC",
+        "count": 8
+      },
+      {
+        "name": "C+P Möbelsysteme",
+        "count": 7
+      },
+      {
+        "name": "MAUL",
+        "count": 7
+      },
+      {
+        "name": "Beiersdorf",
+        "count": 6
+      },
+      {
+        "name": "Gebr. Schulte GmbH & Co. KG",
+        "count": 6
+      },
+      {
+        "name": "HERMA GmbH",
+        "count": 6
+      },
+      {
+        "name": "Robert Bosch GmbH",
+        "count": 6
+      },
+      {
+        "name": "Sigel",
+        "count": 6
+      },
+      {
+        "name": "HP Inc.",
+        "count": 5
+      },
+      {
+        "name": "MAPA, SAS",
+        "count": 5
+      },
+      {
+        "name": "Miltex GmbH",
+        "count": 5
+      },
+      {
+        "name": "Papierverarbeitung Gnadau",
+        "count": 5
+      },
+      {
+        "name": "WEPA Professional",
+        "count": 5
+      },
+      {
+        "name": "Albert & Co",
+        "count": 4
+      },
+      {
+        "name": "Avery Zweckform",
+        "count": 4
+      },
+      {
+        "name": "BERNSTEIN-Werkzeugfabrik Steinrücke GmbH",
+        "count": 4
+      },
+      {
+        "name": "BIG Arbeitsschutz",
+        "count": 4
+      },
+      {
+        "name": "Bi-silque",
+        "count": 4
+      },
+      {
+        "name": "Cederroth AB",
+        "count": 4
+      },
+      {
+        "name": "EPIC Handelsgesellschaft mbH",
+        "count": 4
+      },
+      {
+        "name": "Erwin Halder KG",
+        "count": 4
+      },
+      {
+        "name": "Falken",
+        "count": 4
+      },
+      {
+        "name": "Franken",
+        "count": 4
+      },
+      {
+        "name": "GESIPA-Blindniettechnik GmbH Solid Riveting",
+        "count": 4
+      },
+      {
+        "name": "HAMA",
+        "count": 4
+      },
+      {
+        "name": "KYOCERA Document Solutions",
+        "count": 4
+      },
+      {
+        "name": "Makita",
+        "count": 4
+      },
+      {
+        "name": "Orkla Wound Care",
+        "count": 4
+      },
+      {
+        "name": "SC Johnson Professional GmbH",
+        "count": 4
+      },
+      {
+        "name": "SCA Hygiene Products",
+        "count": 4
+      },
+      {
+        "name": "Showdown Displays",
+        "count": 4
+      },
+      {
+        "name": "Veba BEST",
+        "count": 4
+      },
+      {
+        "name": "Veloflex",
+        "count": 4
+      },
+      {
+        "name": "BakkerElkhuizen International B.V.",
+        "count": 3
+      },
+      {
+        "name": "Canon",
+        "count": 3
+      },
+      {
+        "name": "Lexmark Deutschland GmbH",
+        "count": 3
+      },
+      {
+        "name": "UHU",
+        "count": 3
+      },
+      {
+        "name": "UVEX ARBEITSSCHUTZ GMBH",
+        "count": 3
+      },
+      {
+        "name": "Werner Dorsch",
+        "count": 3
+      },
+      {
+        "name": "pro-bau-tec",
+        "count": 3
+      },
+      {
+        "name": "3M",
+        "count": 2
+      },
+      {
+        "name": "BIG Arbeitsschutz GmbH",
+        "count": 2
+      },
+      {
+        "name": "Baier & Schneider",
+        "count": 2
+      },
+      {
+        "name": "BakkerElkhuizen",
+        "count": 2
+      },
+      {
+        "name": "Biella-Falken",
+        "count": 2
+      },
+      {
+        "name": "Essity Germany",
+        "count": 2
+      },
+      {
+        "name": "Fripa Papierfabrik",
+        "count": 2
+      },
+      {
+        "name": "HP",
+        "count": 2
+      },
+      {
+        "name": "HP Deutschland",
+        "count": 2
+      },
+      {
+        "name": "Kimberly-Clark",
+        "count": 2
+      },
+      {
+        "name": "Lapp",
+        "count": 2
+      },
+      {
+        "name": "Makita Corporation",
+        "count": 2
+      },
+      {
+        "name": "Metsä Tissue",
+        "count": 2
+      },
+      {
+        "name": "Miltex",
+        "count": 2
+      },
+      {
+        "name": "PAGNA GmbH & Co. KG",
+        "count": 2
+      },
+      {
+        "name": "Robert Bosch Power Tools GmbH",
+        "count": 2
+      },
+      {
+        "name": "SC Johnson",
+        "count": 2
+      },
+      {
+        "name": "Sigel GmbH",
+        "count": 2
+      },
+      {
+        "name": "Tarifold",
+        "count": 2
+      },
+      {
+        "name": "W. Söhngen",
+        "count": 2
+      },
+      {
+        "name": "Wilhelm Klein GmbH",
+        "count": 2
+      },
+      {
+        "name": "A.W. Faber-Castell",
+        "count": 1
+      },
+      {
+        "name": "ALCO-Albert",
+        "count": 1
+      },
+      {
+        "name": "Baier & Schneider GmbH & Co. KG",
+        "count": 1
+      },
+      {
+        "name": "Brother",
+        "count": 1
+      },
+      {
+        "name": "Canon Deutschland GmbH",
+        "count": 1
+      },
+      {
+        "name": "Dataflex Deutschland GmbH",
+        "count": 1
+      },
+      {
+        "name": "Epson",
+        "count": 1
+      },
+      {
+        "name": "Erwin Halder",
+        "count": 1
+      },
+      {
+        "name": "FILTRAL",
+        "count": 1
+      },
+      {
+        "name": "Filtral",
+        "count": 1
+      },
+      {
+        "name": "GARDENA",
+        "count": 1
+      },
+      {
+        "name": "GESIPA SFS Group Germany",
+        "count": 1
+      },
+      {
+        "name": "Gebol GmbH",
+        "count": 1
+      },
+      {
+        "name": "Gebol Handelsgesellschaft",
+        "count": 1
+      },
+      {
+        "name": "Gebr. Schulte",
+        "count": 1
+      },
+      {
+        "name": "Helit",
+        "count": 1
+      },
+      {
+        "name": "KMP AG",
+        "count": 1
+      },
+      {
+        "name": "KMP PrintTechnik GmbH",
+        "count": 1
+      },
+      {
+        "name": "KYOCERA",
+        "count": 1
+      },
+      {
+        "name": "Korntex GmbH",
+        "count": 1
+      },
+      {
+        "name": "MUNK",
+        "count": 1
+      },
+      {
+        "name": "Mapa",
+        "count": 1
+      },
+      {
+        "name": "Melitta Europa",
+        "count": 1
+      },
+      {
+        "name": "OVIBELL",
+        "count": 1
+      },
+      {
+        "name": "OVIBELL Pflanzen, Deko und Freizeit GmbH & Co. KG",
+        "count": 1
+      },
+      {
+        "name": "SC Johnson Professional",
+        "count": 1
+      },
+      {
+        "name": "WEPA Category Solutions",
+        "count": 1
+      },
+      {
+        "name": "korntex",
+        "count": 1
+      },
+      {
+        "name": "pro-bau-tec Profi-Bau-Technik GmbH",
+        "count": 1
+      }
+    ],
+    "featureSummaries": [],
+    "pricesSummary": [],
+    "categoriesSummary": null,
+    "eClass5Categories": null,
+    "eClass7Categories": null,
+    "s2ClassCategories": null,
+    "eClassesAggregations": []
+  },
+  "metadata": {
+    "page": 1,
+    "pageSize": 5,
+    "pageCount": 127,
+    "term": "schraube",
+    "hitCount": 631,
+    "recallClipped": false,
+    "hitCountClipped": false
+  }
+}
