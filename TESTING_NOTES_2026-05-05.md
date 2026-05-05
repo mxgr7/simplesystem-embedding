@@ -53,4 +53,41 @@ scenarios.
 
 ## Run log
 
-(Populated as we execute the suite.)
+### Iteration 1 — `nullable: true` on `$ref` fields
+
+Suite stopped at `TestValidator.test_envelope_with_articles_and_summaries`
+with the error:
+
+```
+- ['summaries', 'categoriesSummary']: None is not of type 'object'
+- ['summaries', 'eClass5Categories']:  None is not of type 'object'
+- ['summaries', 'eClass7Categories']:  None is not of type 'object'
+- ['summaries', 's2ClassCategories']:  None is not of type 'object'
+```
+
+**Root cause:** OpenAPI 3.0 lets you write `{ $ref: '…/X', nullable: true }`
+to mean "X or null". My `_openapi_to_jsonschema` converter only handles
+`nullable: true` when the schema has a literal `type:` field — it
+doesn't expand the `$ref + nullable` shape into `anyOf: [$ref, {type:null}]`.
+
+**Fix:** in `_openapi_to_jsonschema.walk()`, when a node has both
+`$ref` and `nullable: true`, emit `anyOf: [{ $ref: <ref> }, { type:
+"null" }]` instead of leaving the bare `$ref` alone.
+
+### Iteration 2 — `Metadata.recallClipped` / `hitCountClipped` missing from spec
+
+```
+- ['metadata']: Additional properties are not allowed
+  ('hitCountClipped', 'recallClipped' were unexpected)
+```
+
+**Root cause:** The `Metadata` pydantic model in
+`search-api/models.py` declares `recallClipped: bool = false` and
+`hitCountClipped: bool = false` — surfaced by F4/F9 and emitted on
+every response. The OpenAPI YAML's `Metadata` schema never grew the
+two fields. Real spec drift — the OpenAPI is documented (in `main.py`
+header) as the contract source of truth.
+
+**Fix:** add both fields to `components.schemas.Metadata` in
+`search-api/openapi.yaml`, with the same description text the
+pydantic model carries.

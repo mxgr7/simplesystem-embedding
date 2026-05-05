@@ -1019,6 +1019,26 @@ components:
           type: string
           nullable: true
         hitCount: { type: integer, minimum: 0 }
+        recallClipped:
+          type: boolean
+          default: false
+          description: |
+            F9 routing: set when Path B's bounded probe overflows
+            `PATH_B_HASH_LIMIT` and the request falls back to Path A.
+            The response page may be short of `pageSize` because the
+            article-ANN top-k doesn't fully overlap the filter-matching
+            set. Callers can surface a "results may be incomplete"
+            notice or widen the filter.
+        hitCountClipped:
+          type: boolean
+          default: false
+          description: |
+            F4: set when the count(*) pass hit `HITCOUNT_CAP` (or
+            `PATH_B_HASH_LIMIT` in Path B's bounded probe) and the
+            true total is unknown beyond the cap. `hitCount` carries
+            the cap value as a lower bound; callers should display
+            ">= hitCount" rather than "exactly hitCount" when this
+            fires.
 
     SearchResponse:
       type: object
