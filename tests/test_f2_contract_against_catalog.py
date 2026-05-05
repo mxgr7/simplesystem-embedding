@@ -2107,6 +2107,64 @@ class TestOpenAPIDocument:
                 + "\n  ".join(e.message for e in errors)
             )
 
+    def test_pydantic_search_response_default_dump_validates(self) -> None:
+        """Build the empty/default `SearchResponse` via the pydantic
+        model, dump it through the wire alias serializer, and validate
+        against the OpenAPI spec. This bridges the impl side
+        (models.py) and the spec side (openapi.yaml) — any drift in
+        either direction (alias renaming, default-empty changes,
+        new required fields) fails this test."""
+        from models import SearchResponse, Summaries, Metadata
+        sr = SearchResponse(
+            articles=[],
+            summaries=Summaries(),
+            metadata=Metadata(
+                page=1, pageSize=10, pageCount=0, hitCount=0,
+            ),
+        )
+        encoded = sr.model_dump(by_alias=True)
+        assert_search_response_valid(encoded)
+
+    def test_pydantic_search_response_full_dump_validates(self) -> None:
+        """Same idea, with every optional field populated. Catches
+        cases where a default-empty dump would pass but a populated
+        dump uncovers a non-spec field."""
+        from models import (
+            Article, CategoriesSummary, EClassBucket, EClassCategories,
+            EClassesAggregationCount, FeatureSummary, FeatureValueCount,
+            Metadata, NameCount, PricesSummary, SearchResponse,
+            Summaries, VendorSummary,
+        )
+        sr = SearchResponse(
+            articles=[Article(articleId="v:1:cv", score=0.42)],
+            summaries=Summaries(
+                vendor_summaries=[VendorSummary(vendorId="v1", count=3)],
+                manufacturer_summaries=[NameCount(name="Würth", count=2)],
+                feature_summaries=[FeatureSummary(
+                    name="Spannung", count=4,
+                    values=[FeatureValueCount(value="18V", count=2),
+                            FeatureValueCount(value="36V", count=1)],
+                )],
+                prices_summary=[PricesSummary(min=1.5, max=99.0, currencyCode="EUR")],
+                categories_summary=CategoriesSummary(
+                    currentCategoryPathElements=["Werkzeug"], same_level=[], children=[],
+                ),
+                eclass5_categories=EClassCategories(
+                    selectedEClassGroup=23110101,
+                    same_level=[EClassBucket(group=23110102, count=1)],
+                    children=[],
+                ),
+                eclasses_aggregations=[EClassesAggregationCount(id="agg1", count=5)],
+            ),
+            metadata=Metadata(
+                page=1, pageSize=10, pageCount=2, hitCount=15,
+                term="schraube",
+                recallClipped=False, hitCountClipped=False,
+            ),
+        )
+        encoded = sr.model_dump(by_alias=True)
+        assert_search_response_valid(encoded)
+
     def test_every_path_response_references_declared_schemas(self) -> None:
         """Each documented response on each path operation must point
         to a schema (no stub placeholders)."""
