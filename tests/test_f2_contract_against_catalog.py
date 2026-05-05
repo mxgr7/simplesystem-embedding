@@ -591,6 +591,27 @@ class TestSearchModes:
         assert_search_response_valid(body)
         assert body["articles"] == []
 
+    def test_hits_only_returns_empty_summaries_even_when_requested(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Spec note on Summaries: 'For HITS_ONLY mode, the envelope is
+        emitted with all sub-fields empty/null'. routing.py confirms:
+        summaries are computed only when mode is SUMMARIES_ONLY or BOTH,
+        regardless of the `summaries` list. Asking for VENDORS in
+        HITS_ONLY mode must NOT populate them — that would silently
+        leak the work HITS_ONLY skips."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=5",
+            json=make_body(cvs=all_cvs, searchMode="HITS_ONLY",
+                           vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                           summaries=["VENDORS", "MANUFACTURERS"]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["summaries"].get("vendorSummaries", []) == []
+        assert body["summaries"].get("manufacturerSummaries", []) == []
+
     def test_both_envelope(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
@@ -929,6 +950,19 @@ class TestPagination:
         else:
             expected = (md["hitCount"] + page_size - 1) // page_size
             assert md["pageCount"] == expected, f"pageCount {md['pageCount']} != ceil({md['hitCount']}/{page_size}) = {expected}"
+
+    def test_same_request_is_idempotent(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Same request, twice, should yield byte-identical envelopes
+        (modulo timing fields, none on the wire) — guards against
+        non-deterministic ordering, randomness leaking into the path,
+        or cache-related behaviour deltas."""
+        body = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        r1 = search_api_app.post(f"{search_path}?pageSize=10&sort=articleId,asc", json=body)
+        r2 = search_api_app.post(f"{search_path}?pageSize=10&sort=articleId,asc", json=body)
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert r1.json() == r2.json(), "non-idempotent response"
 
     def test_pages_do_not_overlap(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
