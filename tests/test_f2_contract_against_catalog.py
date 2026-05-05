@@ -524,6 +524,21 @@ class TestParameters:
         # fires first). We accept anything non-2xx.
         assert r.status_code >= 400
 
+    def test_get_method_rejected(
+        self, search_api_app: TestClient, search_path: str
+    ) -> None:
+        """The endpoint is POST-only per spec; GET should 405."""
+        r = search_api_app.get(search_path)
+        assert r.status_code == 405
+
+    def test_unknown_path_returns_404(
+        self, search_api_app: TestClient
+    ) -> None:
+        r = search_api_app.post(
+            f"/{OFFERS_COLLECTION}/no_such_route", json={}
+        )
+        assert r.status_code == 404
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Class C — Body validation
