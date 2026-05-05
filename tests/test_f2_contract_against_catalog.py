@@ -1595,6 +1595,55 @@ class TestBehaviour:
         assert r1.status_code == 200 and r2.status_code == 200
         assert r1.json()["metadata"]["hitCount"] == r2.json()["metadata"]["hitCount"]
 
+    def test_vendor_filter_with_quotes_in_value_does_not_crash(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """A vendor ID containing a literal `"` would, if naively
+        templated, escape the IN clause and break the Milvus expr.
+        Vendor IDs are UUIDs in real life so this never happens
+        organically — but the implementation must still defend
+        against it. Verify the request returns 200 (or 400/422)
+        without exploding into a 500."""
+        bogus = 'evil"vendor"id'
+        body = make_body(cvs=all_cvs, vendorIdsFilter=[bogus])
+        r = search_api_app.post(search_path, json=body)
+        # The point is no 500 / Milvus-expression-parse-error leak.
+        assert r.status_code in (200, 400, 422), (
+            f"unexpected {r.status_code}: {r.text}"
+        )
+        if r.status_code == 200:
+            assert_search_response_valid(r.json())
+
+    def test_relationship_with_quote_does_not_crash(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        body = make_body(
+            cvs=all_cvs,
+            accessoriesForArticleNumber='" or 1=1; --',
+        )
+        r = search_api_app.post(search_path, json=body)
+        assert r.status_code in (200, 400, 422)
+        if r.status_code == 200:
+            assert_search_response_valid(r.json())
+            # Injection-shaped article number does not legitimately
+            # match anything in the catalog.
+            assert r.json()["articles"] == []
+
+    def test_category_path_with_separator_chars(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """The category-path encoder uses U+00A6 as the separator
+        with U+007C as the escape. A user-provided element containing
+        either character must be escaped, not crash the encoder."""
+        body = make_body(
+            cvs=all_cvs,
+            currentCategoryPathElements=["A¦B", "C|D"],  # both special chars
+        )
+        r = search_api_app.post(search_path, json=body)
+        assert r.status_code in (200, 400)
+        if r.status_code == 200:
+            assert_search_response_valid(r.json())
+
     def test_negative_eclass_code_returns_zero_hits(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
