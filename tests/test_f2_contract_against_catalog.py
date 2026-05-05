@@ -1800,6 +1800,27 @@ class TestSummaryContent:
                 f"manufacturerSummaries missing the filtered manufacturer: {names}"
             )
 
+    def test_all_summary_kinds_at_once_returns_valid_envelope(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Every SummaryKind in one request should not break the
+        envelope. This is the kitchen-sink test — useful for catching
+        cross-bucket interference (e.g., one summary stomping on
+        another's state)."""
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            summaries=[
+                "CATEGORIES", "ECLASS5", "ECLASS7", "S2CLASS",
+                "VENDORS", "MANUFACTURERS", "FEATURES", "PRICES",
+                "PLATFORM_CATEGORIES", "ECLASS5SET",
+            ],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert_search_response_valid(out)
+
     def test_summary_bucket_counts_do_not_exceed_total(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
@@ -2039,6 +2060,29 @@ class TestNegativeBodies:
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
         bad = make_body(cvs=all_cvs, summaries=["VENDORS", "BANANAS"])
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_required_features_values_must_be_strings(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs, requiredFeatures=[
+            {"name": "x", "values": [1, 2, 3]},
+        ])
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_eclasses_filter_must_be_integers(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs, eClassesFilter=["not-an-int"])
+        r = search_api_app.post(search_path, json=bad)
+        assert r.status_code == 422
+
+    def test_vendor_ids_filter_must_be_strings(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        bad = make_body(cvs=all_cvs, vendorIdsFilter=[42])
         r = search_api_app.post(search_path, json=bad)
         assert r.status_code == 422
 
