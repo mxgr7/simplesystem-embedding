@@ -2195,6 +2195,33 @@ class TestOpenAPIDocument:
         encoded = sr.model_dump(by_alias=True)
         assert_search_response_valid(encoded)
 
+    def test_wire_response_round_trips_through_pydantic_model(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """A live wire response, fed back through the SearchResponse
+        pydantic model, must reconstruct without loss. Catches
+        serializer/deserializer asymmetry: if a field round-trips
+        from impl→wire→impl with a value change, the wire is lying
+        about something."""
+        from models import SearchResponse
+        body = make_body(
+            cvs=all_cvs, searchMode="BOTH",
+            vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            summaries=["VENDORS", "MANUFACTURERS"],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=5", json=body)
+        assert r.status_code == 200, r.text
+        wire = r.json()
+        # populate_by_name=True + validate by alias.
+        reconstructed = SearchResponse.model_validate(wire)
+        re_dumped = reconstructed.model_dump(by_alias=True)
+        # Note: re-dumping may add default-suppressed keys; we compare
+        # the relevant top-level invariants only.
+        assert re_dumped["articles"] == wire["articles"]
+        assert re_dumped["metadata"]["hitCount"] == wire["metadata"]["hitCount"]
+        assert re_dumped["metadata"]["page"] == wire["metadata"]["page"]
+        assert re_dumped["metadata"]["pageSize"] == wire["metadata"]["pageSize"]
+
     def test_pydantic_search_response_full_dump_validates(self) -> None:
         """Same idea, with every optional field populated. Catches
         cases where a default-empty dump would pass but a populated
