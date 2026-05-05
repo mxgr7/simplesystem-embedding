@@ -91,3 +91,44 @@ header) as the contract source of truth.
 **Fix:** add both fields to `components.schemas.Metadata` in
 `search-api/openapi.yaml`, with the same description text the
 pydantic model carries.
+
+### Iteration 3 — `queryString` is the legacy ACL field name; F2 uses `query`
+
+```
+{"detail":[{"type":"extra_forbidden","loc":["body","queryString"], …}]}
+```
+
+**Root cause:** test bug — I copied a legacy ACL request shape that
+uses `queryString`. The F2 ftsearch contract uses `query`.
+
+**Fix:** rename `queryString` → `query` in the test bodies.
+
+### Iteration 4 — `pageSize` is a query param, not a body field
+
+Test sent `pageSize` inside the JSON body. F2 contract puts pagination
+exclusively on the query string (parameters block). Fixed by moving
+to `?pageSize=…`.
+
+### Iteration 5 — green at 88 tests
+
+After the spec fix and the two test bugs, the suite was 88-green.
+Subsequent commits added five more classes (auth alternatives,
+negative bodies, behaviour, summary content, deeper summaries,
+minimal-body). Stable at 111 passing.
+
+## State of adjacent suites
+
+Sanity-ran the broader test sweep once the F2 file went green. The
+following pre-existing failures are **unrelated** to F2 and predate
+this work:
+
+* `test_offers_collection_schema` — depends on a Milvus alias
+  `offers_v_alias` that no longer exists in the running cluster.
+* `test_duckdb_*`, `test_index_*`, `test_projection`, `test_tei_cache`
+  — depend on tooling/parquet fixtures unrelated to the F2 path.
+* `test_catalog_benchmark` — pre-existing tokenizer-stub bug in
+  `infer.py`.
+
+F2/ACL-adjacent suites (search-api contract, search-dedup integration,
+all ACL acceptance + skeleton + integration tests + the new F2 file)
+all pass: 192 passed, 27 skipped, 0 failed.
