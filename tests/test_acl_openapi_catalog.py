@@ -977,6 +977,80 @@ class TestCoreSortiment:
 # 15. IDEMPOTENCY & STABILITY
 # ===========================================================================
 
+# ===========================================================================
+# 16. CROSS-CUTTING BEHAVIORAL CHECKS
+# ===========================================================================
+
+class TestBehavior:
+    def test_vendor_summary_count_equals_hitcount(self):
+        body = _post_ok(_base_body(summaries=["VENDORS"]))
+        vsum = sum(v["count"] for v in body["summaries"]["vendorSummaries"])
+        assert vsum == body["metadata"]["hitCount"]
+
+    def test_price_filter_narrows_with_price_list(self):
+        sas = {
+            "closedCatalogVersionIds": [],
+            "catalogVersionIdsOrderedByPreference": [CV_EUR],
+            "sourcePriceListIds": PRICE_LIST_IDS_EUR,
+        }
+        all_results = _post_ok(_base_body(selectedArticleSources=sas))
+        filtered = _post_ok(_base_body(
+            selectedArticleSources=sas,
+            priceFilter={"min": 0, "max": 1000, "currencyCode": "EUR"},
+        ))
+        assert filtered["metadata"]["hitCount"] < all_results["metadata"]["hitCount"]
+
+    def test_delivery_time_filter_narrows(self):
+        all_results = _post_ok(_base_body())
+        filtered = _post_ok(_base_body(maxDeliveryTime=1))
+        assert filtered["metadata"]["hitCount"] < all_results["metadata"]["hitCount"]
+
+    def test_combined_filters_are_and_composed(self):
+        sas = {
+            "closedCatalogVersionIds": [],
+            "catalogVersionIdsOrderedByPreference": [CV_EUR],
+            "sourcePriceListIds": PRICE_LIST_IDS_EUR,
+        }
+        vendor_only = _post_ok(_base_body(
+            selectedArticleSources=sas,
+            vendorIdsFilter=[VENDOR_MAJOR],
+        ))
+        vendor_and_price = _post_ok(_base_body(
+            selectedArticleSources=sas,
+            vendorIdsFilter=[VENDOR_MAJOR],
+            priceFilter={"min": 0, "max": 1000, "currencyCode": "EUR"},
+        ))
+        assert vendor_and_price["metadata"]["hitCount"] <= vendor_only["metadata"]["hitCount"]
+
+    def test_query_with_price_sort_no_source_price_lists_returns_zero_articles(self):
+        body = _post_ok(_base_body(), sort=["price,asc"], page_size=5)
+        assert body["articles"] == []
+        assert body["metadata"]["hitCount"] > 0
+
+    def test_summaries_only_hitcount_matches_both_hitcount(self):
+        sas = {
+            "closedCatalogVersionIds": [],
+            "catalogVersionIdsOrderedByPreference": [CV_EUR],
+        }
+        both = _post_ok(_base_body(
+            searchMode="BOTH", selectedArticleSources=sas, summaries=["VENDORS"],
+        ))
+        summaries = _post_ok(_base_body(
+            searchMode="SUMMARIES_ONLY", selectedArticleSources=sas, summaries=["VENDORS"],
+        ))
+        assert both["metadata"]["hitCount"] == summaries["metadata"]["hitCount"]
+
+    def test_page_beyond_range_has_correct_metadata(self):
+        body = _post_ok(_base_body(), page=9999, page_size=10)
+        assert body["articles"] == []
+        assert body["metadata"]["hitCount"] > 0
+        assert body["metadata"]["pageCount"] > 0
+
+
+# ===========================================================================
+# 17. IDEMPOTENCY & STABILITY
+# ===========================================================================
+
 class TestStability:
     def test_same_request_same_hitcount(self):
         body = _base_body()

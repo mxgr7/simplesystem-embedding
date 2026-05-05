@@ -311,3 +311,25 @@ articles because HNSW always finds nearest neighbors.
 `MILVUS_ARTICLES_COLLECTION` env var is used as the URL path collection
 for ftsearch calls. In dedup topology, this must be the *offers*
 collection. Same env var name means different things in the two services.
+
+### Iteration 2: review-driven improvements (89 -> 100 tests)
+
+Applied 15 review findings:
+- Sort tests verify asc/desc produce different orders
+- Filter tests compare against unfiltered baselines
+- articleIdsFilter asserts exclusivity
+- Added missing spec features: sparePartsForArticleNumber, currentEClass7Code,
+  currentS2ClassCode, PLATFORM_CATEGORIES, empty queryString, pageSize=500
+- Sub-schema additionalProperties: false tested for selectedArticleSources,
+  priceFilter, FeatureFilter
+
+### Iteration 3: behavioral cross-checks (100 -> 107 tests)
+
+Added semantic/behavioral tests beyond shape validation:
+- Vendor summary count equals hitCount
+- Price filter narrows results (strict `<`)
+- Delivery time filter narrows results (strict `<`)
+- Combined filters are AND-composed
+- Price sort without sourcePriceListIds returns zero articles but nonzero hitCount
+- SUMMARIES_ONLY hitCount matches BOTH hitCount
+- Page beyond range has correct nonzero metadata
