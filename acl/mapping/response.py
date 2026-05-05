@@ -50,7 +50,10 @@ def _to_legacy_article_id(ftsearch_id: str) -> str:
     """
     parts = ftsearch_id.split(":")
     if len(parts) == 3:
-        vendor_uuid = uuid.UUID(parts[0])
+        try:
+            vendor_uuid = uuid.UUID(parts[0])
+        except ValueError:
+            return ftsearch_id
         return f"{_uuid_to_friendly(vendor_uuid)}:{parts[1]}"
     return ftsearch_id
 
