@@ -1329,6 +1329,51 @@ class TestAuthAndConcurrency:
             mp.undo()
             sys.modules.pop("search_api_main_for_f2_hitcap", None)
 
+    def test_recall_clipped_when_path_b_overflows(self, all_cvs: list[str]) -> None:
+        """With PATH_B_HASH_LIMIT=1 and a permissive offer filter (CV
+        scope only, which always has > 1 distinct article_hash), the
+        Path B probe overflows and the dispatcher falls back to Path
+        A with `recallClipped=true` and `hitCountClipped=true`."""
+        from _pytest.monkeypatch import MonkeyPatch
+        mp = MonkeyPatch()
+        mp.setenv("USE_DEDUP_TOPOLOGY", "1")
+        mp.setenv("MILVUS_ARTICLES_COLLECTION", ARTICLES_COLLECTION)
+        mp.setenv("EMBED_URL", "http://embed.invalid")
+        mp.setenv("MILVUS_URI", MILVUS_URI)
+        mp.setenv("API_KEY", "")
+        # `path_b_hash_limit + 1` is the probe fetch ceiling — picking
+        # `0` makes the probe fetch exactly 1 row, after which any
+        # distinct-hash count > 0 forces overflow. Using `1` was
+        # data-dependent (the first two probe rows might share a hash
+        # and not overflow).
+        mp.setenv("PATH_B_HASH_LIMIT", "0")
+        spec = importlib.util.spec_from_file_location(
+            "search_api_main_for_f2_recall", SEARCH_API_DIR / "main.py",
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["search_api_main_for_f2_recall"] = mod
+        try:
+            spec.loader.exec_module(mod)
+            with TestClient(mod.app) as client:
+                mod.app.state.embed.embed = AsyncMock(return_value=[_stable_vector()])
+                r = client.post(
+                    f"/{OFFERS_COLLECTION}/_search",
+                    json=make_body(
+                        cvs=all_cvs,
+                        vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+                    ),
+                )
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert_search_response_valid(body)
+                assert body["metadata"]["recallClipped"] is True, body["metadata"]
+                assert body["metadata"]["hitCountClipped"] is True, body["metadata"]
+                assert body["metadata"]["hitCount"] == 0, body["metadata"]
+        finally:
+            mp.undo()
+            sys.modules.pop("search_api_main_for_f2_recall", None)
+
     def test_concurrency_gate_returns_503(self, all_cvs: list[str]) -> None:
         """Boot with MAX_CONCURRENT_SEARCHES=0 to flip the gate
         permanently-exhausted (the gate returns 503 when inflight
