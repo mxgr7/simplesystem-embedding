@@ -333,3 +333,40 @@ Added semantic/behavioral tests beyond shape validation:
 - Price sort without sourcePriceListIds returns zero articles but nonzero hitCount
 - SUMMARIES_ONLY hitCount matches BOTH hitCount
 - Page beyond range has correct nonzero metadata
+
+### Red-team v1: 41 tests exposing 9 ACL validation bugs (all fixed)
+
+Launched adversarial red-team subagent to find tests that fail. Found 9 bug categories:
+
+1. **String→boolean coercion** (18 tests): `explain="yes"` accepted — Pydantic lax mode
+2. **Int→boolean coercion** (4 tests): `explain=0` accepted
+3. **Bool→integer coercion** (2 tests): `maxDeliveryTime=True` accepted
+4. **String→integer coercion** (5 tests): `maxDeliveryTime="0"` accepted
+5. **Bool in priceFilter.min** (1 test): `priceFilter.min=True` accepted
+6. **Float→integer coercion** (1 test): `currentEClass5Code=23110103.0` accepted
+7. **Snake-case field names** (4 tests): `search_mode` accepted due to `populate_by_name=True`
+8. **UUID format not validated** (4 tests): `vendorIdsFilter=["not-a-uuid"]` accepted
+9. **Sort validation leak** (2 tests): invalid sort forwarded to ftsearch, error leaks internals
+
+**Root-cause fix**: `StrictBool`/`StrictInt` on all boolean/integer fields, removed
+`populate_by_name=True`, `UuidStr` regex type for UUID fields, sort regex
+validation in ACL before forwarding.
+
+### Red-team v2: 13 tests exposing 6 more ACL bugs (all fixed)
+
+1. **404 error envelope violation** (2 tests): unknown paths returned FastAPI's
+   `{"detail":"Not Found"}` instead of spec `{message, details, timestamp}`
+2. **405 error envelope violation** (5 tests): wrong HTTP methods returned
+   `{"detail":"Method Not Allowed"}` — Starlette router bypass
+3. **FeatureFilter.values not required** (1 test): spec says `required: [name, values]`
+   but model had `default_factory=list`
+4. **EClassesAggregation.eClasses not required** (1 test): same pattern
+5. **BlockedEClassVendorsFilter.blockedEClassGroups not required** (1 test): same pattern
+6. **Upstream 422 status leak** (3 tests): ftsearch 422 forwarded verbatim (not in spec),
+   error message contained "ftsearch", details leaked raw upstream payload
+
+**Root-cause fix**: `StarletteHTTPException` handler for 404/405, removed
+`default_factory` from required fields, mapped upstream status codes to spec-defined
+codes (4xx→400, 5xx→500), sanitized error messages.
+
+**Total: 167 tests (113 main + 41 red-team v1 + 13 red-team v2), all passing.**

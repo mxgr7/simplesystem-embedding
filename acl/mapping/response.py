@@ -50,14 +50,27 @@ def map_response(
         # `score` intentionally not forwarded.
         articles_out.append(legacy)
 
-    summaries_out = ftsearch_body.get("summaries") or {}
-
-    raw_metadata = ftsearch_body.get("metadata") or {}
-    # Drop ACL-extension fields that aren't in the legacy contract.
-    metadata_out = {
-        k: v for k, v in raw_metadata.items()
-        if k not in ("recallClipped", "hitCountClipped")
+    _SUMMARIES_KEYS = {
+        "vendorSummaries", "manufacturerSummaries", "featureSummaries",
+        "pricesSummary", "categoriesSummary", "eClass5Categories",
+        "eClass7Categories", "s2ClassCategories", "eClassesAggregations",
     }
+    raw_summaries = ftsearch_body.get("summaries") or {}
+    summaries_out = {k: v for k, v in raw_summaries.items() if k in _SUMMARIES_KEYS}
+
+    # eClassesAggregations: ftsearch uses {id, count}, legacy uses {name, count}.
+    if "eClassesAggregations" in summaries_out:
+        summaries_out["eClassesAggregations"] = [
+            {"name": item.get("id", item.get("name", "")), "count": item.get("count", 0)}
+            for item in summaries_out["eClassesAggregations"]
+        ]
+
+    _METADATA_KEYS = {"page", "pageSize", "pageCount", "term", "hitCount"}
+    raw_metadata = ftsearch_body.get("metadata") or {}
+    metadata_out = {k: v for k, v in raw_metadata.items() if k in _METADATA_KEYS}
+    # Legacy always returns pageCount >= 1 (even for empty results).
+    if metadata_out.get("pageCount", 1) < 1:
+        metadata_out["pageCount"] = 1
 
     return {
         "articles": articles_out,
