@@ -1987,6 +1987,49 @@ class TestOpenAPIDocument:
             warnings.simplefilter("ignore", DeprecationWarning)
             validate_spec(OPENAPI_SPEC)
 
+    def test_documented_request_examples_validate_against_schema(self) -> None:
+        """The examples bundled in the OpenAPI under
+        `/{collection}/_search` POST `requestBody.content[…].examples`
+        must themselves conform to the `SearchRequest` schema. They
+        ship to client-generators and devs as canonical templates;
+        a malformed example would propagate as a copy-paste landmine."""
+        op = OPENAPI_SPEC["paths"]["/{collection}/_search"]["post"]
+        request_examples = (
+            op.get("requestBody", {})
+            .get("content", {})
+            .get("application/json", {})
+            .get("examples", {})
+        )
+        if not request_examples:
+            pytest.skip("no documented request examples to validate")
+        request_validator = _validator_for(OPENAPI_SPEC, "SearchRequest")
+        for name, example in request_examples.items():
+            value = example.get("value", example)
+            errors = list(request_validator.iter_errors(value))
+            assert not errors, (
+                f"example {name!r} fails SearchRequest schema:\n  "
+                + "\n  ".join(e.message for e in errors)
+            )
+
+    def test_documented_response_examples_validate_against_schema(self) -> None:
+        op = OPENAPI_SPEC["paths"]["/{collection}/_search"]["post"]
+        ok_examples = (
+            op.get("responses", {})
+            .get("200", {})
+            .get("content", {})
+            .get("application/json", {})
+            .get("examples", {})
+        )
+        if not ok_examples:
+            pytest.skip("no documented 200 examples to validate")
+        for name, example in ok_examples.items():
+            value = example.get("value", example)
+            errors = list(SEARCH_RESPONSE_VALIDATOR.iter_errors(value))
+            assert not errors, (
+                f"example {name!r} fails SearchResponse schema:\n  "
+                + "\n  ".join(e.message for e in errors)
+            )
+
     def test_every_path_response_references_declared_schemas(self) -> None:
         """Each documented response on each path operation must point
         to a schema (no stub placeholders)."""
