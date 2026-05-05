@@ -1483,6 +1483,39 @@ class TestBehaviour:
         assert out["articles"] == []
         assert out["metadata"]["hitCount"] == 0
 
+    def test_closed_cv_list_ignored_when_flag_off(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """`closedCatalogVersionIds` is read only when
+        `closedMarketplaceOnly=True`. With the flag off (default),
+        adding entries to the closed list must NOT change the result."""
+        body_default = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        body_with_closed = make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR])
+        body_with_closed["selectedArticleSources"]["closedCatalogVersionIds"] = all_cvs[:5]
+        r1 = search_api_app.post(search_path, json=body_default)
+        r2 = search_api_app.post(search_path, json=body_with_closed)
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert r1.json()["metadata"]["hitCount"] == r2.json()["metadata"]["hitCount"]
+
+    def test_long_vendor_list_accepted(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Many vendors in the IN clause must not break the
+        Milvus expression builder. We pass 200 vendor IDs (mostly
+        bogus + the high-volume one); the result should still
+        include the high-volume vendor's offers."""
+        bogus_vendors = [
+            f"00000000-0000-0000-0000-{i:012x}" for i in range(199)
+        ]
+        body = make_body(
+            cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR, *bogus_vendors],
+        )
+        r = search_api_app.post(f"{search_path}?pageSize=10", json=body)
+        assert r.status_code == 200, r.text
+        body_out = r.json()
+        assert_search_response_valid(body_out)
+        assert body_out["metadata"]["hitCount"] > 0, body_out["metadata"]
+
     def test_widening_cv_scope_does_not_shrink_hit_count(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
