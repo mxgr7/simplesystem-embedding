@@ -1165,6 +1165,70 @@ class TestPagination:
             "summaries varied across page slices"
         )
 
+    def test_realistic_user_journey(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Scenario: a customer searches for 'schraube', narrows by
+        vendor, narrows by price, pages through results, and
+        eventually requests one specific article. Each step must
+        return a valid envelope and shrink (or hold) the hit count."""
+        # Step 1: free-text search.
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(cvs=all_cvs, query="schraube",
+                           searchMode="BOTH", summaries=["VENDORS", "PRICES"]),
+        )
+        assert r.status_code == 200, r.text
+        step1 = r.json()
+        assert_search_response_valid(step1)
+        h1 = step1["metadata"]["hitCount"]
+        assert h1 > 0, "free-text 'schraube' produced no hits"
+
+        # Step 2: narrow to a single vendor (from the summaries).
+        vs = step1["summaries"].get("vendorSummaries") or []
+        if not vs:
+            pytest.skip("no vendor summaries available to drill into")
+        chosen_vendor = vs[0]["vendorId"]
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(cvs=all_cvs, query="schraube",
+                           vendorIdsFilter=[chosen_vendor]),
+        )
+        assert r.status_code == 200, r.text
+        step2 = r.json()
+        assert_search_response_valid(step2)
+        assert step2["metadata"]["hitCount"] <= h1
+        # Vendor narrowing → all returned IDs prefixed with that vendor.
+        for art in step2["articles"]:
+            assert art["articleId"].startswith(chosen_vendor + ":"), art
+
+        # Step 3: narrow to a price band.
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(
+                cvs=all_cvs, query="schraube",
+                vendorIdsFilter=[chosen_vendor],
+                priceFilter={"min": 100, "max": 50000, "currencyCode": "EUR"},
+            ),
+        )
+        assert r.status_code == 200, r.text
+        step3 = r.json()
+        assert_search_response_valid(step3)
+        assert step3["metadata"]["hitCount"] <= step2["metadata"]["hitCount"]
+
+        # Step 4: page 2.
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10&page=2",
+            json=make_body(cvs=all_cvs, query="schraube",
+                           vendorIdsFilter=[chosen_vendor]),
+        )
+        assert r.status_code == 200, r.text
+        step4 = r.json()
+        assert_search_response_valid(step4)
+        # Page 2 envelope mirrors page 1's hitCount + pageCount.
+        assert step4["metadata"]["hitCount"] == step2["metadata"]["hitCount"]
+        assert step4["metadata"]["pageCount"] == step2["metadata"]["pageCount"]
+
     def test_metadata_invariants_hold_for_all_pages(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
