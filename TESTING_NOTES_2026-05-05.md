@@ -151,3 +151,68 @@ the same input. Real bug: the dedup path silently coerces null → "".
 **Fix:** align dedup path with legacy + spec — drop the `or ""` so
 None propagates. Tested implicitly by the F2 suite via the
 term-echoes-query-text test.
+
+## Coverage summary at 129-passing checkpoint
+
+`tests/test_f2_contract_against_catalog.py` covers, against the live
+`articles_v6` + `offers_v6` corpus:
+
+* OpenAPI document health: 3.x meta-validation; every `$ref`
+  resolves; every (path, verb, status, media) entry references a
+  declared schema; pydantic models stay in lockstep with the YAML
+  for `SearchRequest`, `Metadata`, `Summaries`, `Article`,
+  `SearchMode`, `SummaryKind`, `EClassVersion`.
+* Validator self-test (3 cases).
+* Path/query parameters: collection, page (default + custom +
+  rejection of 0), pageSize (0, 500, 501, default), sort (every
+  field × direction, multi-key first-key-only acceptance, unknown
+  field/direction rejection), missing-collection 404.
+* Body validation: every required field rejection, every sub-schema
+  `additionalProperties=false` rejection, currency pattern, search
+  mode enum, search-articles-by/explain (legacy fields explicitly
+  rejected), nested `requiredFeatures`/`blockedEClassGroups`
+  /`selectedArticleSources` extras, summaries enum membership.
+* searchMode envelope: HITS_ONLY (summaries suppressed even when
+  requested), SUMMARIES_ONLY (no articles), BOTH (both populated).
+* Filters (each tested): vendorIdsFilter (with offer-ownership
+  assertion), articleIdsFilter (round-trips a real id), manufacturer
+  filter, eClassesFilter, currentEClass{5,7,S2}Code, max delivery,
+  required features, blocked eclass vendors, core sortiment, core
+  articles vendors, closed marketplace toggle (CV scope swap),
+  s2ClassForProductCategories, eClassesAggregations.
+* Relationship filters: accessoriesFor, sparePartsFor, similarTo.
+* Price filter: min+max, only-max, only-min, narrowing assertion,
+  invalid currency rejection, missing currencyCode rejection.
+* Sort ordering: articleId asc/desc actually sorted; relevance sort
+  returns descending scores when query is set; multi-key first-key
+  only.
+* Pagination: pageCount math, no overlap between adjacent pages,
+  page=9999 returns empty, idempotence on identical requests.
+* Summaries: every SummaryKind yields a valid envelope; vendor and
+  manufacturer buckets contain the filtered values; bucket counts
+  do not exceed total hitCount; categoriesSummary echoes
+  currentCategoryPathElements; eClass5Categories shape; pricesSummary
+  currency code pattern + min ≤ max; featureSummaries parent ≥ max
+  child count.
+* Auth: 401 + Error envelope when API_KEY is set and missing/wrong;
+  both `Authorization: ApiKey` and `X-API-Key` accepted; /metrics
+  and /openapi.yaml bypass auth; /openapi.json equals /openapi.yaml.
+* Concurrency: 503 + `Retry-After: 1` + Error envelope when the gate
+  is saturated.
+* Behaviour: high-volume vendor → hits>0; unknown vendor / unknown
+  manufacturer → 0; HITCOUNT_CAP=1 with article-side filter clips
+  hitCount and sets hitCountClipped=true; Article.score is null in
+  browse and numeric in query path; Unicode (`größe`) and long (~1.8KB)
+  query strings round-trip.
+* Term echo: schraube → "schraube"; "" → ""; null/omitted → null.
+* Minimal valid body (only the spec's three required fields).
+
+### Fixes shipped while building the suite
+
+1. `Metadata.recallClipped` and `Metadata.hitCountClipped` were
+   emitted by the implementation but missing from
+   `search-api/openapi.yaml`. Added to the spec.
+2. `_search_dedup` emitted `metadata.term = ""` for `query=null`
+   while the legacy single-collection path emits `null`. The dedup
+   path was wrong — corrected to match the spec (`term: nullable`)
+   and the legacy path.
