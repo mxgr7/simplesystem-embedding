@@ -1051,6 +1051,72 @@ class TestBehavior:
 # 17. IDEMPOTENCY & STABILITY
 # ===========================================================================
 
+# ===========================================================================
+# 18. EDGE CASES
+# ===========================================================================
+
+class TestEdgeCases:
+    def test_pagecount_single_result(self):
+        browse = _post_ok(_base_body(), page_size=3, sort=["articleId,asc"])
+        target_id = browse["articles"][0]["articleId"]
+        body = _post_ok(_base_body(articleIdsFilter=[target_id]), page_size=10)
+        assert body["metadata"]["hitCount"] == 1
+        assert body["metadata"]["pageCount"] == 1
+
+    def test_pagecount_exact_division(self):
+        body = _post_ok(_base_body(), page_size=1)
+        md = body["metadata"]
+        assert md["pageCount"] == md["hitCount"]
+
+    def test_sort_with_query_string_returns_results(self):
+        sas = {
+            "closedCatalogVersionIds": [],
+            "catalogVersionIdsOrderedByPreference": [CV_BIG],
+        }
+        body = _post_ok(
+            _base_body(queryString="Stahl", selectedArticleSources=sas),
+            sort=["name,asc"], page_size=10,
+        )
+        assert len(body["articles"]) > 0
+
+    def test_unicode_query_string(self):
+        body = _post_ok(_base_body(
+            queryString="größe",
+            selectedArticleSources={
+                "closedCatalogVersionIds": [],
+                "catalogVersionIdsOrderedByPreference": [CV_BIG],
+            },
+        ))
+        assert body["metadata"]["term"] == "größe"
+
+    def test_large_page_size_with_small_result_set(self):
+        body = _post_ok(_base_body(
+            selectedArticleSources={
+                "closedCatalogVersionIds": [],
+                "catalogVersionIdsOrderedByPreference": [CV_EUR],
+            },
+        ), page_size=500)
+        assert len(body["articles"]) == body["metadata"]["hitCount"]
+
+    def test_all_eclass_versions_in_blocked_filter_accepted(self):
+        for version in ["ECLASS_5_1", "ECLASS_7_1", "S2CLASS"]:
+            body = _base_body(
+                blockedEClassVendorsFilters=[{
+                    "vendorIds": [VENDOR_MAJOR],
+                    "eClassVersion": version,
+                    "blockedEClassGroups": [
+                        {"eClassGroupCode": 23110000, "value": True}
+                    ],
+                }],
+            )
+            r = _post(body)
+            assert r.status_code == 200, f"eClassVersion={version} rejected"
+
+
+# ===========================================================================
+# 19. IDEMPOTENCY & STABILITY
+# ===========================================================================
+
 class TestStability:
     def test_same_request_same_hitcount(self):
         body = _base_body()
