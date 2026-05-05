@@ -1254,6 +1254,34 @@ class TestFreeTextQuery:
         assert r.status_code == 200, r.text
         assert_search_response_valid(r.json())
 
+    def test_unicode_query_accepted(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """Spec doesn't restrict the query string; verify Unicode flows
+        through cleanly (German umlauts, the corpus language)."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=5",
+            json=make_body(cvs=all_cvs, query="größe"),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        assert body["metadata"]["term"] == "größe"
+
+    def test_long_query_string_accepted(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """The TEI client passes `truncate=true`, so the embedder won't
+        413 on a 10KB query. Spec doesn't cap query length, so this
+        should round-trip."""
+        long = "schraube " * 200  # ≈1.8KB, well past most token limits.
+        r = search_api_app.post(
+            f"{search_path}?pageSize=3",
+            json=make_body(cvs=all_cvs, query=long),
+        )
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Class N — articleIdsFilter (legacy offer PK)
@@ -1503,6 +1531,60 @@ class TestOpenAPIDocument:
         spec_enum = set(OPENAPI_SPEC["components"]["schemas"]["SearchMode"]["enum"])
         impl_enum = {m.value for m in ImplSearchMode}
         assert spec_enum == impl_enum, f"SearchMode drift: {spec_enum ^ impl_enum}"
+
+    def test_article_field_set_matches_implementation(self) -> None:
+        from models import Article as ImplArticle
+        spec_props = set(
+            OPENAPI_SPEC["components"]["schemas"]["Article"]["properties"].keys()
+        )
+        impl_props = {
+            f.alias or name for name, f in ImplArticle.model_fields.items()
+        }
+        assert spec_props == impl_props
+
+    def test_eclass_version_enum_matches_implementation(self) -> None:
+        from models import EClassVersion as ImplEClassVersion
+        spec_enum = set(OPENAPI_SPEC["components"]["schemas"]["EClassVersion"]["enum"])
+        impl_enum = {m.value for m in ImplEClassVersion}
+        assert spec_enum == impl_enum
+
+    def test_every_internal_ref_resolves(self) -> None:
+        """Every `$ref: '#/components/schemas/<X>'` in the spec must
+        point to a declared schema. This is dumb-but-load-bearing —
+        a typo in a $ref silently ships and only blows up at
+        validation time."""
+        defined = set(OPENAPI_SPEC["components"]["schemas"].keys())
+        missing: list[str] = []
+
+        def walk(node: Any, path: str) -> None:
+            if isinstance(node, dict):
+                ref = node.get("$ref")
+                if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+                    name = ref.split("/")[-1]
+                    if name not in defined:
+                        missing.append(f"{path} → {ref}")
+                for k, v in node.items():
+                    walk(v, f"{path}.{k}")
+            elif isinstance(node, list):
+                for i, item in enumerate(node):
+                    walk(item, f"{path}[{i}]")
+
+        walk(OPENAPI_SPEC, "$")
+        assert not missing, "Dangling $refs:\n  " + "\n  ".join(missing)
+
+    def test_every_path_response_references_declared_schemas(self) -> None:
+        """Each documented response on each path operation must point
+        to a schema (no stub placeholders)."""
+        for path, ops in OPENAPI_SPEC["paths"].items():
+            for verb, op in ops.items():
+                for status, resp in (op.get("responses") or {}).items():
+                    content = resp.get("content") or {}
+                    for media, media_obj in content.items():
+                        schema = media_obj.get("schema")
+                        assert schema, (
+                            f"{verb.upper()} {path} {status} {media}: "
+                            f"missing schema"
+                        )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1798,6 +1880,41 @@ class TestDeeperSummaries:
             assert re.fullmatch(r"^[A-Z]{3}$", bucket["currencyCode"])
             # min ≤ max for every bucket.
             assert bucket["min"] <= bucket["max"]
+
+    def test_article_score_is_null_in_browse_path(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """No `query` → browse path → `score` is null (or absent) on
+        every returned article. We have no ranking signal here."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR]),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        for art in body["articles"]:
+            assert art.get("score") in (None, 0.0), (
+                f"browse-path article had non-null score: {art}"
+            )
+
+    def test_article_score_is_numeric_in_query_path(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """A `query` engages dense+BM25; ranked articles must come back
+        with a numeric `score`."""
+        r = search_api_app.post(
+            f"{search_path}?pageSize=10",
+            json=make_body(cvs=all_cvs, query="schraube"),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert_search_response_valid(body)
+        if body["articles"]:
+            for art in body["articles"]:
+                assert isinstance(art.get("score"), (int, float)), (
+                    f"query-path article missing numeric score: {art}"
+                )
 
     def test_features_summary_value_counts_sum_consistent(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
