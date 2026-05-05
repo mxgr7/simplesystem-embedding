@@ -216,3 +216,44 @@ term-echoes-query-text test.
    while the legacy single-collection path emits `null`. The dedup
    path was wrong — corrected to match the spec (`term: nullable`)
    and the legacy path.
+
+## Final state at suite milestone
+
+* `tests/test_f2_contract_against_catalog.py`: **148 passing,
+  stable across 3 consecutive runs** (~9s wall time per run).
+* Adjacent F2 + ACL suites (search-api contract, search-dedup
+  integration, ACL acceptance/skeleton/integration/error/resilience,
+  filter integration): **217 passing, 60 skipped** (skips are
+  env-gated paths; no regressions).
+* Unrelated repo-wide failures (`test_duckdb_*`, `test_index_*`,
+  `test_projection`, `test_tei_cache`, `test_offers_collection_schema
+  alias tests`, `test_catalog_benchmark`) all pre-existed this work
+  and stem from missing parquet fixtures, missing milvus aliases,
+  or a tokenizer-stub bug in `infer.py`.
+
+## Test-class index
+
+| Class | What it covers |
+| --- | --- |
+| `TestValidator` | Validator self-test (envelope/ extra/ required/ count rejection) |
+| `TestParameters` | page/pageSize/sort path+query parameters |
+| `TestBodyValidation` | Required-field and per-field rejections |
+| `TestSearchModes` | HITS_ONLY/SUMMARIES_ONLY/BOTH envelope shapes |
+| `TestFilters` | Each scalar filter atom from spec §4.3 |
+| `TestRelationships` | accessoriesFor / sparePartsFor / similarTo |
+| `TestPriceFilter` | min/max/only-min/only-max/narrowing/invalid currency |
+| `TestSortOrderings` | articleId/relevance/multi-key/explicit-sort beats relevance |
+| `TestPagination` | pageCount math, page overlap, summary stability across pages |
+| `TestSummaries` | Each SummaryKind yields a valid envelope |
+| `TestAuthAndConcurrency` | API_KEY 401 + 503 gate + HITCOUNT_CAP |
+| `TestBehaviour` | Filter narrowing assertions on the live catalog |
+| `TestFreeTextQuery` | query body field, term echo, Unicode, long strings |
+| `TestArticleIdsFilter` | Real offer-id round-trips |
+| `TestPaginationEdges` | pageSize=500 boundary, page=9999 |
+| `TestSummaryContent` | Summary buckets contain filtered values, count caps |
+| `TestOpenAPIDocument` | Spec/impl parity on every schema, examples valid, $refs resolve |
+| `TestNegativeBodies` | Per-sub-schema additional-properties rejection |
+| `TestAuthHeaderAlternatives` | Both auth header forms; metrics/openapi public bypass |
+| `TestPageSizeZero` | pageSize=0 keeps real hitCount |
+| `TestMinimalBody` | Request with only the spec-required fields |
+| `TestDeeperSummaries` | Per-summary content invariants |
