@@ -843,6 +843,39 @@ class TestPriceFilter:
         assert r.status_code == 200, r.text
         assert_search_response_valid(r.json())
 
+    def test_price_filter_only_min(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        r = search_api_app.post(
+            f"{search_path}?pageSize=5",
+            json=make_body(
+                cvs=all_cvs,
+                vendorIdsFilter=[KNOWN_VENDORS[0]],
+                priceFilter={"min": 1, "currencyCode": "EUR"},
+            ),
+        )
+        assert r.status_code == 200, r.text
+        assert_search_response_valid(r.json())
+
+    def test_price_filter_narrows_hit_count(
+        self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
+    ) -> None:
+        """A tight price band should not grow the hit count vs no
+        priceFilter under the same scope."""
+        body_unfiltered = make_body(
+            cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+        )
+        body_filtered = make_body(
+            cvs=all_cvs, vendorIdsFilter=[HIGH_VOLUME_VENDOR],
+            priceFilter={"min": 100, "max": 1000, "currencyCode": "EUR"},
+        )
+        r1 = search_api_app.post(search_path, json=body_unfiltered)
+        r2 = search_api_app.post(search_path, json=body_filtered)
+        assert r1.status_code == 200 and r2.status_code == 200
+        u = r1.json()["metadata"]["hitCount"]
+        f = r2.json()["metadata"]["hitCount"]
+        assert f <= u, f"price filter grew hits: {u} → {f}"
+
     def test_price_filter_invalid_currency(
         self, search_api_app: TestClient, search_path: str, all_cvs: list[str]
     ) -> None:
@@ -1052,6 +1085,78 @@ class TestAuthAndConcurrency:
         finally:
             mp.undo()
             sys.modules.pop("search_api_main_for_f2_auth", None)
+
+    def test_hit_count_cap_clips_when_exceeded(self, all_cvs: list[str]) -> None:
+        """With HITCOUNT_CAP=1, a query that has an article-side
+        filter (so the count(*) pass actually runs through
+        `_count_articles`) and many matching articles must report
+        hitCountClipped=true with hitCount=1.
+
+        Path B with no article_expr uses `len(distinct_hashes)` for
+        hitCount and never clips — that's a different code path. We
+        force the `_count_articles` path by adding a manufacturer
+        filter (article-side)."""
+        from _pytest.monkeypatch import MonkeyPatch
+        mp = MonkeyPatch()
+        mp.setenv("USE_DEDUP_TOPOLOGY", "1")
+        mp.setenv("MILVUS_ARTICLES_COLLECTION", ARTICLES_COLLECTION)
+        mp.setenv("EMBED_URL", "http://embed.invalid")
+        mp.setenv("MILVUS_URI", MILVUS_URI)
+        mp.setenv("API_KEY", "")
+        mp.setenv("HITCOUNT_CAP", "1")
+        spec = importlib.util.spec_from_file_location(
+            "search_api_main_for_f2_hitcap", SEARCH_API_DIR / "main.py",
+        )
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["search_api_main_for_f2_hitcap"] = mod
+        try:
+            spec.loader.exec_module(mod)
+            with TestClient(mod.app) as client:
+                mod.app.state.embed.embed = AsyncMock(return_value=[_stable_vector()])
+                # SUMMARIES_ONLY + small CV slice keeps the Path-B
+                # probe under PATH_B_HASH_LIMIT (so we don't fall back
+                # to the overflow path which short-circuits the cap).
+                # Manufacturer filter on the article side forces the
+                # `_count_articles` pass — that's where HITCOUNT_CAP
+                # actually fires.
+                #
+                # We pull a CV with > 1 Würth article live so the
+                # assertion is stable against any seed.
+                c = MilvusClient(uri=MILVUS_URI)
+                cv_rows = c.query(
+                    collection_name=ARTICLES_COLLECTION,
+                    filter='manufacturerName == "Würth"',
+                    output_fields=["article_hash"], limit=5,
+                )
+                wurth_hashes = [r["article_hash"] for r in cv_rows]
+                offer_rows = c.query(
+                    collection_name=OFFERS_COLLECTION,
+                    filter=(
+                        "article_hash in [" + ", ".join(f'"{h}"' for h in wurth_hashes) + "]"
+                    ),
+                    output_fields=["catalog_version_id"], limit=20,
+                )
+                wurth_cvs = sorted({r["catalog_version_id"] for r in offer_rows})[:5]
+                if len(wurth_hashes) < 2 or not wurth_cvs:
+                    pytest.skip("no Würth articles + offers visible to drive the cap test")
+
+                r = client.post(
+                    f"/{OFFERS_COLLECTION}/_search",
+                    json=make_body(
+                        cvs=wurth_cvs,
+                        searchMode="SUMMARIES_ONLY",
+                        manufacturersFilter=["Würth"],
+                    ),
+                )
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert_search_response_valid(body)
+                assert body["metadata"]["hitCountClipped"] is True, body["metadata"]
+                assert body["metadata"]["hitCount"] == 1, body["metadata"]
+        finally:
+            mp.undo()
+            sys.modules.pop("search_api_main_for_f2_hitcap", None)
 
     def test_concurrency_gate_returns_503(self, all_cvs: list[str]) -> None:
         """Boot with MAX_CONCURRENT_SEARCHES=0 to flip the gate
