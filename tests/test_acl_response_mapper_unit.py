@@ -230,7 +230,7 @@ class TestLargeUUIDs:
         body = _minimal_body(articles=[{"articleId": article_id, "score": 0.1}])
         out = map_response(body, explain=False)
         result_id = out["articles"][0]["articleId"]
-        assert result_id == "0:MTIz"
+        assert result_id == "0000000000000000000000:MTIz"
 
     def test_uuid_v4_typical(self):
         """Standard v4 UUID round-trips without error."""

@@ -157,7 +157,7 @@ async def healthz() -> dict:
     return {"status": "ok"}
 
 
-_SORT_RE = re.compile(r"^(articleId|name|price),(asc|desc)$")
+_SORT_RE = re.compile(r"^(articleId|name|price|relevance),(asc|desc)$")
 
 
 @app.post("/article-features/search")
@@ -185,12 +185,14 @@ async def search(
             message="Validation failure",
             details=[
                 f"field=sort: value {s!r} does not match pattern "
-                "'^(articleId|name|price),(asc|desc)$'"
+                "'^(articleId|name|price|relevance),(asc|desc)$'"
                 for s in invalid_sorts
             ],
         )
+    # `relevance` sort is the default in ftsearch — strip it before forwarding.
+    ftsearch_sort = [s for s in sort if not s.startswith("relevance,")]
     ftsearch_request = map_request(
-        body, page=page, page_size=page_size, sort=sort,
+        body, page=page, page_size=page_size, sort=ftsearch_sort or None,
     )
     client: FtsearchClient = request.app.state.ftsearch
     # Forward the trace headers to ftsearch so its logs share the

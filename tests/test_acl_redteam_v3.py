@@ -708,13 +708,12 @@ class TestSortEdgeCases:
                 f"Valid sort '{s}' was rejected"
             )
 
-    def test_invalid_sort_field_rejected(self):
-        """sort=relevance,asc is not in the allowed enum; must be 400."""
+    def test_relevance_sort_accepted(self):
+        """sort=relevance,asc is valid (portal-bff default sort)."""
         r = _post(_base_body(), sort=["relevance,asc"])
-        assert r.status_code == 400, (
-            f"Invalid sort field 'relevance' should be rejected, got {r.status_code}"
+        assert r.status_code == 200, (
+            f"relevance sort should be accepted, got {r.status_code}"
         )
-        _assert_error_envelope(r)
 
     def test_invalid_sort_direction_rejected(self):
         """sort=price,ascending is not valid; must be 400."""
