@@ -191,8 +191,11 @@ async def search(
         )
     # `relevance` sort is the default in ftsearch — strip it before forwarding.
     ftsearch_sort = [s for s in sort if not s.startswith("relevance,")]
+    # Legacy Spring treats pageSize=0 as "use the default" (10). The
+    # ACL accepts 0 for contract compat but promotes it before forwarding.
+    effective_page_size = page_size if page_size > 0 else 10
     ftsearch_request = map_request(
-        body, page=page, page_size=page_size, sort=ftsearch_sort or None,
+        body, page=page, page_size=effective_page_size, sort=ftsearch_sort or None,
     )
     client: FtsearchClient = request.app.state.ftsearch
     # Forward the trace headers to ftsearch so its logs share the

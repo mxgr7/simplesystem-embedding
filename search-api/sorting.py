@@ -215,17 +215,23 @@ def sort_items(items: list[_Materialised], plan: SortPlan) -> list[_Materialised
     if not items:
         return items
 
-    # Tiebreak pass — articleId asc — is universal.
+    if plan.is_relevance or plan.field is SortField.ARTICLE_ID:
+        # Legacy default sort: _score DESC, then offers.name ASC (the
+        # representative offer name). articleId asc as final determinism.
+        # Legacy also falls back to this for sort=articleId (the switch in
+        # SearchArticleQueryBuilder has no "articleid" case — it hits the
+        # default branch which sorts by _score then offers.name).
+        return sorted(
+            items,
+            key=lambda m: (
+                -m.relevance_score,
+                (m.article_name or "").lower(),
+                str(m.representative_offer["id"]),
+            ),
+        )
+
+    # Tiebreak pass for non-relevance sorts — articleId asc — is universal.
     items = sorted(items, key=lambda m: str(m.representative_offer["id"]))
-
-    if plan.is_relevance:
-        # Relevance descending. Stable sort preserves the articleId asc
-        # tiebreak within equal relevance scores.
-        return sorted(items, key=lambda m: m.relevance_score, reverse=True)
-
-    if plan.field is SortField.ARTICLE_ID:
-        return sorted(items, key=lambda m: str(m.representative_offer["id"]),
-                      reverse=plan.descending)
 
     if plan.field is SortField.NAME:
         return sorted(items, key=lambda m: (m.article_name or "").lower(),

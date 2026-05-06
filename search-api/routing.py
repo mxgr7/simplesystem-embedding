@@ -316,12 +316,26 @@ async def dispatch_dedup(
     # F5: BOTH mode runs aggregations over the full filtered hit set
     # (independent of the page slice). HITS_ONLY skips. SUMMARIES_ONLY
     # returned at the top.
+    #
+    # When a query string is active, scope summaries to the articles
+    # returned by the ANN/BM25 retrieval rather than the full scalar-
+    # filtered set. Without this, text search summaries show facet counts
+    # from the entire browse set (legacy ES computes aggs over query hits).
     summaries: Summaries | None = None
     if req.search_mode is SearchMode.BOTH and req.summaries:
+        # Scope summaries to the materialised article set — this is the
+        # set that passed both article-level filters (category, mfg,
+        # eclass) and offer-level filters (vendor, catalog_version,
+        # price). Legacy ES computes aggs over the same intersection.
+        materialised_hashes: list[str] | None = None
+        if materialised:
+            materialised_hashes = list(dict.fromkeys(
+                m.article_hash for m in sorted_items
+            ))
         summaries = await _compute_summaries(
             req,
             article_expr=article_expr, offer_expr=offer_expr,
-            path_b_distinct_hashes=path_b_distinct_hashes,
+            path_b_distinct_hashes=materialised_hashes or path_b_distinct_hashes,
             client=client,
             articles_collection=articles_collection,
             offers_collection=offers_collection,
@@ -849,7 +863,7 @@ def _materialise(
                 continue
 
         article_name = None
-        if sort_plan.field is SortField.NAME and article_meta is not None:
+        if sort_plan.field in (SortField.NAME, SortField.RELEVANCE, SortField.ARTICLE_ID) and article_meta is not None:
             article_name = (article_meta.get(hash_) or {}).get("name")
 
         for offer in offers:
@@ -945,7 +959,7 @@ async def _fetch_article_meta(
     if not hashes:
         return None
     needed: set[str] = set()
-    if sort_plan.field is SortField.NAME:
+    if sort_plan.field in (SortField.NAME, SortField.RELEVANCE, SortField.ARTICLE_ID):
         needed.add("name")
     if has_per_vendor_blocked_eclass(req):
         needed |= {_ECLASS_FIELD[e.e_class_version]
@@ -1095,13 +1109,17 @@ async def _compute_summaries(
 
     if needs_offers:
         if offer_expr is not None:
-            # Path B: the same offer_expr that ran in the probe (the
-            # probe might have truncated fields, so we refetch with the
-            # summary-required field set).
+            # Path B: refetch with the summary-required field set.
+            # Scope to path_b_distinct_hashes so that article-level
+            # filters (category, manufacturer, eclass) are respected
+            # in offer-side aggregations.
+            scoped_expr = offer_expr
+            if path_b_distinct_hashes is not None:
+                scoped_expr = _and_exprs(_hash_in_expr(path_b_distinct_hashes), offer_expr)
             offer_rows = await asyncio.to_thread(
                 client.query,
                 collection_name=offers_collection,
-                filter=offer_expr,
+                filter=scoped_expr,
                 output_fields=sorted(offer_fields),
                 limit=fetch_limit,
             )

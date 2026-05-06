@@ -107,7 +107,10 @@ def offer_fields_needed(req: SearchRequest) -> set[str]:
 def needs_offer_fetch(req: SearchRequest) -> bool:
     """True iff at least one requested summary is offer-sourced."""
     requested = set(req.summaries)
-    return bool(requested & {SummaryKind.VENDORS, SummaryKind.FEATURES, SummaryKind.PRICES})
+    return bool(requested & {
+        SummaryKind.VENDORS, SummaryKind.FEATURES, SummaryKind.PRICES,
+        SummaryKind.MANUFACTURERS,
+    })
 
 
 def needs_article_fetch(req: SearchRequest) -> bool:
@@ -138,7 +141,7 @@ def compute_summaries(
     if SummaryKind.VENDORS in requested:
         out.vendor_summaries = vendors_summary(offer_rows)
     if SummaryKind.MANUFACTURERS in requested:
-        out.manufacturer_summaries = manufacturers_summary(article_rows)
+        out.manufacturer_summaries = manufacturers_summary(article_rows, offer_rows)
     if SummaryKind.FEATURES in requested:
         out.feature_summaries = features_summary(offer_rows)
     if SummaryKind.PRICES in requested:
@@ -188,21 +191,15 @@ def compute_summaries(
 # ──────────────────────────────────────────────────────────────────────
 
 def vendors_summary(offer_rows: Iterable[dict]) -> list[VendorSummary]:
-    """Distinct (article_hash, vendor_id) pairs, grouped by vendor.
-    Count is the number of distinct articles each vendor has offers for
-    in the filtered hit set."""
-    by_vendor: dict[str, set[str]] = defaultdict(set)
+    """Per-offer count grouped by vendor. Legacy ES counts each nested
+    offer document, so we count each offer row (not distinct articles)."""
+    by_vendor: dict[str, int] = defaultdict(int)
     for o in offer_rows:
         vendor = o.get("vendor_id")
-        h = o.get("article_hash")
-        if not vendor or not h:
+        if not vendor:
             continue
-        by_vendor[str(vendor)].add(str(h))
-    # Sort by count desc, vendor_id asc for determinism.
-    items = sorted(
-        ((v, len(hs)) for v, hs in by_vendor.items()),
-        key=lambda r: (-r[1], r[0]),
-    )
+        by_vendor[str(vendor)] += 1
+    items = sorted(by_vendor.items(), key=lambda r: (-r[1], r[0]))
     return [VendorSummary(vendorId=v, count=c) for v, c in items]
 
 
@@ -210,11 +207,25 @@ def vendors_summary(offer_rows: Iterable[dict]) -> list[VendorSummary]:
 # MANUFACTURERS
 # ──────────────────────────────────────────────────────────────────────
 
-def manufacturers_summary(article_rows: Iterable[dict]) -> list[NameCount]:
-    counts: dict[str, int] = defaultdict(int)
+def manufacturers_summary(
+    article_rows: Iterable[dict],
+    offer_rows: Iterable[dict],
+) -> list[NameCount]:
+    """Per-offer count grouped by manufacturer name. Legacy ES stores
+    manufacturerName inside nested offer docs, so the count is per-offer.
+    We join article → manufacturer via article_hash, then count each offer."""
+    hash_to_mfg: dict[str, str] = {}
     for a in article_rows:
-        name = a.get("manufacturerName")
-        counts[str(name) if name else ""] += 1
+        h = a.get("article_hash")
+        if h:
+            name = a.get("manufacturerName")
+            hash_to_mfg[str(h)] = str(name) if name else ""
+    counts: dict[str, int] = defaultdict(int)
+    for o in offer_rows:
+        h = o.get("article_hash")
+        if h:
+            mfg = hash_to_mfg.get(str(h), "")
+            counts[mfg] += 1
     items = sorted(counts.items(), key=lambda r: (-r[1], r[0]))
     return [NameCount(name=n, count=c) for n, c in items]
 
@@ -224,40 +235,35 @@ def manufacturers_summary(article_rows: Iterable[dict]) -> list[NameCount]:
 # ──────────────────────────────────────────────────────────────────────
 
 def features_summary(offer_rows: Iterable[dict]) -> list[FeatureSummary]:
-    """Distinct articles per (feature name, value), aggregated to
-    {name → {value → distinct articles}}. Top-level count per feature is
-    "distinct articles having at least one offer with any value for that
-    feature"."""
-    # name → value → set(article_hash)
-    by_name: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    """Per-offer count grouped by (feature name, value). Legacy ES stores
+    features as nested offer-level fields, counting each offer doc."""
+    # name → value → count (per-offer)
+    by_name: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    # name → total offers having any value
+    name_totals: dict[str, int] = defaultdict(int)
     for o in offer_rows:
-        h = o.get("article_hash")
-        if not h:
-            continue
+        seen_names: set[str] = set()
         for token in o.get("features") or []:
             name, eq, value = str(token).partition("=")
             if not eq or not name:
                 continue
-            by_name[name][value].add(str(h))
+            by_name[name][value] += 1
+            seen_names.add(name)
+        for name in seen_names:
+            name_totals[name] += 1
     out: list[FeatureSummary] = []
     for name in sorted(by_name.keys()):
         values = by_name[name]
-        # Distinct articles having ANY value for this feature.
-        article_set: set[str] = set()
-        for vs in values.values():
-            article_set |= vs
         value_buckets = sorted(
-            ((v, len(hs)) for v, hs in values.items()),
+            values.items(),
             key=lambda r: (-r[1], r[0]),
         )
         out.append(FeatureSummary(
             name=name,
-            count=len(article_set),
+            count=name_totals[name],
             values=[FeatureValueCount(value=v, count=c) for v, c in value_buckets],
         ))
-    # Sort feature names by count desc, name asc to surface most-populated first.
     out.sort(key=lambda f: (-f.count, f.name))
-    # Legacy caps at 100 feature groups.
     return out[:100]
 
 

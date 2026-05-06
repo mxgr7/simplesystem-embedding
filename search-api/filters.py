@@ -160,17 +160,14 @@ def _category_prefix(req: SearchRequest) -> str | None:
 
 
 def _eclass_codes(req: SearchRequest) -> str | None:
-    # eclass{5,7}_code / s2class_code are ARRAY<INT32> carrying the full
-    # legacy hierarchy (root → leaf). A leaf or parent-level filter matches
-    # via array_contains — same shape as the ES keyword-array `terms` query.
-    parts: list[str] = []
-    if req.current_eclass5_code is not None:
-        parts.append(f"array_contains(eclass5_code, {int(req.current_eclass5_code)})")
-    if req.current_eclass7_code is not None:
-        parts.append(f"array_contains(eclass7_code, {int(req.current_eclass7_code)})")
+    # Legacy only has `currentS2ClassCode` as a query-time filter
+    # (hierarchical drill-down via EClassFilterProvider). The fields
+    # `currentEClass5Code` and `currentEClass7Code` do not exist in the
+    # legacy API — they are aggregation context only, used by the
+    # eClass5/eClass7 summary drill-down but never filtering search hits.
     if req.current_s2class_code is not None:
-        parts.append(f"array_contains(s2class_code, {int(req.current_s2class_code)})")
-    return _and(parts)
+        return f"array_contains(s2class_code, {int(req.current_s2class_code)})"
+    return None
 
 
 def _eclasses_filter(req: SearchRequest) -> str | None:
