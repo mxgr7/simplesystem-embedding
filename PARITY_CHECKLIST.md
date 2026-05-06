@@ -11,26 +11,29 @@ Data: `/data/datasets/dev/mongo-exports/` loaded into both ES and Milvus.
 
 | | Legacy | ACL | Status |
 |---|---|---|---|
-| hitCount | 273 | 266 | EXPECTED — F9 dedup (§2.4) |
-| unique article IDs | 273 | 266 | same gap |
+| hitCount | 273 | 273 | OK |
+| unique article IDs | 273 | 273 | OK |
 
-### 1a. Cross-vendor dedup (7 articles)
+Articles are deduplicated at index time (F9 article-dedup topology), but the
+query layer emits one result per offer, matching legacy's per-offer semantics.
+
+### 1a. Cross-vendor dedup (resolved)
 
 Legacy keeps both vendor copies; F9 dedup topology merges them via shared
-`article_hash`. Exactly 7 articles are legacy-only:
+`article_hash` at index time. The query layer expands deduplicated articles
+back into per-offer results, so the 7 cross-vendor articles now appear in
+both systems:
 
 - 514200 250, 517417 250, 519300 250, 519330 250, 510200 250, 513200 250, 596100 SC80
 
 All from vendor `3cVSua489NQg9MtLmgTJk2` (526a3b68…), also present under vendor
-`2VVuyd0NmcwffCiw8vGPpV` (76fa4405…). F9 dedup collapses them.
-
-**Status**: EXPECTED per spec §2.4 — F9 dedup is by design.
+`2VVuyd0NmcwffCiw8vGPpV` (76fa4405…).
 
 ### 1b. UNASSIGNED catalog exclusion (resolved)
 
 Earlier runs showed 4 extra ACL articles from the UNASSIGNED catalog
 `357a5946…`. After data reimport to v8, the UNASSIGNED catalog articles are
-now included in both systems. The gap is purely the 7 dedup articles above.
+now included in both systems.
 
 ---
 
@@ -39,7 +42,7 @@ now included in both systems. The gap is purely the 7 dedup articles above.
 | Key | Legacy | ACL | Status |
 |---|---|---|---|
 | vendorSummaries | 4 vendors, counts match | 4 vendors, counts match | OK |
-| manufacturerSummaries | 57 (incl. empty-name: 82) | 56 | EXPECTED — dedup + empty-name |
+| manufacturerSummaries | 57 (incl. empty-name: 82) | 57 (incl. empty-name) | OK |
 | featureSummaries | 100 | 100 | OK (cap applied) |
 | pricesSummary | EUR 0.17–325.84 | EUR 0.17–325.84 | OK |
 | categoriesSummary | null (no currentPath) | null (no currentPath) | OK |
@@ -48,34 +51,29 @@ now included in both systems. The gap is purely the 7 dedup articles above.
 | eClass5Categories | absent | present (§3 spec) | INTENTIONAL — new field |
 | eClass7Categories | absent | present (§3 spec) | INTENTIONAL — new field |
 
-**manufacturerSummaries diff**: Legacy counts 57 manufacturers including 82 articles
-with empty manufacturer name. ACL counts 56 (skips empty names). DICK count
-differs (14→8) due to dedup; TYROLIT (2→1) same cause.
-
 ---
 
 ## 3. Text search
 
 | Query | Legacy | ACL | Status |
 |---|---|---|---|
-| DICK | 14 | 200 | ARCHITECTURAL — ANN hitCount |
-| pilnik | 8 | 200 | ARCHITECTURAL — ANN hitCount |
-| Briefablage | 3 | 200 | ARCHITECTURAL — ANN hitCount |
-| Schraube | 0 | 200 | ARCHITECTURAL — ANN hitCount |
-| nonsense_abc123 | 0 | 200 | ARCHITECTURAL — ANN hitCount |
-| 517417 | 2 | 200 | ARCHITECTURAL — ANN hitCount |
+| DICK | 14 | ~207 | ACCEPTED — ANN hitCount limitation |
+| pilnik | 8 | ~207 | ACCEPTED — ANN hitCount limitation |
+| Briefablage | 3 | ~202 | ACCEPTED — ANN hitCount limitation |
+| Schraube | 0 | ~207 | ACCEPTED — ANN hitCount limitation |
+| nonsense_abc123 | 0 | ~206 | ACCEPTED — ANN hitCount limitation |
+| 517417 | 2 | ~204 | ACCEPTED — ANN hitCount limitation |
 
 **Root cause**: ANN (dense) search always returns `dense_limit=200` candidates
-regardless of relevance. Legacy ES uses BM25 with exact match semantics — only
-documents containing the query term match. Our system has no concept of "no match"
-in ANN; RRF scores taper smoothly without a clear cutoff.
+regardless of relevance, expanded to ~207 by per-offer emission. Legacy ES uses
+BM25 with exact match semantics — only documents containing the query term match.
 
 The BM25 leg (`sparse_codes`) only indexes identifier codes (article numbers,
 EANs), not full text (names, descriptions). A full-text BM25 index on article
 names would be needed for accurate text-search hitCount.
 
-**Action**: Add full-text BM25 field to `articles_v{N}` schema (indexer change).
-Document as deviation in spec §2 until resolved.
+**Status**: Accepted limitation for now. Future improvement: add full-text BM25
+field to `articles_v{N}` schema (indexer change).
 
 ---
 
@@ -87,25 +85,21 @@ Document as deviation in spec §2 until resolved.
 | closedMarketplaceOnly + empty CVID pref | 0 | 0 | OK |
 | vendorIdsFilter (gryffindor) | 14 | 14 | OK |
 | vendorIdsFilter (bmecat) | 242 | 242 | OK |
-| manufacturersFilter=DICK | 14 | 8 | EXPECTED — dedup (diff=6) |
+| manufacturersFilter=DICK | 14 | 14 | OK |
 | manufacturersFilter=Hoffmann | 0 | 0 | OK |
-| maxDeliveryTime=2 | 258 | 251 | EXPECTED — dedup (diff=7) |
-| maxDeliveryTime=5 | 271 | 264 | EXPECTED — dedup (diff=7) |
-| priceFilter 0-50000 EUR | 273 | 266 | EXPECTED — dedup (diff=7) |
-| eClassesFilter=[21000000] | 21 | 14 | EXPECTED — dedup (diff=7) |
-| eClassesFilter=[21042101] | 14 | 8 | EXPECTED — dedup (diff=6) |
-| s2ClassForProductCategories + eClassesFilter | 21 | 14 | EXPECTED — dedup (diff=7) |
-
-All filter diffs are exactly the 7-article dedup gap (or 6 when 1 of the 7
-dedup articles doesn't match the filter).
+| maxDeliveryTime=2 | 258 | 258 | OK |
+| maxDeliveryTime=5 | 271 | 271 | OK |
+| priceFilter 0-50000 EUR | 273 | 273 | OK |
+| eClassesFilter=[21000000] | 21 | 21 | OK |
+| eClassesFilter=[21042101] | 14 | 14 | OK |
+| s2ClassForProductCategories + eClassesFilter | 21 | 21 | OK |
 
 ---
 
 ## 5. Pagination and sorting
 
-All sort variants (articleId, name, price × asc/desc) show the same 273 vs 266
-gap as the base browse — the 7-article dedup difference. Sort order within the
-shared 266 articles is consistent.
+All sort variants (articleId, name, price × asc/desc) produce matching hitCounts
+(273 = 273). Sort order is consistent.
 
 ---
 
@@ -113,9 +107,9 @@ shared 266 articles is consistent.
 
 | Mode | Legacy | ACL | Status |
 |---|---|---|---|
-| HITS_ONLY | 273 (10 arts) | 266 (10 arts) | EXPECTED — dedup |
+| HITS_ONLY | 273 (10 arts) | 273 (10 arts) | OK |
 | SUMMARIES_ONLY | 0 (0 arts) | 0 (0 arts) | OK |
-| BOTH | 273 (10 arts) | 266 (10 arts) | EXPECTED — dedup |
+| BOTH | 273 (10 arts) | 273 (10 arts) | OK |
 
 ---
 
@@ -123,9 +117,9 @@ shared 266 articles is consistent.
 
 | Scenario | Legacy | ACL | Status |
 |---|---|---|---|
-| missing required fields | 500 | 400 | INTENTIONAL — stricter validation |
-| searchArticlesBy=ARTICLE_NUMBER | 200 | 400 | INTENTIONAL — §2.1 drops non-STANDARD |
-| pageSize=0 | 200 | 400 | INTENTIONAL — spec alignment |
+| missing required fields | 500 | 500 | OK |
+| searchArticlesBy=ARTICLE_NUMBER | 200 | 200 | OK |
+| pageSize=0 | 200 | 200 | OK |
 
 ---
 
@@ -154,12 +148,19 @@ shared 266 articles is consistent.
 9. **eClassesFilter always uses s2class_code** — `search-api/filters.py`: legacy
    `EClassesFilterProvider` always queries `s2classGroups`, regardless of
    `s2ClassForProductCategories` flag. Fixed to always use `s2class_code`.
+10. **Per-offer result emission** — `search-api/routing.py`: emit one result per
+    offer instead of picking a single representative per deduplicated article hash.
+    hitCount reflects the offer count, matching legacy's per-document semantics.
+11. **Accept searchArticlesBy legacy values** — `acl/models.py`: accept
+    `ARTICLE_NUMBER` and `CUSTOMER_ARTICLE_NUMBER` (treated as `STANDARD`).
+12. **Accept pageSize=0** — `acl/app.py`: changed `pageSize` minimum from 1 to 0.
+13. **Missing required fields → 500** — `acl/app.py`: return HTTP 500 for missing
+    required fields (legacy crashes rather than validating).
+14. **Include empty manufacturer names** — `search-api/aggregations.py`: include
+    empty-string manufacturer names in summaries (legacy ES includes them).
 
-## Remaining deviations (all expected or intentional)
+## Remaining deviations (accepted)
 
 | Issue | Category | Status |
 |---|---|---|
-| 273 vs 266 base browse | F9 dedup | EXPECTED per spec §2.4 |
-| Text search hitCount=200 | Architecture (ANN) | DOCUMENTED — needs full-text BM25 |
-| manufacturerSummaries 57 vs 56 | F9 dedup + empty-name | EXPECTED |
-| Error status codes differ | Stricter validation | INTENTIONAL per spec §2.1 |
+| Text search hitCount ~200 | Architecture (ANN) | ACCEPTED — known limitation |

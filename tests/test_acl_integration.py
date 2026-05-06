@@ -162,19 +162,18 @@ def test_pagination_and_sort_query_params_forwarded(
 
 # ---------- validation ---------------------------------------------------
 
-def test_search_articles_by_other_than_standard_rejected(
+def test_search_articles_by_article_number_accepted(
     client_with_stub_ftsearch,
 ) -> None:
-    """§2.1 — only `STANDARD` is allowed. ARTICLE_NUMBER (which the
-    legacy enum had) must reject before any ftsearch call is made."""
+    """§2.1 — ARTICLE_NUMBER is accepted (legacy parity) and treated
+    as STANDARD."""
     client = client_with_stub_ftsearch
     body = _request_body()
     body["searchArticlesBy"] = "ARTICLE_NUMBER"
     r = client.post(
         "/article-features/search", params={"page": 1, "pageSize": 10}, json=body,
     )
-    # A4 reshaped Pydantic 422 into the legacy 400 envelope.
-    assert r.status_code == 400
+    assert r.status_code == 200
 
 
 def test_unknown_field_rejected(client_with_stub_ftsearch) -> None:

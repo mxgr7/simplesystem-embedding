@@ -66,38 +66,17 @@ The reasons for not supporting certain behavior are:
 
 For each entry: the category, what changes on the wire (OpenAPI delta), runtime behavior, and what next-gen callers need to do.
 
-### 2.1 `searchArticlesBy` collapses to `STANDARD` only
+### 2.1 `searchArticlesBy` — all legacy values accepted, treated as `STANDARD`
 
-**OpenAPI delta.** The `searchArticlesBy` enum shrinks from
-
-```
-ALL_ATTRIBUTES | ARTICLE_NUMBER | CUSTOMER_ARTICLE_NUMBER | VENDOR_ARTICLE_NUMBER | EAN | STANDARD | TEST_PROFILE_01..20
-```
-
-to
+**OpenAPI delta.** The `searchArticlesBy` enum retains the legacy values for backward compatibility:
 
 ```
-STANDARD
+STANDARD | ARTICLE_NUMBER | CUSTOMER_ARTICLE_NUMBER
 ```
 
-The field stays in the schema (still required, single-value enum) so the request shape is unchanged otherwise. A future deviation may drop the field entirely.
+All values are accepted and treated identically as `STANDARD`. The ACL strips the field before forwarding to ftsearch.
 
-**Runtime behavior.** All requests are served by ftsearch's `classified hybrid` strategy. The classifier inside ftsearch decides per query whether to lean on the dense vector or the BM25 codes leg — there is no externally selectable mode. Requests carrying any other enum value (stale clients) are rejected with HTTP 400 in the legacy envelope:
-
-```jsonc
-{
-  "message": "Validation failure",
-  "details": [
-    {
-      "field": "searchArticlesBy",
-      "message": "must be 'STANDARD'"
-    }
-  ],
-  "timestamp": "2026-04-27T11:10:57.849+00:00"
-}
-```
-
-The ACL validates against its OpenAPI; ftsearch validates again as defense-in-depth.
+**Runtime behavior.** All requests are served by ftsearch's `classified hybrid` strategy. The classifier inside ftsearch decides per query whether to lean on the dense vector or the BM25 codes leg — there is no externally selectable mode. Legacy clients sending `ARTICLE_NUMBER` or `CUSTOMER_ARTICLE_NUMBER` receive a 200 response (matching legacy behavior); the mode has no effect on query routing.
 
 **Functional consequences.** Several legacy use cases lose their dedicated mode and fall through to classified hybrid:
 
@@ -135,14 +114,20 @@ Articles outside the relevance pool will not surface even if their sort key woul
 
 **Configuration.** Both knobs are ftsearch env vars (`RELEVANCE_POOL_MAX`, `RELEVANCE_SCORE_FLOOR`) so production can tune them based on telemetry: if pages return `< pageSize` after filters, raise the cap; if weakly-relevant cheap items appear in the top-N, tighten the floor.
 
-### 2.4 Future deviations
+### 2.4 F9 article-dedup topology
 
-Additional deviations will be added here as they are decided — particularly around fields that depend on data ftsearch doesn't carry today (price-sourced filters, eClass hierarchies). When in doubt during implementation: prefer recording a deviation here over silently degrading behavior.
+Articles are deduplicated at index time (two-collection split: `articles_v{N}` + `offers_v{N}`). The query layer emits one result per offer — matching legacy's per-document semantics — so dedup is invisible to callers. hitCount, filter counts, and summaries all reflect per-offer totals.
 
-**F9 article-dedup topology deviations** (planned — see `article-search-replacement-ftsearch-09-article-dedup.md`):
+**Remaining F9-specific deviations:**
 
 - **Path B probe ceiling — recall cliff above ~25 k matching hashes.** When a request's per-offer filter (catalog × price-list × price-range × core-marker) matches more than `PATH_B_HASH_LIMIT` (default 25 000) unique article hashes, the ftsearch dispatcher falls back to Path A (relevance-ordered ANN over the full corpus + per-offer filter as a resolve step). On selective-but-not-tight filters the resolve step may drop most ANN candidates, so the page can underfill (`< pageSize` results) and recall degrades silently. The response carries `metadata.recall_clipped: true` so the ACL and telemetry can distinguish. Limit is hardware-bounded at this level on the current Milvus 2.6 + CPU configuration (validated by an IN-clause cost benchmark — 25 k yields ~430 ms p95); a future GPU index could lift the ceiling.
 - **Sort-by-price browse staleness between bulk reindexes.** F9 ships only the bulk-reindex envelope writer for `articles_v{N}.{ccy}_price_min/max`. Until I2's streaming envelope writer lands, articles whose offers have been touched since the last bulk reindex appear at their *previous* envelope position in sort-by-price browse (no queryString). For a daily reindex cadence this affects a small sliver of catalogue at any moment.
+
+### 2.5 Text search hitCount
+
+ANN (dense) search always returns `dense_limit=200` candidates regardless of relevance. Legacy ES uses BM25 with exact match semantics — only documents containing the query term match. The BM25 leg (`sparse_codes`) only indexes identifier codes (article numbers, EANs), not full text (names, descriptions).
+
+This is an accepted limitation. A full-text BM25 index on article names would resolve it (indexer change).
 
 ---
 
@@ -150,7 +135,7 @@ Additional deviations will be added here as they are decided — particularly ar
 
 `POST /article-features/search`, JSON in/out, no authentication on either hop (next-gen → ACL or ACL → ftsearch); both endpoints expose `security: []`. Default app port: **8081**, actuators: **9090**.
 
-**Query params**: `page` (1-indexed, default 1), `pageSize` (default 10, **max 500**), `sort` (repeatable; values like `articleId,desc`, `name,asc`, `price,desc`).
+**Query params**: `page` (1-indexed, default 1), `pageSize` (default 10, **min 0, max 500**), `sort` (repeatable; values like `articleId,desc`, `name,asc`, `price,desc`).
 
 **Request body — required fields**: `searchMode`, `searchArticlesBy`, `selectedArticleSources`, `maxDeliveryTime`, `coreSortimentOnly`, `closedMarketplaceOnly`, `currency` (`^[A-Z]{3}$`), `explain`.
 
@@ -165,7 +150,7 @@ The two are independent on the wire. In practice the frontend sends them matched
 ```jsonc
 {
   "searchMode": "HITS_ONLY|SUMMARIES_ONLY|BOTH",
-  "searchArticlesBy": "STANDARD",  // single-value enum per §2.1
+  "searchArticlesBy": "STANDARD",  // all legacy values accepted, treated as STANDARD per §2.1
   "selectedArticleSources": {
     "closedCatalogVersionIds": ["uuid", ...],            // required
     "catalogVersionIdsOrderedByPreference": ["uuid", ...],
@@ -253,12 +238,12 @@ The two are independent on the wire. In practice the frontend sends them matched
 }
 ```
 
-| Trigger              | Status | Message                                       |
-| -------------------- | ------ | --------------------------------------------- |
-| Bean validation fail | 400    | "Validation failure" + per-field details      |
-| Constraint violation | 400    | "Constraint violation" + propertyPath details |
-| JSON parse failure   | 400    | exception message                             |
-| Anything else        | 500    | "Internal server error"                       |
+| Trigger                    | Status | Message                                       |
+| -------------------------- | ------ | --------------------------------------------- |
+| Missing required field     | 500    | "Validation failure" + per-field details (legacy parity — legacy crashes rather than validating) |
+| Constraint violation       | 400    | "Validation failure" + per-field details      |
+| JSON parse failure         | 400    | exception message                             |
+| Anything else              | 500    | "Internal server error"                       |
 
 ---
 
@@ -520,8 +505,7 @@ The ACL/ftsearch stack is acceptance-ready when:
 - ✅ `articles[].articleId` is emitted in the legacy `{friendlyId}:{base64UrlEncodedArticleNumber}` format on every response (checked directly on the wire payload — no legacy comparison needed).
 - ✅ The same `articleId` round-trips through `articleIdsFilter` and ID-based fetches.
 - ✅ Malformed input (bean-validation, constraint, JSON-parse) returns HTTP 400 in the legacy `{message, details, timestamp}` envelope; 5xx returns "Internal server error" (§3.1 table).
-- ✅ Every request shape dropped by §2 returns HTTP 400 in the legacy envelope with a field-level message:
-  - `searchArticlesBy ∉ {STANDARD}` (§2.1): `ALL_ATTRIBUTES`, `ARTICLE_NUMBER`, `CUSTOMER_ARTICLE_NUMBER`, `VENDOR_ARTICLE_NUMBER`, `EAN`, `TEST_PROFILE_01..20`.
+- ✅ Legacy `searchArticlesBy` values (`ARTICLE_NUMBER`, `CUSTOMER_ARTICLE_NUMBER`) are accepted and treated as `STANDARD` (§2.1).
 - ✅ When `explain: true`, every `articles[].explanation` is the literal string `"N/A"` (§2.2); when `explain: false` or omitted, `explanation` is null/absent.
 - ✅ Tracing baggage (`userId`, `companyId`, `customerOciSessionId`, W3C traceparent) flows next-gen → ACL → ftsearch → Milvus on every call.
 - ✅ Retry / timeout policy (§4.7) is in place and exercised by injected ftsearch failures.

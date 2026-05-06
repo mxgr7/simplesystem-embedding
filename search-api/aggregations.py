@@ -211,15 +211,10 @@ def vendors_summary(offer_rows: Iterable[dict]) -> list[VendorSummary]:
 # ──────────────────────────────────────────────────────────────────────
 
 def manufacturers_summary(article_rows: Iterable[dict]) -> list[NameCount]:
-    """One article per row by construction; count distinct manufacturer
-    names. Empty manufacturers are skipped (matches legacy ES `terms`
-    behaviour on missing keyword field)."""
     counts: dict[str, int] = defaultdict(int)
     for a in article_rows:
         name = a.get("manufacturerName")
-        if not name:
-            continue
-        counts[str(name)] += 1
+        counts[str(name) if name else ""] += 1
     items = sorted(counts.items(), key=lambda r: (-r[1], r[0]))
     return [NameCount(name=n, count=c) for n, c in items]
 

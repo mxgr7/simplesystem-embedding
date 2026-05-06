@@ -165,7 +165,7 @@ async def search(
     body: LegacySearchRequest,
     request: Request,
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=10, ge=1, le=500, alias="pageSize"),
+    page_size: int = Query(default=10, ge=0, le=500, alias="pageSize"),
     sort: list[str] = Query(default_factory=list),
 ) -> JSONResponse:
     """A2 — translate the legacy DTO into an ftsearch request, POST
@@ -255,13 +255,15 @@ async def validation_error_handler(
     _request: Request, exc: RequestValidationError,
 ) -> JSONResponse:
     """Pydantic-side validation failures — bad JSON shape, missing
-    required field, constraint violation, enum mismatch (including
-    the §2.1 dropped values like `searchArticlesBy: ARTICLE_NUMBER`).
-    Map every one to the legacy 400 envelope per §3.1."""
+    required field, constraint violation, enum mismatch.
+    Legacy returns 500 for missing required fields (it crashes rather
+    than validating); 400 for everything else."""
+    errors = exc.errors()
+    has_missing = any(e.get("type") == "missing" for e in errors)
     return _error(
-        status=400,
+        status=500 if has_missing else 400,
         message="Validation failure",
-        details=_legacy_validation_details(exc.errors()),
+        details=_legacy_validation_details(errors),
     )
 
 

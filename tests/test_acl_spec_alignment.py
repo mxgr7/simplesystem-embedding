@@ -77,20 +77,20 @@ def _check_services():
 
 
 class TestPageSizeValidation:
-    """Spec: pageSize has minimum=1, maximum=500."""
+    """Spec: pageSize has minimum=0, maximum=500."""
 
-    def test_page_size_zero_rejected(self):
-        """pageSize=0 is below minimum=1."""
+    def test_page_size_zero_accepted(self):
+        """pageSize=0 is valid (legacy parity)."""
         r = _post(BASE_BODY, page_size=0)
-        assert r.status_code == 400
+        assert r.status_code == 200
 
     def test_page_size_negative_rejected(self):
-        """pageSize=-1 is below minimum=1."""
+        """pageSize=-1 is below minimum=0."""
         r = _post(BASE_BODY, page_size=-1)
         assert r.status_code == 400
 
     def test_page_size_one_accepted(self):
-        """pageSize=1 is the minimum valid value."""
+        """pageSize=1 is valid."""
         r = _post(BASE_BODY, page_size=1)
         assert r.status_code == 200
 
@@ -113,11 +113,11 @@ class TestPageSizeValidation:
 class TestErrorEnvelopeFormat:
     """Spec Error schema: {message: str, details: [str], timestamp: str(date-time)}, additionalProperties: false."""
 
-    def test_missing_currency_returns_exact_error_keys(self):
-        """Missing required field produces error with exactly the spec keys."""
+    def test_missing_currency_returns_500_with_error_keys(self):
+        """Missing required field produces 500 (legacy parity) with spec error keys."""
         body = {k: v for k, v in BASE_BODY.items() if k != "currency"}
         r = _post(body)
-        assert r.status_code == 400
+        assert r.status_code == 500
         data = r.json()
         assert set(data.keys()) == {"message", "details", "timestamp"}
 
@@ -125,7 +125,7 @@ class TestErrorEnvelopeFormat:
         """Spec: details items are type: string, not objects."""
         body = {k: v for k, v in BASE_BODY.items() if k != "currency"}
         r = _post(body)
-        assert r.status_code == 400
+        assert r.status_code == 500
         data = r.json()
         for item in data["details"]:
             assert isinstance(item, str), f"details item is {type(item).__name__}, expected str"
@@ -134,7 +134,7 @@ class TestErrorEnvelopeFormat:
         """Spec: timestamp is format: date-time (ISO 8601)."""
         body = {k: v for k, v in BASE_BODY.items() if k != "currency"}
         r = _post(body)
-        assert r.status_code == 400
+        assert r.status_code == 500
         ts = r.json()["timestamp"]
         # Must parse as ISO 8601
         datetime.fromisoformat(ts.replace("Z", "+00:00"))

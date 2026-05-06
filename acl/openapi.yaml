@@ -10,7 +10,7 @@ info:
     Differences from legacy (encoded as schema-level changes per
     `issues/article-search-replacement-spec.md` §2):
 
-      - **§2.1** `searchArticlesBy` is a single-value enum: `[STANDARD]`.
+      - **§2.1** `searchArticlesBy` accepts legacy values, all treated as `STANDARD`.
       - **§2.2** `explain` field shape unchanged on the wire, but the
         `articles[].explanation` payload is the literal string `"N/A"`
         when `explain=true` (no scoring breakdown).
@@ -44,7 +44,7 @@ paths:
         - in: query
           name: pageSize
           required: false
-          schema: { type: integer, minimum: 1, maximum: 500, default: 10 }
+          schema: { type: integer, minimum: 0, maximum: 500, default: 10 }
         - in: query
           name: sort
           required: false
@@ -117,10 +117,10 @@ components:
         searchMode:
           type: string
           enum: [HITS_ONLY, SUMMARIES_ONLY, BOTH]
-        # §2.1 deviation — single-value enum.
+        # §2.1 — all legacy values accepted, treated as STANDARD.
         searchArticlesBy:
           type: string
-          enum: [STANDARD]
+          enum: [STANDARD, ARTICLE_NUMBER, CUSTOMER_ARTICLE_NUMBER]
         selectedArticleSources:
           $ref: "#/components/schemas/SelectedArticleSources"
         queryString:

@@ -47,10 +47,10 @@ def _valid_body(query: str = "schraube", **overrides: Any) -> dict:
 
 
 def _invalid_body_bad_enum() -> dict:
-    """Body with a rejected searchArticlesBy value -- triggers 400."""
+    """Body with an invalid searchMode value -- triggers 400."""
     return {
-        "searchMode": "BOTH",
-        "searchArticlesBy": "ARTICLE_NUMBER",
+        "searchMode": "INVALID_MODE",
+        "searchArticlesBy": "STANDARD",
         "selectedArticleSources": {
             "closedCatalogVersionIds": [CATALOG_VERSION],
         },
@@ -63,7 +63,7 @@ def _invalid_body_bad_enum() -> dict:
 
 
 def _invalid_body_missing_field() -> dict:
-    """Body missing required fields -- triggers 400."""
+    """Body missing required fields -- triggers 500 (legacy parity)."""
     return {
         "searchMode": "BOTH",
     }
@@ -154,9 +154,13 @@ async def test_concurrent_mixed_valid_invalid():
             )
             body = resp.json()
             assert "articles" in body
-        else:
+        elif label == "bad_enum":
             assert resp.status_code == 400, (
                 f"{label} request expected 400, got {resp.status_code}: {resp.text[:300]}"
+            )
+        else:
+            assert resp.status_code == 500, (
+                f"{label} request expected 500, got {resp.status_code}: {resp.text[:300]}"
             )
             body = resp.json()
             assert "message" in body, f"Error body missing 'message': {body}"

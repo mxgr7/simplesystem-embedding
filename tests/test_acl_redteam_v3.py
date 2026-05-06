@@ -117,10 +117,10 @@ class TestPaginationEdgeCases:
         data = _assert_success_envelope(r)
         assert isinstance(data["articles"], list)
 
-    def test_page_size_zero_rejected(self):
-        """pageSize=0 is rejected (minimum: 1 per legacy spec)."""
+    def test_page_size_zero_accepted(self):
+        """pageSize=0 is accepted (legacy parity)."""
         r = _post(_base_body(), page_size=0)
-        assert r.status_code == 400
+        assert r.status_code == 200
 
     def test_page_size_501_rejected(self):
         """pageSize=501 violates `maximum: 500` in spec; must return 400."""
@@ -776,11 +776,11 @@ class TestSearchModeValidation:
             f"Lowercase searchMode 'both' should be rejected, got {r.status_code}"
         )
 
-    def test_search_articles_by_non_standard_rejected(self):
-        """searchArticlesBy='ARTICLE_NUMBER' is dropped per sec 2.1."""
+    def test_search_articles_by_article_number_accepted(self):
+        """searchArticlesBy='ARTICLE_NUMBER' is accepted (legacy parity)."""
         r = _post(_base_body(searchArticlesBy="ARTICLE_NUMBER"))
-        assert r.status_code == 400, (
-            f"searchArticlesBy='ARTICLE_NUMBER' should be rejected, got {r.status_code}"
+        assert r.status_code == 200, (
+            f"searchArticlesBy='ARTICLE_NUMBER' should be accepted, got {r.status_code}"
         )
 
     def test_search_articles_by_case_sensitive(self):
@@ -941,24 +941,25 @@ class TestStrictTyping:
 # =========================================================================
 
 class TestMissingRequiredFields:
-    """Spec: many fields are required. Missing them must return 400."""
+    """Spec: many fields are required. Missing them returns 500 (legacy
+    parity — legacy crashes on missing fields rather than validating)."""
 
     def test_missing_search_mode(self):
         """searchMode is required."""
         body = _base_body()
         del body["searchMode"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing searchMode should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing searchMode should be 500, got {r.status_code}"
         )
 
     def test_missing_search_articles_by(self):
-        """searchArticlesBy is required."""
+        """searchArticlesBy is required; missing → 500 (legacy parity)."""
         body = _base_body()
         del body["searchArticlesBy"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing searchArticlesBy should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing searchArticlesBy should be 500, got {r.status_code}"
         )
 
     def test_missing_selected_article_sources(self):
@@ -966,8 +967,8 @@ class TestMissingRequiredFields:
         body = _base_body()
         del body["selectedArticleSources"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing selectedArticleSources should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing selectedArticleSources should be 500, got {r.status_code}"
         )
 
     def test_missing_max_delivery_time(self):
@@ -975,8 +976,8 @@ class TestMissingRequiredFields:
         body = _base_body()
         del body["maxDeliveryTime"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing maxDeliveryTime should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing maxDeliveryTime should be 500, got {r.status_code}"
         )
 
     def test_missing_currency(self):
@@ -984,8 +985,8 @@ class TestMissingRequiredFields:
         body = _base_body()
         del body["currency"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing currency should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing currency should be 500, got {r.status_code}"
         )
 
     def test_missing_explain(self):
@@ -993,8 +994,8 @@ class TestMissingRequiredFields:
         body = _base_body()
         del body["explain"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing explain should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing explain should be 500, got {r.status_code}"
         )
 
     def test_missing_core_sortiment_only(self):
@@ -1002,8 +1003,8 @@ class TestMissingRequiredFields:
         body = _base_body()
         del body["coreSortimentOnly"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing coreSortimentOnly should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing coreSortimentOnly should be 500, got {r.status_code}"
         )
 
     def test_missing_closed_marketplace_only(self):
@@ -1011,8 +1012,8 @@ class TestMissingRequiredFields:
         body = _base_body()
         del body["closedMarketplaceOnly"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing closedMarketplaceOnly should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing closedMarketplaceOnly should be 500, got {r.status_code}"
         )
 
     def test_missing_closed_catalog_version_ids(self):
@@ -1020,8 +1021,8 @@ class TestMissingRequiredFields:
         body = _base_body()
         del body["selectedArticleSources"]["closedCatalogVersionIds"]
         r = _post(body)
-        assert r.status_code == 400, (
-            f"Missing closedCatalogVersionIds should be 400, got {r.status_code}"
+        assert r.status_code == 500, (
+            f"Missing closedCatalogVersionIds should be 500, got {r.status_code}"
         )
 
 

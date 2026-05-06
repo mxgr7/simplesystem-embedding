@@ -93,15 +93,14 @@ def test_search_endpoint_returns_legacy_envelope_on_upstream_failure(client) -> 
     assert body["timestamp"], "timestamp must be present"
 
 
-def test_openapi_spec_encodes_searcharticleby_deviation() -> None:
-    """§2.1 — `searchArticlesBy` is a single-value enum. Guard against
-    accidentally widening it later (which would break the contract
-    expectation that next-gen callers don't pass anything else)."""
+def test_openapi_spec_encodes_searcharticleby_enum() -> None:
+    """§2.1 — `searchArticlesBy` accepts legacy values for backward
+    compatibility. All are treated as STANDARD."""
     import yaml
     spec = yaml.safe_load((REPO_ROOT / "acl/openapi.yaml").read_text())
     saby = spec["components"]["schemas"]["SearchRequest"]["properties"]["searchArticlesBy"]
-    assert saby["enum"] == ["STANDARD"], (
-        f"searchArticlesBy must be the single-value enum [STANDARD] per §2.1; "
+    assert set(saby["enum"]) == {"STANDARD", "ARTICLE_NUMBER", "CUSTOMER_ARTICLE_NUMBER"}, (
+        f"searchArticlesBy enum should include legacy values; "
         f"got {saby['enum']!r}"
     )
 

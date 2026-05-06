@@ -327,17 +327,17 @@ class TestErrorEnvelopeShape:
 
 
 # =========================================================================
-# Finding 8: pageSize=0 rejected (minimum: 1 per legacy spec)
+# Finding 8: pageSize=0 accepted (legacy parity)
 # =========================================================================
 
 
 class TestPageSizeZero:
-    """pageSize=0 is rejected — minimum is 1 per legacy spec."""
+    """pageSize=0 is accepted (legacy parity)."""
 
-    def test_pagesize_zero_returns_400(self):
+    def test_pagesize_zero_returns_200(self):
         r = _post(_base_body(), page_size=0)
-        assert r.status_code == 400, (
-            f"pageSize=0 returned {r.status_code} — expected 400"
+        assert r.status_code == 200, (
+            f"pageSize=0 returned {r.status_code} — expected 200"
         )
 
 

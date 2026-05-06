@@ -151,13 +151,13 @@ def test_manufacturers_one_per_article_grouped_by_name() -> None:
     assert by_n == {"Bosch": 2, "Makita": 1}
 
 
-def test_manufacturers_skips_empty_name() -> None:
+def test_manufacturers_includes_empty_name() -> None:
     rows = [
         _article("h1", manufacturerName=""),
         _article("h2", manufacturerName="X"),
     ]
     out = aggregations.manufacturers_summary(rows)
-    assert {n.name for n in out} == {"X"}
+    assert {n.name for n in out} == {"", "X"}
 
 
 # ──────────────────────────────────────────────────────────────────────

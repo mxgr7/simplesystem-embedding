@@ -451,14 +451,14 @@ class TestQueryParameterValidation:
             r = client.post("/article-features/search", json=_valid_request())
         assert r.status_code == 200
 
-    def test_pagesize_minimum_1_rejects_0(self, client):
-        """pageSize=0 is rejected (minimum: 1)."""
+    def test_pagesize_0_accepted(self, client):
+        """pageSize=0 is accepted (legacy parity)."""
         r = client.post(
             "/article-features/search",
             params={"pageSize": 0},
             json=_valid_request(),
         )
-        assert r.status_code == 400
+        assert r.status_code == 200
 
     def test_pagesize_maximum_500_accepts_500(self, client):
         """pageSize=500 is valid (maximum: 500)."""

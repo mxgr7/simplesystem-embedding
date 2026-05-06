@@ -223,9 +223,9 @@ class TestPagination:
         assert body["articles"] == []
         assert body["metadata"]["page"] == 9999
 
-    def test_pagesize_zero_rejected(self):
+    def test_pagesize_zero_accepted(self):
         r = _post(_base_body(), page_size=0)
-        assert r.status_code == 400
+        assert r.status_code == 200
 
     def test_pagesize_500_accepted(self):
         body = _post_ok(_base_body(), page_size=500)
@@ -756,15 +756,15 @@ class TestCurrency:
 # ===========================================================================
 
 class TestValidation:
-    def test_missing_required_field_returns_400(self):
+    def test_missing_required_field_returns_500(self):
         body = {"searchMode": "BOTH"}
         r = _post(body)
-        assert r.status_code == 400
+        assert r.status_code == 500
 
     def test_error_envelope_shape(self):
         body = {"searchMode": "BOTH"}
         r = _post(body)
-        assert r.status_code == 400
+        assert r.status_code == 500
         err = r.json()
         assert set(err.keys()) == {"message", "details", "timestamp"}
         assert isinstance(err["details"], list)
@@ -777,15 +777,20 @@ class TestValidation:
         parsed = datetime.fromisoformat(ts)
         assert parsed.tzinfo is not None or "Z" in ts or "+" in ts
 
-    def test_invalid_search_articles_by_rejected(self):
+    def test_article_number_accepted(self):
         body = _base_body()
         body["searchArticlesBy"] = "ARTICLE_NUMBER"
         r = _post(body)
-        assert r.status_code == 400
+        assert r.status_code == 200
 
-    def test_all_legacy_search_articles_by_rejected(self):
-        for val in ["ALL_ATTRIBUTES", "CUSTOMER_ARTICLE_NUMBER",
-                     "VENDOR_ARTICLE_NUMBER", "EAN"]:
+    def test_customer_article_number_accepted(self):
+        body = _base_body()
+        body["searchArticlesBy"] = "CUSTOMER_ARTICLE_NUMBER"
+        r = _post(body)
+        assert r.status_code == 200
+
+    def test_unknown_search_articles_by_rejected(self):
+        for val in ["ALL_ATTRIBUTES", "VENDOR_ARTICLE_NUMBER", "EAN"]:
             body = _base_body()
             body["searchArticlesBy"] = val
             r = _post(body)

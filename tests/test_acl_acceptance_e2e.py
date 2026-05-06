@@ -308,18 +308,16 @@ def test_explain_false_omits_explanation(acl_client) -> None:
         assert "explanation" not in art
 
 
-def test_dropped_search_articles_by_enum_rejected_e2e(acl_client) -> None:
-    """§2.1 — `searchArticlesBy: ARTICLE_NUMBER` rejects at the ACL
-    boundary; ftsearch is never called. Verified by status + envelope
-    shape (the ftsearch happy-path response is irrelevant here)."""
+def test_search_articles_by_article_number_accepted_e2e(acl_client) -> None:
+    """§2.1 — `searchArticlesBy: ARTICLE_NUMBER` is accepted (legacy
+    parity) and treated as STANDARD."""
     body = _valid_request()
     body["searchArticlesBy"] = "ARTICLE_NUMBER"
     r = acl_client.post(
         "/article-features/search?page=1&pageSize=10",
         json=body,
     )
-    assert r.status_code == 400
-    assert set(r.json().keys()) == {"message", "details", "timestamp"}
+    assert r.status_code == 200
 
 
 def test_score_field_dropped_from_articles(acl_client) -> None:

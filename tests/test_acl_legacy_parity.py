@@ -103,9 +103,10 @@ def _get_type(schema: dict) -> str:
 # KNOWN DEVIATIONS — helpers to skip intentional differences
 # ===========================================================================
 
-# S2.1: searchArticlesBy enum values that legacy has but ACL intentionally omits
+# S2.1: searchArticlesBy enum values that legacy has but ACL does not support
+# (ARTICLE_NUMBER and CUSTOMER_ARTICLE_NUMBER are now accepted for legacy parity)
 S2_1_LEGACY_ONLY_SEARCH_BY = {
-    "ALL_ATTRIBUTES", "ARTICLE_NUMBER", "CUSTOMER_ARTICLE_NUMBER",
+    "ALL_ATTRIBUTES",
     "VENDOR_ARTICLE_NUMBER", "EAN",
     *(f"TEST_PROFILE_{i:02d}" for i in range(1, 21)),
 }

@@ -1,9 +1,7 @@
 """Pydantic models for the legacy `/article-features/search` request.
 
 Mirrors the schema in `acl/openapi.yaml` (the contract source of
-truth). `extra='forbid'` so unknown fields land as 400 — next-gen
-callers passing a dropped field (like `searchArticlesBy: ARTICLE_NUMBER`,
-which §2.1 removed) get a clear error rather than silent acceptance.
+truth). `extra='forbid'` so unknown fields land as 400.
 
 A3 owns the response models; A2 only needs the request shape so the
 mapper can validate input + translate to the ftsearch DTO.
@@ -35,9 +33,9 @@ class SearchMode(str, Enum):
 
 
 class SearchArticlesBy(str, Enum):
-    """§2.1 deviation — single-value enum. Any other value rejected
-    by Pydantic before reaching the mapper."""
     STANDARD = "STANDARD"
+    ARTICLE_NUMBER = "ARTICLE_NUMBER"
+    CUSTOMER_ARTICLE_NUMBER = "CUSTOMER_ARTICLE_NUMBER"
 
 
 class SummaryKind(str, Enum):
@@ -129,7 +127,6 @@ class LegacySearchRequest(_Strict):
     """Body for `POST /article-features/search` per spec §3."""
 
     search_mode: SearchMode = Field(alias="searchMode")
-    # §2.1 — single-value enum.
     search_articles_by: SearchArticlesBy = Field(alias="searchArticlesBy")
     selected_article_sources: SelectedArticleSources = Field(alias="selectedArticleSources")
 
@@ -184,15 +181,3 @@ class LegacySearchRequest(_Strict):
         default=False, alias="s2ClassForProductCategories",
     )
 
-    @field_validator("search_articles_by", mode="before")
-    @classmethod
-    def _accept_only_standard(cls, v):
-        """Pydantic enum coercion would 422 anything outside the
-        single-value enum; we trap it here so the error message
-        explicitly references §2.1."""
-        if v not in ("STANDARD", SearchArticlesBy.STANDARD):
-            raise ValueError(
-                "searchArticlesBy must be 'STANDARD' (per spec §2.1 — other "
-                "values from the legacy enum were dropped in this contract)"
-            )
-        return v

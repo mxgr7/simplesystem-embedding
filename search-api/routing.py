@@ -304,10 +304,9 @@ async def dispatch_dedup(
     # primary sort with the universal articleId-asc tiebreak.
     sorted_items = sort_items(materialised, sort_plan)
 
-    # Materialisation drops articles whose offers all fail the price
-    # post-pass (e.g. sort=price with no sourcePriceListIds). Adjust
-    # hit_count so callers don't see "113 results" with empty pages.
-    if len(sorted_items) < hit_count and not hit_count_clipped:
+    # hit_count: use the materialised offer count (one result per offer)
+    # rather than the article-level count from the collection query.
+    if not hit_count_clipped:
         hit_count = len(sorted_items)
 
     page_offset = max(0, (page - 1) * page_size)
@@ -849,26 +848,21 @@ def _materialise(
             if not offers:
                 continue
 
-        chosen = pick_representative(
-            offers, plan=sort_plan,
-            price_filter_active=price_active,
-            price_resolver=_resolver,
-        )
-        if chosen is None:
-            continue
-        offer, resolved_price = chosen
-
         article_name = None
         if sort_plan.field is SortField.NAME and article_meta is not None:
             article_name = (article_meta.get(hash_) or {}).get("name")
 
-        out.append(_Materialised(
-            article_hash=hash_,
-            relevance_score=score,
-            representative_offer=offer,
-            resolved_price=resolved_price,
-            article_name=article_name,
-        ))
+        for offer in offers:
+            resolved_price = _resolver(offer)
+            if price_active and resolved_price is None:
+                continue
+            out.append(_Materialised(
+                article_hash=hash_,
+                relevance_score=score,
+                representative_offer=offer,
+                resolved_price=resolved_price,
+                article_name=article_name,
+            ))
     return out
 
 

@@ -74,7 +74,7 @@ print('OK')
 
 ## Deviations encoded
 
-  - **§2.1** `searchArticlesBy` is enum `[STANDARD]` only (single value).
+  - **§2.1** `searchArticlesBy` accepts legacy values (`STANDARD`, `ARTICLE_NUMBER`, `CUSTOMER_ARTICLE_NUMBER`), all treated as `STANDARD`.
   - **§2.2** `articles[].explanation` is the literal `"N/A"` when
     `explain=true`. Schema unchanged on the wire.
   - **§2.3** non-relevance sorts on a queried request operate on a
