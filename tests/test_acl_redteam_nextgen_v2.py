@@ -327,29 +327,18 @@ class TestErrorEnvelopeShape:
 
 
 # =========================================================================
-# Finding 8: pageSize=0 must not crash
+# Finding 8: pageSize=0 rejected (minimum: 1 per legacy spec)
 # =========================================================================
-# The ACL openapi.yaml allows pageSize=0 (minimum: 0).
-# Legacy spec has minimum: 1. The portal-bff external search
-# uses calculatePageSize which clamps < 1 to 1, but the Feign client
-# doesn't — if someone sends pageSize=0, the PageImpl constructor
-# gets 0, which is valid. The ACL must handle it gracefully.
 
 
 class TestPageSizeZero:
-    """pageSize=0 must not crash — should return 200 with empty articles."""
+    """pageSize=0 is rejected — minimum is 1 per legacy spec."""
 
-    def test_pagesize_zero_returns_200(self):
+    def test_pagesize_zero_returns_400(self):
         r = _post(_base_body(), page_size=0)
-        assert r.status_code in (200, 400), (
-            f"pageSize=0 returned {r.status_code} — expected 200 (with "
-            f"empty articles) or 400 (validation), not a server error"
+        assert r.status_code == 400, (
+            f"pageSize=0 returned {r.status_code} — expected 400"
         )
-
-    def test_pagesize_zero_returns_empty_articles_if_200(self):
-        r = _post(_base_body(), page_size=0)
-        if r.status_code == 200:
-            assert r.json()["articles"] == [] or len(r.json()["articles"]) == 0
 
 
 # =========================================================================

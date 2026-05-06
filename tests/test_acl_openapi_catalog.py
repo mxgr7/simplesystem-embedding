@@ -223,10 +223,9 @@ class TestPagination:
         assert body["articles"] == []
         assert body["metadata"]["page"] == 9999
 
-    def test_pagesize_zero_returns_no_articles(self):
-        body = _post_ok(_base_body(), page_size=0)
-        assert body["articles"] == []
-        assert body["metadata"]["hitCount"] > 0
+    def test_pagesize_zero_rejected(self):
+        r = _post(_base_body(), page_size=0)
+        assert r.status_code == 400
 
     def test_pagesize_500_accepted(self):
         body = _post_ok(_base_body(), page_size=500)

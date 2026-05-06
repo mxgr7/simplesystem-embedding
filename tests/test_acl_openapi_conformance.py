@@ -451,16 +451,14 @@ class TestQueryParameterValidation:
             r = client.post("/article-features/search", json=_valid_request())
         assert r.status_code == 200
 
-    def test_pagesize_minimum_0_accepts_0(self, client):
-        """pageSize=0 is valid (minimum: 0)."""
-        mock = _mock_ftsearch_response()
-        with _patch_ftsearch(mock):
-            r = client.post(
-                "/article-features/search",
-                params={"pageSize": 0},
-                json=_valid_request(),
-            )
-        assert r.status_code == 200
+    def test_pagesize_minimum_1_rejects_0(self, client):
+        """pageSize=0 is rejected (minimum: 1)."""
+        r = client.post(
+            "/article-features/search",
+            params={"pageSize": 0},
+            json=_valid_request(),
+        )
+        assert r.status_code == 400
 
     def test_pagesize_maximum_500_accepts_500(self, client):
         """pageSize=500 is valid (maximum: 500)."""

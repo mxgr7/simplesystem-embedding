@@ -117,14 +117,10 @@ class TestPaginationEdgeCases:
         data = _assert_success_envelope(r)
         assert isinstance(data["articles"], list)
 
-    def test_page_size_zero_valid(self):
-        """pageSize=0 is valid per spec (minimum: 0). Returns 200
-        with empty articles array (useful for count-only queries)."""
+    def test_page_size_zero_rejected(self):
+        """pageSize=0 is rejected (minimum: 1 per legacy spec)."""
         r = _post(_base_body(), page_size=0)
-        data = _assert_success_envelope(r)
-        assert data["articles"] == [], (
-            f"pageSize=0 should return empty articles, got {len(data['articles'])} items"
-        )
+        assert r.status_code == 400
 
     def test_page_size_501_rejected(self):
         """pageSize=501 violates `maximum: 500` in spec; must return 400."""

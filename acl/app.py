@@ -165,7 +165,7 @@ async def search(
     body: LegacySearchRequest,
     request: Request,
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=10, ge=0, le=500, alias="pageSize"),
+    page_size: int = Query(default=10, ge=1, le=500, alias="pageSize"),
     sort: list[str] = Query(default_factory=list),
 ) -> JSONResponse:
     """A2 — translate the legacy DTO into an ftsearch request, POST
