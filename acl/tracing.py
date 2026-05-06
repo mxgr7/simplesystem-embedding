@@ -83,6 +83,24 @@ def parse_baggage(value: str | None) -> dict[str, str]:
     return out
 
 
+_TRACESTATE_MAX_BYTES = 512
+_TRACESTATE_MAX_ENTRIES = 32
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _sanitize_tracestate(value: str | None) -> str | None:
+    """Strip control chars and enforce W3C size limits."""
+    if not value:
+        return None
+    value = _CONTROL_CHARS.sub("", value)
+    entries = [e.strip() for e in value.split(",") if e.strip()]
+    entries = entries[:_TRACESTATE_MAX_ENTRIES]
+    result = ",".join(entries)
+    if len(result.encode()) > _TRACESTATE_MAX_BYTES:
+        result = result.encode()[:_TRACESTATE_MAX_BYTES].decode("utf-8", "ignore")
+    return result or None
+
+
 def extract_trace_context(headers: dict[str, str] | Iterable[tuple[str, str]]) -> TraceContext:
     if not isinstance(headers, dict):
         headers = {k.lower(): v for k, v in headers}
@@ -90,7 +108,7 @@ def extract_trace_context(headers: dict[str, str] | Iterable[tuple[str, str]]) -
         headers = {k.lower(): v for k, v in headers.items()}
 
     raw_traceparent = headers.get("traceparent")
-    raw_tracestate = headers.get("tracestate")
+    raw_tracestate = _sanitize_tracestate(headers.get("tracestate"))
     raw_baggage = headers.get("baggage")
     trace_id, span_id, flags = parse_traceparent(raw_traceparent)
     return TraceContext(
