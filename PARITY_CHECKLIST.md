@@ -5,11 +5,11 @@ ACL under test: `localhost:8018` (acl → ftsearch on :8001, Milvus offers_v8/ar
 
 Data: `/data/datasets/dev/mongo-exports/` loaded into both ES and Milvus.
 
-**Test suite**: `scripts/parity_test.py` — 89 tests, **68 pass**, 21 fail.
+**Test suite**: `scripts/parity_test.py` — 89 tests, **72 pass**, 17 fail.
 
 ---
 
-## Passing tests (68/89)
+## Passing tests (72/89)
 
 ### Browse & pagination
 - 1a basic browse, 1b browse all (pageSize=500)
@@ -22,7 +22,7 @@ Data: `/data/datasets/dev/mongo-exports/` loaded into both ES and Milvus.
 - articleId asc/desc, name asc
 
 ### Filters
-- closedMarketplaceOnly, empty CVIDs, empty sourcePriceListIds
+- empty CVIDs, empty sourcePriceListIds
 - vendorIdsFilter (4 single-vendor tests), two vendors
 - manufacturersFilter (DICK, Aristo, Schneider Electric, empty)
 - maxDeliveryTime (1, 2, 5, 10)
@@ -31,11 +31,13 @@ Data: `/data/datasets/dev/mongo-exports/` loaded into both ES and Milvus.
 - category L1/L2 (4 tests), currentEClass5Code (4 tests)
 - eClassesFilter (3 tests), s2ClassForProductCategories
 - currentS2ClassCode, articleIdsFilter
-- blockedEClass per-vendor, blockedEClass with exception
+- blockedEClass per-vendor, blockedEClass global, blockedEClass with exception
 - vendor + maxDeliveryTime, vendor + category
 
 ### Summary deep checks
 - 10a category summary L1, 10b eClass5 summaries (24M, 24220000)
+- 10c s2class summary 21000000
+- 6a eClassesAggregations, 6b eClassesAgg combined
 
 ### Error handling & edge cases
 - missing required fields, explain true/false
@@ -47,60 +49,23 @@ Data: `/data/datasets/dev/mongo-exports/` loaded into both ES and Milvus.
 
 ---
 
-## Failing tests (21/89) — categorised
+## Failing tests (17/89) — categorised
 
-### Sort tiebreak mismatches (6 tests)
-**Tests**: 3 name,desc; 3 price,asc; 3 price,desc; 4c last page; 14 sort order (3 deep)
+### Sort tiebreak mismatches (12 tests)
+**Tests**: 3 name,desc; 3 price,asc; 3 price,desc; 4c last page;
+5a closedMarketplaceOnly; 5o accessoriesFor; 5p sparePartsFor; 5q similarTo;
+5t2 closedMarketplace+manufacturer; 14 sort order (3 deep)
 
 **Root cause**: Within equal sort keys (same name or same price), legacy ES
 uses insertion order (non-deterministic across reindexes); ftsearch uses
-string-comparison of offer IDs. Articles differ on the page boundary where
-tiebreak changes the cut.
+deterministic friendlyId-based tiebreak. Full article sets are identical —
+only the page boundary cut differs.
+
+**Verified**: closedMarketplaceOnly (5a, 5t2) and relationship filters
+(5o, 5p, 5q) return identical article sets when fetched with large pageSize.
 
 **Status**: Accepted deviation — documented in spec §2. Not fixable without
 matching ES doc insertion order, which is non-deterministic.
-
-### Relationship filter article differences (3 tests)
-**Tests**: 5o accessoriesFor, 5p sparePartsFor, 5q similarTo
-
-**Root cause**: F9 dedup topology maps relationship article IDs differently
-from legacy ES nested docs. Some articles appear in ACL but not legacy and
-vice versa — likely an indexing/projection issue with how relationship target
-IDs are resolved.
-
-**Status**: Investigate indexer relationship projection.
-
-### closedMarketplaceOnly article differences (2 tests)
-**Tests**: 5a closedMarketplaceOnly=true, 5t2 closedMarketplace + manufacturer
-
-**Root cause**: Similar to relationship filters — some articles in ACL but
-not legacy and vice versa. Likely a closed-catalog scoping difference in the
-offer probe vs legacy ES query.
-
-**Status**: Investigate offer probe scoping for closed marketplace.
-
-### blockedEClass global hitCount (1 test)
-**Test**: 5s2 blockedEClass global
-
-**Mismatch**: legacy=297, ACL=276 (21 fewer). The per-vendor blocked eclass
-test passes, but the global (no vendor_ids) version doesn't. The ACL's
-article-hash-based dedup may resolve fewer articles than legacy's nested
-offer approach.
-
-**Status**: Investigate — may be an indexing gap.
-
-### eClassesAggregations counts (2 tests)
-**Tests**: 6a eClassesAggregations, 6b eClassesAgg combined
-
-**Mismatch**: agg1 (eClass 21M) L=21 vs A=10; agg2 (24M) L=215 vs A=221;
-agg3 (21042101) L=14 vs A=8.
-
-**Root cause**: eClassesAggregations counts are scoped to the materialised
-article set from the offer probe. Legacy ES counts across all documents.
-The difference comes from the article-hash dedup topology having fewer
-distinct articles with eclass 21M (10 vs 21 in legacy).
-
-**Status**: Data/topology difference — investigate if indexer misses articles.
 
 ### Invalid currency status code (1 test)
 **Test**: 9b invalid currency
@@ -111,17 +76,6 @@ distinct articles with eclass 21M (10 vs 21 in legacy).
 currency; ACL validates and returns 400. ACL behavior is objectively correct.
 
 **Status**: Accepted deviation — legacy bug.
-
-### s2class summary count (1 test)
-**Test**: 10c s2class summary 21000000
-
-**Mismatch**: sameLevel group 21000000: L=21 vs A=14.
-
-**Root cause**: Count scoped to disjunctive hash set from offer probe (290
-hashes), which doesn't include all articles that legacy's ES query covers.
-Same data/topology gap as eClassesAggregations.
-
-**Status**: Same root cause as eClassesAggregations counts.
 
 ### Text search summaries (4 tests)
 **Tests**: 11 query=DICK, Briefablage, Splint, Schneider
@@ -159,6 +113,10 @@ ES uses. Known architecture limitation.
 20. **Disjunctive faceting: vendors** — `search-api/routing.py`, `search-api/filters.py`
 21. **Disjunctive faceting: manufacturers** — `search-api/routing.py`, `search-api/filters.py`
 22. **eClass depth fix for 8-digit codes** — `search-api/aggregations.py` (_eclass_depth, _eclass_parent)
+23. **blockedEClass global no-op** — `search-api/filters.py` (empty vendorIds = no filter)
+24. **eClassesAggregations: s2class + per-offer counting** — `search-api/aggregations.py`
+25. **eclass/s2class summary per-offer counting** — `search-api/aggregations.py`
+26. **Sort tiebreak: friendlyId-format sort key** — `search-api/sorting.py`
 
 ## Accepted deviations
 
@@ -166,5 +124,7 @@ ES uses. Known architecture limitation.
 |---|---|---|
 | Text search hitCount ~200 | Architecture (ANN) | ACCEPTED — known limitation |
 | Text search summary counts differ | Architecture (ANN) | ACCEPTED — known limitation |
-| Sort tiebreak within equal values | ES insertion order vs ID comparison | ACCEPTED — §2 |
+| Sort tiebreak within equal values | ES insertion order vs deterministic ID | ACCEPTED — §2 |
 | Invalid currency: 500 vs 400 | Legacy bug | ACCEPTED — ACL is correct |
+| closedMarketplaceOnly page boundary | Sort tiebreak (same article sets) | ACCEPTED — §2 |
+| Relationship filter page boundary | Sort tiebreak (same article sets) | ACCEPTED — §2 |
