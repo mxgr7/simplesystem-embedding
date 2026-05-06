@@ -157,7 +157,7 @@ async def healthz() -> dict:
     return {"status": "ok"}
 
 
-_SORT_RE = re.compile(r"^(articleId|name|price|relevance),(asc|desc)$")
+_SORT_RE = re.compile(r"^(articleId|name|price|relevance),(asc|desc)$", re.IGNORECASE)
 
 
 @app.post("/article-features/search")
@@ -189,7 +189,7 @@ async def search(
                 for s in invalid_sorts
             ],
         )
-    # `relevance` sort is the default in ftsearch — strip it before forwarding.
+    sort = [f"{s.split(',')[0]},{s.split(',')[1].lower()}" for s in sort]
     ftsearch_sort = [s for s in sort if not s.startswith("relevance,")]
     # Legacy Spring treats pageSize=0 as "use the default" (10). The
     # ACL accepts 0 for contract compat but promotes it before forwarding.

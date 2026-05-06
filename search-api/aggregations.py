@@ -425,6 +425,26 @@ def eclass_summary(
             if h:
                 hash_offer_count[h] = hash_offer_count.get(h, 0) + 1
 
+    if selected == 0:
+        root_counts: dict[int, set[str]] = defaultdict(set)
+        for a in article_rows:
+            h = a.get("article_hash")
+            if not h:
+                continue
+            h = str(h)
+            for code in a.get(field) or []:
+                code = int(code)
+                if _eclass_depth(code) == 1:
+                    root_counts[code].add(h)
+        kids = _to_eclass_buckets(root_counts, hash_offer_count)
+        if not kids:
+            return None
+        return EClassCategories(
+            selectedEClassGroup=0,
+            sameLevel=[],
+            children=kids,
+        )
+
     sel_depth = _eclass_depth(selected)
     parent = _eclass_parent(selected)
 

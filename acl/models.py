@@ -135,6 +135,27 @@ class LegacySearchRequest(_Strict):
     article_ids_filter: list[str] = Field(default_factory=list, alias="articleIdsFilter", max_length=1_000)
     vendor_ids_filter: list[UuidStr] = Field(default_factory=list, alias="vendorIdsFilter", max_length=500)
     manufacturers_filter: list[str] = Field(default_factory=list, alias="manufacturersFilter", max_length=500)
+
+    @field_validator(
+        "article_ids_filter",
+        "vendor_ids_filter",
+        "manufacturers_filter",
+        "required_features",
+        "current_category_path_elements",
+        "summaries",
+        "core_articles_vendors_filter",
+        "blocked_e_class_vendors_filters",
+        "e_classes_filter",
+        "e_classes_aggregations",
+        mode="before",
+    )
+    @classmethod
+    def _null_list_to_empty(cls, v: object) -> object:
+        if v is None:
+            return []
+        if isinstance(v, dict):
+            return []
+        return v
     max_delivery_time: StrictInt = Field(alias="maxDeliveryTime", ge=0)
     required_features: list[FeatureFilter] = Field(default_factory=list, alias="requiredFeatures", max_length=100)
     price_filter: PriceFilter | None = Field(default=None, alias="priceFilter")

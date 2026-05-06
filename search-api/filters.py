@@ -165,7 +165,7 @@ def _eclass_codes(req: SearchRequest) -> str | None:
     # `currentEClass5Code` and `currentEClass7Code` do not exist in the
     # legacy API — they are aggregation context only, used by the
     # eClass5/eClass7 summary drill-down but never filtering search hits.
-    if req.current_s2class_code is not None:
+    if req.current_s2class_code:
         return f"array_contains(s2class_code, {int(req.current_s2class_code)})"
     return None
 
