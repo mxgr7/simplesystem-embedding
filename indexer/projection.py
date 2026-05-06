@@ -252,10 +252,27 @@ def _project_categories(
     return {f"category_l{d}": bins[d - 1] for d in range(1, _MAX_CATEGORY_DEPTH + 1)}
 
 
+def _expand_eclass_hierarchy(code: int) -> list[int]:
+    """Expand a leaf eclass code into its full root→leaf ancestor chain.
+
+    eClass 5.1 / 7.1 use 2 digits per level (up to 4 levels = 8 digits).
+    Leaf 21042101 → [21, 2104, 210421, 21042101].
+    """
+    s = str(code)
+    ancestors: list[int] = []
+    for end in range(2, len(s) + 1, 2):
+        ancestors.append(int(s[:end]))
+    return ancestors
+
+
 def _project_eclass(eclass_groups: dict[str, Any] | None, key: str) -> list[int]:
     if not eclass_groups:
         return []
-    return [int(c) for c in eclass_groups.get(key) or []]
+    raw = eclass_groups.get(key) or []
+    codes: set[int] = set()
+    for c in raw:
+        codes.update(_expand_eclass_hierarchy(int(c)))
+    return sorted(codes)
 
 
 def _project_customer_numbers(

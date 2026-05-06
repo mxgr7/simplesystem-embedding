@@ -161,6 +161,11 @@ CREATE OR REPLACE MACRO unwrap_int(v) AS COALESCE(
     TRY_CAST(v::JSON AS BIGINT)
 );
 
+-- Expand a leaf eclass code into its full root→leaf ancestor chain.
+-- eClass uses 2 digits per level: 21042101 → [21, 2104, 210421, 21042101].
+CREATE OR REPLACE MACRO expand_eclass(code) AS
+    list_filter([code // 1000000, code // 10000, code // 100, code], x -> x > 0);
+
 -- F9 article-hash, v2: mirrors `compute_article_hash` in
 -- indexer.projection BYTE-FOR-BYTE. The cache key in Redis
 -- (`tei:v2:{hash}`) is computed from this exact algorithm — any
@@ -522,24 +527,24 @@ projected AS (
         -- elements (`[{"$numberInt": "27270911"}, ...]`) while the
         -- wrapper-JSON pre-strips them (`[27270911, ...]`).
         COALESCE(
-            list_transform(
+            list_sort(list_distinct(flatten(list_transform(
                 json_extract(params.eclassGroups::JSON, '$.ECLASS_5_1')::JSON[],
-                j -> CAST(unwrap_int(j) AS INTEGER)
-            ),
+                j -> expand_eclass(CAST(unwrap_int(j) AS INTEGER))
+            )))),
             []::INTEGER[]
         ) AS eclass5_code,
         COALESCE(
-            list_transform(
+            list_sort(list_distinct(flatten(list_transform(
                 json_extract(params.eclassGroups::JSON, '$.ECLASS_7_1')::JSON[],
-                j -> CAST(unwrap_int(j) AS INTEGER)
-            ),
+                j -> expand_eclass(CAST(unwrap_int(j) AS INTEGER))
+            )))),
             []::INTEGER[]
         ) AS eclass7_code,
         COALESCE(
-            list_transform(
+            list_sort(list_distinct(flatten(list_transform(
                 json_extract(params.eclassGroups::JSON, '$.S2CLASS')::JSON[],
-                j -> CAST(unwrap_int(j) AS INTEGER)
-            ),
+                j -> expand_eclass(CAST(unwrap_int(j) AS INTEGER))
+            )))),
             []::INTEGER[]
         ) AS s2class_code,
 
