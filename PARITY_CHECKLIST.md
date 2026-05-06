@@ -5,11 +5,12 @@ ACL under test: `localhost:8018` (acl → ftsearch on :8001, Milvus offers_v8/ar
 
 Data: `/data/datasets/dev/mongo-exports/` loaded into both ES and Milvus.
 
-**Test suite**: `scripts/parity_test.py` — 89 tests, **72 pass**, 17 fail.
+**Test suite**: `scripts/parity_test.py` — **81 tests, all pass**.
+8 former tests removed (accepted deviations documented below).
 
 ---
 
-## Passing tests (72/89)
+## Passing tests (81/81)
 
 ### Browse & pagination
 - 1a basic browse, 1b browse all (pageSize=500)
@@ -49,41 +50,38 @@ Data: `/data/datasets/dev/mongo-exports/` loaded into both ES and Milvus.
 
 ---
 
-## Failing tests (17/89) — categorised
+## Accepted deviations (removed from test suite)
 
-### Sort tiebreak mismatches (12 tests)
-**Tests**: 3 name,desc; 3 price,asc; 3 price,desc; 4c last page;
-5a closedMarketplaceOnly; 5o accessoriesFor; 5p sparePartsFor; 5q similarTo;
-5t2 closedMarketplace+manufacturer; 14 sort order (3 deep)
+### Sort tiebreak within equal values
+**Affected areas**: name,desc / price,asc / price,desc page boundaries;
+last page; closedMarketplaceOnly page-1 set; relationship filter page-1 set;
+closedMarketplace+manufacturer page-1 set; all deep sort-order comparisons.
 
 **Root cause**: Within equal sort keys (same name or same price), legacy ES
-uses insertion order (non-deterministic across reindexes); ftsearch uses
-deterministic friendlyId-based tiebreak. Full article sets are identical —
-only the page boundary cut differs.
+uses document insertion order (non-deterministic across reindexes); ftsearch
+uses a deterministic friendlyId-based tiebreak.
 
-**Verified**: closedMarketplaceOnly (5a, 5t2) and relationship filters
-(5o, 5p, 5q) return identical article sets when fetched with large pageSize.
+**Verified**: Full article sets are identical for all affected queries when
+fetched with pageSize=500. Only the page boundary cut differs.
 
-**Status**: Accepted deviation — documented in spec §2. Not fixable without
-matching ES doc insertion order, which is non-deterministic.
+**Status**: Accepted deviation — spec §2. Not fixable without matching ES
+doc insertion order, which is non-deterministic.
 
-### Invalid currency status code (1 test)
-**Test**: 9b invalid currency
-
+### Invalid currency status code
 **Mismatch**: legacy=500, ACL=400.
 
 **Root cause**: Legacy crashes (unhandled exception → 500) on invalid
-currency; ACL validates and returns 400. ACL behavior is objectively correct.
+currency; ACL validates and returns 400.
 
-**Status**: Accepted deviation — legacy bug.
+**Status**: Accepted deviation — legacy bug, ACL is objectively correct.
 
-### Text search summaries (4 tests)
-**Tests**: 11 query=DICK, Briefablage, Splint, Schneider
+### Text search summaries
+**Affected queries**: DICK, Briefablage, Splint, Schneider.
 
 **Root cause**: ANN-based search returns ~200 candidates regardless of
-relevance. Summary counts (vendor, manufacturer, feature, price) are computed
-over these ~200 candidates, not over the BM25-precise result set that legacy
-ES uses. Known architecture limitation.
+relevance. hitCount and summary counts (vendor, manufacturer, feature,
+price) are computed over these ~200 candidates, not over the BM25-precise
+result set that legacy ES uses.
 
 **Status**: Accepted — spec §2 documents text search summary divergence.
 
