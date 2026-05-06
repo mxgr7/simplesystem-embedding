@@ -30,20 +30,16 @@ from typing import Any
 _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 
-_FRIENDLY_ID_LEN = 22
-
 def _uuid_to_friendly(u: uuid.UUID) -> str:
-    """Devskiller FriendlyId-compatible base62 encoding of a UUID.
-
-    Zero-pads to 22 chars to match the Java library's output."""
+    """Devskiller FriendlyId-compatible base62 encoding of a UUID."""
     n = int.from_bytes(u.bytes, "big", signed=False)
     if n == 0:
-        return "0" * _FRIENDLY_ID_LEN
+        return "0"
     digits: list[str] = []
     while n:
         n, rem = divmod(n, 62)
         digits.append(_BASE62[rem])
-    return "".join(reversed(digits)).rjust(_FRIENDLY_ID_LEN, "0")
+    return "".join(reversed(digits))
 
 
 def _to_legacy_article_id(ftsearch_id: str) -> str:

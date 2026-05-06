@@ -556,7 +556,7 @@ async def _search_dedup(
         )
         raise
 
-    # SUMMARIES_ONLY: empty articles[] but real hitCount + summaries.
+    # SUMMARIES_ONLY: empty articles[], hitCount=0 (legacy parity), summaries populated.
     # HITS_ONLY: empty summaries.
     # BOTH: both populated.
     skip_articles = body.search_mode is SearchMode.SUMMARIES_ONLY
@@ -566,9 +566,10 @@ async def _search_dedup(
     )
     summaries = result.summaries if result.summaries is not None else Summaries()
 
+    effective_hit_count = 0 if skip_articles else result.hit_count
     page_count = (
-        (result.hit_count + page_size - 1) // page_size
-        if page_size > 0 and result.hit_count > 0 else 0
+        (effective_hit_count + page_size - 1) // page_size
+        if page_size > 0 and effective_hit_count > 0 else 0
     )
 
     record_search(
@@ -594,7 +595,7 @@ async def _search_dedup(
             pageSize=page_size,
             pageCount=page_count,
             term=body.query,
-            hitCount=result.hit_count,
+            hitCount=effective_hit_count,
             recallClipped=result.recall_clipped,
             hitCountClipped=result.hit_count_clipped,
         ),

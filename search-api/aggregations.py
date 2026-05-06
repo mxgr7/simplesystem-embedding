@@ -262,7 +262,8 @@ def features_summary(offer_rows: Iterable[dict]) -> list[FeatureSummary]:
         ))
     # Sort feature names by count desc, name asc to surface most-populated first.
     out.sort(key=lambda f: (-f.count, f.name))
-    return out
+    # Legacy caps at 100 feature groups.
+    return out[:100]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -314,47 +315,45 @@ def _path_to_elements(path: str) -> list[str]:
 def categories_summary(
     article_rows: Iterable[dict],
     current_path: list[str],
-) -> CategoriesSummary:
+) -> CategoriesSummary | None:
     """Hierarchical: given the depth the user is browsing,
     `sameLevel` are paths at that depth (siblings of the current node,
     or top-level children when depth=0); `children` are paths one level
     deeper under the current path.
 
-    Per F4/spec, depth 0 (no current path) → sameLevel surfaces the
-    top-level categories (depth 1), children is empty (no deeper level
-    is implied without a selection).
+    Legacy parity: returns None when `currentCategoryPathElements` is
+    not set (Java `CategorySummaryExtractor` returns null when
+    `currentCategoryPath == null`).
     """
-    depth = len(current_path)
-    same_depth = max(depth, 1)
-    children_depth = depth + 1 if depth > 0 else 0
+    if not current_path:
+        return None
 
-    if same_depth > 5:
-        # Out of schema — return an empty hierarchy with the user's
-        # path echoed back. Defensive; the F3 filter rejects these too.
+    depth = len(current_path)
+    children_depth = depth + 1
+
+    if depth > 5:
         return CategoriesSummary(
             currentCategoryPathElements=list(current_path),
             sameLevel=[], children=[],
         )
 
-    prefix = current_path[: same_depth - 1] if same_depth > 0 else []
+    prefix = current_path[: depth - 1] if depth > 1 else []
     prefix_path = _CATEGORY_PATH_SEPARATOR.join(prefix) if prefix else ""
 
-    # sameLevel: count distinct articles per path at same_depth that
-    # share the prefix.
     same_level_counts: dict[str, set[str]] = defaultdict(set)
     children_counts: dict[str, set[str]] = defaultdict(set)
-    selected_path = _CATEGORY_PATH_SEPARATOR.join(current_path) if current_path else None
+    selected_path = _CATEGORY_PATH_SEPARATOR.join(current_path)
 
     for a in article_rows:
         h = a.get("article_hash")
         if not h:
             continue
         h = str(h)
-        for path in a.get(f"category_l{same_depth}") or []:
+        for path in a.get(f"category_l{depth}") or []:
             if prefix and not _starts_with_prefix(path, prefix_path):
                 continue
             same_level_counts[str(path)].add(h)
-        if children_depth and 1 <= children_depth <= 5 and selected_path:
+        if 1 <= children_depth <= 5:
             for path in a.get(f"category_l{children_depth}") or []:
                 if not _starts_with_prefix(path, selected_path):
                     continue
@@ -396,7 +395,7 @@ def eclass_summary(
     article_rows: Iterable[dict],
     field: str,
     selected: int | None,
-) -> EClassCategories:
+) -> EClassCategories | None:
     """Hierarchical eClass / S2Class summary, derived from the per-article
     `ARRAY<INT32>` carrying the full root→leaf chain.
 
@@ -433,10 +432,14 @@ def eclass_summary(
             elif d == sel_depth + 1 and code // 100 == selected:
                 children_counts[code].add(h)
 
+    same = _to_eclass_buckets(sibling_counts)
+    kids = _to_eclass_buckets(children_counts)
+    if not same and not kids:
+        return None
     return EClassCategories(
         selectedEClassGroup=selected,
-        sameLevel=_to_eclass_buckets(sibling_counts),
-        children=_to_eclass_buckets(children_counts),
+        sameLevel=same,
+        children=kids,
     )
 
 
@@ -455,9 +458,12 @@ def _eclass_root_summary(
             code = int(code)
             if _eclass_depth(code) == 1:
                 root_counts[code].add(h)
+    roots = _to_eclass_buckets(root_counts)
+    if not roots:
+        return None
     return EClassCategories(
         selectedEClassGroup=None,
-        sameLevel=_to_eclass_buckets(root_counts),
+        sameLevel=roots,
         children=[],
     )
 

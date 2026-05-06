@@ -197,6 +197,12 @@ def is_match_nothing(expr: str | None) -> bool:
 
 def _closed_marketplace(req: SearchRequest) -> str | None:
     sas = req.selected_article_sources
+    # Legacy parity: ArticleSearchContext.isEmpty() returns true when
+    # catalogVersionIdsOrderedByPreference is empty OR sourcePriceListIds
+    # is empty — regardless of closedMarketplaceOnly. Empty context →
+    # match nothing.
+    if not sas.catalog_version_ids_ordered_by_preference or not sas.source_price_list_ids:
+        return MATCH_NOTHING_EXPR
     cv = (
         sas.closed_catalog_version_ids
         if req.closed_marketplace_only
