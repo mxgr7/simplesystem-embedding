@@ -176,8 +176,9 @@ def _eclass_codes(req: SearchRequest) -> str | None:
 def _eclasses_filter(req: SearchRequest) -> str | None:
     if not req.eclasses_filter:
         return None
-    field = "s2class_code" if req.s2class_for_product_categories else "eclass5_code"
-    return f"array_contains_any({field}, {_int_array(req.eclasses_filter)})"
+    # Legacy always queries s2classGroups for eClassesFilter, regardless
+    # of s2ClassForProductCategories (that flag only affects currentS2ClassFilter).
+    return f"array_contains_any(s2class_code, {_int_array(req.eclasses_filter)})"
 
 
 MATCH_NOTHING_EXPR = 'id == ""'

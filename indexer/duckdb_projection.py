@@ -161,10 +161,10 @@ CREATE OR REPLACE MACRO unwrap_int(v) AS COALESCE(
     TRY_CAST(v::JSON AS BIGINT)
 );
 
--- Expand a leaf eclass code into its full root→leaf ancestor chain.
--- eClass uses 2 digits per level: 21042101 → [21, 2104, 210421, 21042101].
+-- Expand a leaf eclass code into its full zero-padded ancestor chain.
+-- Legacy ES stores 8-digit codes: 21042101 → [21000000, 21040000, 21042100, 21042101].
 CREATE OR REPLACE MACRO expand_eclass(code) AS
-    list_filter([code // 1000000, code // 10000, code // 100, code], x -> x > 0);
+    list_filter([(code // 1000000) * 1000000, (code // 10000) * 10000, (code // 100) * 100, code], x -> x > 0);
 
 -- F9 article-hash, v2: mirrors `compute_article_hash` in
 -- indexer.projection BYTE-FOR-BYTE. The cache key in Redis
@@ -236,8 +236,23 @@ MAX_PRICE_SENTINEL = 3.4028234e38
 CATALOG_CURRENCIES = ("eur", "chf", "huf", "pln", "gbp", "czk", "cny")
 
 
+def _load_s2class_map(con: duckdb.DuckDBPyConnection) -> None:
+    """Load the ECLASS→S2CLASS mapping tables into DuckDB for derivation."""
+    from indexer.s2class_mapper import _load_mapping, _DIR
+
+    rows_5 = list(_load_mapping(_DIR / "5-s2.bin.gz").items())
+    rows_8 = list(_load_mapping(_DIR / "8-s2.bin.gz").items())
+    con.execute("CREATE OR REPLACE TABLE s2map_5(from_code INTEGER, to_code INTEGER)")
+    con.execute("CREATE OR REPLACE TABLE s2map_8(from_code INTEGER, to_code INTEGER)")
+    if rows_5:
+        con.executemany("INSERT INTO s2map_5 VALUES (?, ?)", rows_5)
+    if rows_8:
+        con.executemany("INSERT INTO s2map_8 VALUES (?, ?)", rows_8)
+
+
 def _init_macros(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(_MACROS_SQL)
+    _load_s2class_map(con)
 
 
 # Explicit `records` element schema. Auto-detect picks the right shape on
@@ -540,11 +555,26 @@ projected AS (
             )))),
             []::INTEGER[]
         ) AS eclass7_code,
+        -- S2CLASS is derived from the highest available eclass version
+        -- through binary mapping tables (mirroring Java S2ClassOfferMapper).
+        -- Priority: ECLASS_8 > ECLASS_5_1.
         COALESCE(
-            list_sort(list_distinct(flatten(list_transform(
-                json_extract(params.eclassGroups::JSON, '$.S2CLASS')::JSON[],
-                j -> expand_eclass(CAST(unwrap_int(j) AS INTEGER))
-            )))),
+            CASE
+                WHEN json_extract(params.eclassGroups::JSON, '$.ECLASS_8') IS NOT NULL
+                     AND json_array_length(json_extract(params.eclassGroups::JSON, '$.ECLASS_8')) > 0
+                THEN (SELECT list_sort(list_distinct(flatten(list(expand_eclass(m.to_code)))))
+                      FROM unnest(list_transform(
+                               json_extract(params.eclassGroups::JSON, '$.ECLASS_8')::JSON[],
+                               j -> CAST(unwrap_int(j) AS INTEGER))) AS src(leaf)
+                      JOIN s2map_8 m ON src.leaf = m.from_code)
+                WHEN json_extract(params.eclassGroups::JSON, '$.ECLASS_5_1') IS NOT NULL
+                     AND json_array_length(json_extract(params.eclassGroups::JSON, '$.ECLASS_5_1')) > 0
+                THEN (SELECT list_sort(list_distinct(flatten(list(expand_eclass(m.to_code)))))
+                      FROM unnest(list_transform(
+                               json_extract(params.eclassGroups::JSON, '$.ECLASS_5_1')::JSON[],
+                               j -> CAST(unwrap_int(j) AS INTEGER))) AS src(leaf)
+                      JOIN s2map_5 m ON src.leaf = m.from_code)
+            END,
             []::INTEGER[]
         ) AS s2class_code,
 
@@ -981,11 +1011,24 @@ WITH offer_derived AS (
             ),
             []::INTEGER[]
         ) AS eclass7_code,
+        -- S2CLASS derived from highest available eclass via mapping table.
         COALESCE(
-            list_transform(
-                json_extract(o."offer".offerParams.eclassGroups::JSON, '$.S2CLASS')::JSON[],
-                j -> CAST(unwrap_int(j) AS INTEGER)
-            ),
+            CASE
+                WHEN json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_8') IS NOT NULL
+                     AND json_array_length(json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_8')) > 0
+                THEN (SELECT list(m.to_code)
+                      FROM unnest(list_transform(
+                               json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_8')::JSON[],
+                               j -> CAST(unwrap_int(j) AS INTEGER))) AS src(leaf)
+                      JOIN s2map_8 m ON src.leaf = m.from_code)
+                WHEN json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_5_1') IS NOT NULL
+                     AND json_array_length(json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_5_1')) > 0
+                THEN (SELECT list(m.to_code)
+                      FROM unnest(list_transform(
+                               json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_5_1')::JSON[],
+                               j -> CAST(unwrap_int(j) AS INTEGER))) AS src(leaf)
+                      JOIN s2map_5 m ON src.leaf = m.from_code)
+            END,
             []::INTEGER[]
         ) AS s2class_code,
 

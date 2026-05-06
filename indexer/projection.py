@@ -255,13 +255,13 @@ def _project_categories(
 def _expand_eclass_hierarchy(code: int) -> list[int]:
     """Expand a leaf eclass code into its full root→leaf ancestor chain.
 
-    eClass 5.1 / 7.1 use 2 digits per level (up to 4 levels = 8 digits).
-    Leaf 21042101 → [21, 2104, 210421, 21042101].
+    eClass codes are 8-digit, 2 digits per level.  Legacy ES stores
+    zero-padded ancestors: 21042101 → [21000000, 21040000, 21042100, 21042101].
     """
-    s = str(code)
+    s = str(code).ljust(8, "0")
     ancestors: list[int] = []
-    for end in range(2, len(s) + 1, 2):
-        ancestors.append(int(s[:end]))
+    for end in range(2, 9, 2):
+        ancestors.append(int(s[:end].ljust(8, "0")))
     return ancestors
 
 
@@ -272,6 +272,16 @@ def _project_eclass(eclass_groups: dict[str, Any] | None, key: str) -> list[int]
     codes: set[int] = set()
     for c in raw:
         codes.update(_expand_eclass_hierarchy(int(c)))
+    return sorted(codes)
+
+
+def _project_s2class(eclass_groups: dict[str, Any] | None) -> list[int]:
+    from indexer.s2class_mapper import derive_s2class_codes
+
+    s2_leaves = derive_s2class_codes(eclass_groups)
+    codes: set[int] = set()
+    for leaf in s2_leaves:
+        codes.update(_expand_eclass_hierarchy(leaf))
     return sorted(codes)
 
 
@@ -395,7 +405,7 @@ def project(record: dict[str, Any]) -> ProjectionResult:
         "core_marker_disabled_sources": disabled_sources,
         "eclass5_code": _project_eclass(eclass_groups, "ECLASS_5_1"),
         "eclass7_code": _project_eclass(eclass_groups, "ECLASS_7_1"),
-        "s2class_code": _project_eclass(eclass_groups, "S2CLASS"),
+        "s2class_code": _project_s2class(eclass_groups),
         "features": features_tokens,
         "relationship_accessory_for": list(related.get("accessoryFor") or []),
         "relationship_spare_part_for": list(related.get("sparePartFor") or []),
