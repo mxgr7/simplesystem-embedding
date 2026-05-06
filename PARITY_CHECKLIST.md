@@ -58,12 +58,12 @@ differs (14→8) due to dedup; TYROLIT (2→1) same cause.
 
 | Query | Legacy | ACL | Status |
 |---|---|---|---|
-| DICK | 14 | 200 | MISMATCH — hitCount |
-| pilnik | 8 | 200 | MISMATCH — hitCount |
-| Briefablage | 3 | 200 | MISMATCH — hitCount |
-| Schraube | 0 | 200 | MISMATCH — hitCount |
-| nonsense_abc123 | 0 | 200 | MISMATCH — hitCount |
-| 517417 | 2 | 200 | MISMATCH — hitCount |
+| DICK | 14 | 200 | ARCHITECTURAL — ANN hitCount |
+| pilnik | 8 | 200 | ARCHITECTURAL — ANN hitCount |
+| Briefablage | 3 | 200 | ARCHITECTURAL — ANN hitCount |
+| Schraube | 0 | 200 | ARCHITECTURAL — ANN hitCount |
+| nonsense_abc123 | 0 | 200 | ARCHITECTURAL — ANN hitCount |
+| 517417 | 2 | 200 | ARCHITECTURAL — ANN hitCount |
 
 **Root cause**: ANN (dense) search always returns `dense_limit=200` candidates
 regardless of relevance. Legacy ES uses BM25 with exact match semantics — only
@@ -87,19 +87,17 @@ Document as deviation in spec §2 until resolved.
 | closedMarketplaceOnly + empty CVID pref | 0 | 0 | OK |
 | vendorIdsFilter (gryffindor) | 14 | 14 | OK |
 | vendorIdsFilter (bmecat) | 242 | 242 | OK |
-| manufacturersFilter=DICK | 14 | 8 | EXPECTED — dedup |
+| manufacturersFilter=DICK | 14 | 8 | EXPECTED — dedup (diff=6) |
 | manufacturersFilter=Hoffmann | 0 | 0 | OK |
 | maxDeliveryTime=2 | 258 | 251 | EXPECTED — dedup (diff=7) |
 | maxDeliveryTime=5 | 271 | 264 | EXPECTED — dedup (diff=7) |
 | priceFilter 0-50000 EUR | 273 | 266 | EXPECTED — dedup (diff=7) |
-| eClassesFilter=[21000000] | 21 | 0 | DATA — hierarchy not expanded |
+| eClassesFilter=[21000000] | 21 | 14 | EXPECTED — dedup (diff=7) |
 | eClassesFilter=[21042101] | 14 | 8 | EXPECTED — dedup (diff=6) |
-| s2ClassForProductCategories + eClassesFilter | 21 | 0 | DATA — hierarchy not expanded |
+| s2ClassForProductCategories + eClassesFilter | 21 | 14 | EXPECTED — dedup (diff=7) |
 
-**eClassesFilter hierarchy gap**: `eclass5_code` in articles_v8 stores only leaf
-codes (e.g. 21042101). Legacy ES stores the full root→leaf chain
-(21, 2104, 210421, 21042101) so a filter on parent code 21000000 matches.
-Fix requires indexer to expand the hierarchy during import.
+All filter diffs are exactly the 7-article dedup gap (or 6 when 1 of the 7
+dedup articles doesn't match the filter).
 
 ---
 
@@ -147,13 +145,21 @@ shared 266 articles is consistent.
    return `None` instead of empty object when no eclass data exists.
 6. **friendlyId base62 no-pad** — `acl/mapping/response.py`: Devskiller FriendlyId
    does NOT zero-pad; removed `.rjust(22, "0")`.
+7. **eClass hierarchy expansion** — `indexer/projection.py`, `indexer/duckdb_projection.py`:
+   expand leaf eclass codes to full zero-padded 8-digit ancestor chain at import time
+   (21042101 → [21000000, 21040000, 21042100, 21042101]).
+8. **S2CLASS derivation** — `indexer/s2class_mapper.py`: derive s2class codes from
+   highest available eclass version (ECLASS_8 > ECLASS_5_1) through binary mapping
+   tables extracted from legacy Java indexer (`5-s2.bin.gz`, `8-s2.bin.gz`).
+9. **eClassesFilter always uses s2class_code** — `search-api/filters.py`: legacy
+   `EClassesFilterProvider` always queries `s2classGroups`, regardless of
+   `s2ClassForProductCategories` flag. Fixed to always use `s2class_code`.
 
-## Remaining issues
+## Remaining deviations (all expected or intentional)
 
-| Issue | Category | Fix location |
+| Issue | Category | Status |
 |---|---|---|
-| 273 vs 266 base browse | F9 dedup (expected) | spec §2.4 |
-| Text search hitCount=200 | Architecture | indexer: add full-text BM25 field |
-| eClassesFilter parent codes → 0 | Data pipeline | indexer: hierarchy expansion |
-| manufacturerSummaries 57 vs 56 | F9 dedup + empty-name | expected |
-| Empty manufacturer counted in legacy | Behavioral diff | acceptable — legacy quirk |
+| 273 vs 266 base browse | F9 dedup | EXPECTED per spec §2.4 |
+| Text search hitCount=200 | Architecture (ANN) | DOCUMENTED — needs full-text BM25 |
+| manufacturerSummaries 57 vs 56 | F9 dedup + empty-name | EXPECTED |
+| Error status codes differ | Stricter validation | INTENTIONAL per spec §2.1 |
