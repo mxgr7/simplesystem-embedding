@@ -32,12 +32,44 @@ Design notes:
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+from functools import lru_cache
 from typing import Callable
 
 from models import SortClause, SortDirection
+
+
+_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+@lru_cache(maxsize=4096)
+def _uuid_to_base62(raw: str) -> str:
+    n = int.from_bytes(uuid.UUID(raw).bytes, "big", signed=False)
+    if n == 0:
+        return "0"
+    digits: list[str] = []
+    while n:
+        n, rem = divmod(n, 62)
+        digits.append(_BASE62[rem])
+    return "".join(reversed(digits))
+
+
+def _legacy_sort_key(offer_id: str) -> str:
+    """Convert Milvus offer ID to legacy-format sort key.
+    Milvus: ``{vendorUUID}:{b64art}:{cvUUID}``
+    Legacy: ``{friendlyId(vendorUUID)}:{b64art}``
+    """
+    parts = offer_id.split(":")
+    if len(parts) >= 2:
+        try:
+            friendly = _uuid_to_base62(parts[0])
+        except ValueError:
+            return offer_id
+        return f"{friendly}:{parts[1]}"
+    return offer_id
 
 
 class SortField(str, Enum):
@@ -176,9 +208,9 @@ def pick_representative(
         # what we want for stability, but Python's reverse=True flips
         # both keys. Use explicit negation for the price key when desc.
         if plan.descending:
-            priced.sort(key=lambda r: (-float(r[1]), str(r[0]["id"])))
+            priced.sort(key=lambda r: (-float(r[1]), _legacy_sort_key(str(r[0]["id"]))))
         else:
-            priced.sort(key=lambda r: (float(r[1]), str(r[0]["id"])))
+            priced.sort(key=lambda r: (float(r[1]), _legacy_sort_key(str(r[0]["id"]))))
         return priced[0][0], priced[0][1]
 
     # All other plans: filter by price post-pass first, then pick by id.
@@ -196,10 +228,10 @@ def pick_representative(
         return None
 
     if plan.field is SortField.ARTICLE_ID and plan.descending:
-        survivors.sort(key=lambda r: str(r[0]["id"]), reverse=True)
+        survivors.sort(key=lambda r: _legacy_sort_key(str(r[0]["id"])), reverse=True)
     else:
         # relevance / name / articleId asc: alphabetically lowest.
-        survivors.sort(key=lambda r: str(r[0]["id"]))
+        survivors.sort(key=lambda r: _legacy_sort_key(str(r[0]["id"])))
 
     return survivors[0]
 
@@ -226,12 +258,12 @@ def sort_items(items: list[_Materialised], plan: SortPlan) -> list[_Materialised
             key=lambda m: (
                 -m.relevance_score,
                 (m.article_name or "").lower(),
-                str(m.representative_offer["id"]),
+                _legacy_sort_key(str(m.representative_offer["id"])),
             ),
         )
 
     # Tiebreak pass for non-relevance sorts — articleId asc — is universal.
-    items = sorted(items, key=lambda m: str(m.representative_offer["id"]))
+    items = sorted(items, key=lambda m: _legacy_sort_key(str(m.representative_offer["id"])))
 
     if plan.field is SortField.NAME:
         return sorted(items, key=lambda m: (m.article_name or "").lower(),

@@ -297,6 +297,10 @@ def _blocked_eclass_vendors(req: SearchRequest, *, mode: str = "all") -> str | N
         block_false = [g.e_class_group_code for g in entry.blocked_e_class_groups if not g.value]
         if not block_true:
             continue
+        if not entry.vendor_ids:
+            # Legacy no-op: empty vendorIds means "no vendors to restrict"
+            # rather than "restrict all vendors".
+            continue
         if mode == "article_global" and entry.vendor_ids:
             # Per-vendor restriction → routing.py applies in Python after
             # joining offers and article eclass.
@@ -307,12 +311,9 @@ def _blocked_eclass_vendors(req: SearchRequest, *, mode: str = "all") -> str | N
                 f"({block_expr}) and "
                 f"(not array_contains_any({field}, {_int_array(block_false)}))"
             )
-        if entry.vendor_ids:
-            parts.append(
-                f"(vendor_id not in {_str_array(entry.vendor_ids)}) or (not ({block_expr}))"
-            )
-        else:
-            parts.append(f"not ({block_expr})")
+        parts.append(
+            f"(vendor_id not in {_str_array(entry.vendor_ids)}) or (not ({block_expr}))"
+        )
     return _and(parts)
 
 

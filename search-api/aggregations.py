@@ -80,7 +80,7 @@ def article_fields_needed(req: SearchRequest) -> set[str]:
     if SummaryKind.S2CLASS in requested:
         needed.add("s2class_code")
     if SummaryKind.ECLASS5SET in requested:
-        needed.add("eclass5_code")
+        needed.add("s2class_code")
     if SummaryKind.PLATFORM_CATEGORIES in requested:
         if req.s2class_for_product_categories:
             needed.add("s2class_code")
@@ -167,25 +167,25 @@ def compute_summaries(
         )
     if SummaryKind.ECLASS5 in requested:
         out.eclass5_categories = eclass_summary(
-            article_rows, "eclass5_code", req.current_eclass5_code,
+            article_rows, "eclass5_code", req.current_eclass5_code, offer_rows,
         )
     if SummaryKind.ECLASS7 in requested:
         out.eclass7_categories = eclass_summary(
-            article_rows, "eclass7_code", req.current_eclass7_code,
+            article_rows, "eclass7_code", req.current_eclass7_code, offer_rows,
         )
     if SummaryKind.S2CLASS in requested:
         out.s2class_categories = eclass_summary(
-            s2c_rows, "s2class_code", req.current_s2class_code,
+            s2c_rows, "s2class_code", req.current_s2class_code, offer_rows,
         )
     if SummaryKind.ECLASS5SET in requested:
         out.eclasses_aggregations = eclass5set_summary(
-            article_rows, req.eclasses_aggregations,
+            article_rows, req.eclasses_aggregations, offer_rows,
         )
     if SummaryKind.PLATFORM_CATEGORIES in requested:
         if req.s2class_for_product_categories:
             if out.s2class_categories is None:
                 out.s2class_categories = eclass_summary(
-                    s2c_rows, "s2class_code", req.current_s2class_code,
+                    s2c_rows, "s2class_code", req.current_s2class_code, offer_rows,
                 )
         else:
             if out.categories_summary is None:
@@ -406,23 +406,24 @@ def eclass_summary(
     article_rows: Iterable[dict],
     field: str,
     selected: int | None,
+    offer_rows: Iterable[dict] | None = None,
 ) -> EClassCategories | None:
     """Hierarchical eClass / S2Class summary, derived from the per-article
     `ARRAY<INT32>` carrying the full root→leaf chain.
 
-    Hierarchy convention: each level is two trailing digits (eClass51,
-    eClass71). The parent of code C is `C // 100`; the depth is
-    `len(str(C)) // 2`. S2Class follows the same pattern in this codebase.
-
-    Without a selection, sameLevel surfaces top-level (depth 1) codes
-    that appear in the filtered hit set; children is empty.
-
-    With a selection at depth N: sameLevel surfaces sibling codes (same
-    parent at depth N-1), children surfaces codes at depth N+1 whose
-    parent is the selection.
+    Legacy counts per-offer (ES documents). When `offer_rows` is provided,
+    bucket counts reflect the number of offers per article hash.
     """
     if selected is None:
         return None
+
+    hash_offer_count: dict[str, int] | None = None
+    if offer_rows is not None:
+        hash_offer_count = {}
+        for o in offer_rows:
+            h = str(o.get("article_hash", ""))
+            if h:
+                hash_offer_count[h] = hash_offer_count.get(h, 0) + 1
 
     sel_depth = _eclass_depth(selected)
     parent = _eclass_parent(selected)
@@ -443,8 +444,8 @@ def eclass_summary(
             elif d == sel_depth + 1 and _eclass_parent(code) == selected:
                 children_counts[code].add(h)
 
-    same = _to_eclass_buckets(sibling_counts)
-    kids = _to_eclass_buckets(children_counts)
+    same = _to_eclass_buckets(sibling_counts, hash_offer_count)
+    kids = _to_eclass_buckets(children_counts, hash_offer_count)
     if not same and not kids:
         return None
     return EClassCategories(
@@ -505,9 +506,16 @@ def _eclass_parent(code: int) -> int | None:
     return int(s[: (d - 1) * 2] + "0" * (8 - (d - 1) * 2))
 
 
-def _to_eclass_buckets(counts: dict[int, set[str]]) -> list[EClassBucket]:
+def _to_eclass_buckets(
+    counts: dict[int, set[str]],
+    hash_offer_count: dict[str, int] | None = None,
+) -> list[EClassBucket]:
+    def _count(hs: set[str]) -> int:
+        if hash_offer_count:
+            return sum(hash_offer_count.get(h, 1) for h in hs)
+        return len(hs)
     items = sorted(
-        ((g, len(hs)) for g, hs in counts.items()),
+        ((g, _count(hs)) for g, hs in counts.items()),
         key=lambda r: (-r[1], r[0]),
     )
     return [EClassBucket(group=g, count=c) for g, c in items]
@@ -520,24 +528,37 @@ def _to_eclass_buckets(counts: dict[int, set[str]]) -> list[EClassBucket]:
 def eclass5set_summary(
     article_rows: Iterable[dict],
     aggregations: list[EClassesAggregation],
+    offer_rows: Iterable[dict] | None = None,
 ) -> list[EClassesAggregationCount]:
-    """For each named aggregation entry, count distinct articles whose
-    `eclass5_code` array intersects `entry.e_classes`. Order of the
-    returned list mirrors the request order — callers identify entries
-    by `id`."""
+    """For each named aggregation entry, count offers whose article's
+    `s2class_code` array intersects `entry.e_classes`. Legacy counts
+    per-offer (ES documents), not per-article. When `offer_rows` is
+    provided, the count reflects the number of offers; otherwise falls
+    back to counting distinct article hashes."""
+    hash_to_s2: dict[str, set[int]] = {}
+    for a in article_rows:
+        h = a.get("article_hash")
+        if not h:
+            continue
+        codes = {int(c) for c in (a.get("s2class_code") or [])}
+        hash_to_s2[str(h)] = codes
+
+    hash_offer_count: dict[str, int] = {}
+    if offer_rows is not None:
+        for o in offer_rows:
+            h = str(o.get("article_hash", ""))
+            if h:
+                hash_offer_count[h] = hash_offer_count.get(h, 0) + 1
+
     out: list[EClassesAggregationCount] = []
     for entry in aggregations:
         target = {int(c) for c in entry.e_classes}
         if not target:
             out.append(EClassesAggregationCount(id=entry.id, count=0))
             continue
-        matched: set[str] = set()
-        for a in article_rows:
-            h = a.get("article_hash")
-            if not h:
-                continue
-            codes = {int(c) for c in (a.get("eclass5_code") or [])}
+        count = 0
+        for h, codes in hash_to_s2.items():
             if codes & target:
-                matched.add(str(h))
-        out.append(EClassesAggregationCount(id=entry.id, count=len(matched)))
+                count += hash_offer_count.get(h, 1) if hash_offer_count else 1
+        out.append(EClassesAggregationCount(id=entry.id, count=count))
     return out
