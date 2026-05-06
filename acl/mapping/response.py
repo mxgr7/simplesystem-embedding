@@ -93,10 +93,10 @@ def map_response(
     raw_summaries = ftsearch_body.get("summaries") or {}
     summaries_out = {k: v for k, v in raw_summaries.items() if k in _SUMMARIES_KEYS}
 
-    # eClassesAggregations: ftsearch uses {id, count}, legacy uses {name, count}.
+    # eClassesAggregations: pass through as {id, count} — matches legacy spec.
     if "eClassesAggregations" in summaries_out:
         summaries_out["eClassesAggregations"] = [
-            {"name": item.get("id", item.get("name", "")), "count": item.get("count", 0)}
+            {"id": item.get("id", ""), "count": item.get("count", 0)}
             for item in summaries_out["eClassesAggregations"]
         ]
 

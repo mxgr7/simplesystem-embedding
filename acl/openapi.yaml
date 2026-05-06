@@ -50,11 +50,11 @@ paths:
           required: false
           description: |
             Repeatable. Each value is `<field>,<asc|desc>`. Allowed
-            fields: `articleId`, `name`, `price`. Multi-key sorts apply
-            only the first key per spec §4.5.
+            fields: `articleId`, `name`, `price`, `relevance`. Multi-key
+            sorts apply only the first key per spec §4.5.
           schema:
             type: array
-            items: { type: string, pattern: "^(articleId|name|price),(asc|desc)$" }
+            items: { type: string, pattern: "^(articleId|name|price|relevance),(asc|desc)$" }
       requestBody:
         required: true
         content:
@@ -349,7 +349,7 @@ components:
           nullable: true
         eClassesAggregations:
           type: array
-          items: { $ref: "#/components/schemas/NameCount" }
+          items: { $ref: "#/components/schemas/EClassesAggregationCount" }
 
     VendorSummary:
       type: object
@@ -364,10 +364,15 @@ components:
       additionalProperties: false
       required: [name, count]
       properties:
-        # Reused for both `manufacturerSummaries[].name` and
-        # `eClassesAggregations[].id` — second case sends "id" in the
-        # name slot. ACL response mapper handles the rename.
         name: { type: string }
+        count: { type: integer, minimum: 0 }
+
+    EClassesAggregationCount:
+      type: object
+      additionalProperties: false
+      required: [id, count]
+      properties:
+        id: { type: string }
         count: { type: integer, minimum: 0 }
 
     FeatureValueCount:

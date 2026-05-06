@@ -145,7 +145,7 @@ class TestMissingSummariesMetadata:
 
 
 # ---------------------------------------------------------------------------
-# 5. eClassesAggregations with missing "id" key
+# 5. eClassesAggregations output uses {id, count} per legacy spec
 # ---------------------------------------------------------------------------
 
 class TestEClassesAggregationsMissingId:
@@ -158,7 +158,7 @@ class TestEClassesAggregationsMissingId:
         }
         out = map_response(body, explain=False)
         aggs = out["summaries"]["eClassesAggregations"]
-        assert aggs == [{"name": "", "count": 5}]
+        assert aggs == [{"id": "", "count": 5}]
 
     def test_missing_count_defaults_to_zero(self):
         body = _minimal_body()
@@ -169,10 +169,10 @@ class TestEClassesAggregationsMissingId:
         }
         out = map_response(body, explain=False)
         aggs = out["summaries"]["eClassesAggregations"]
-        assert aggs == [{"name": "27-11-01-01", "count": 0}]
+        assert aggs == [{"id": "27-11-01-01", "count": 0}]
 
-    def test_name_fallback_when_no_id(self):
-        """If both `id` and `name` exist, `id` wins; if only `name`, use `name`."""
+    def test_no_id_key_defaults_to_empty(self):
+        """If input has no `id` key, output gets empty string."""
         body = _minimal_body()
         body["summaries"] = {
             "eClassesAggregations": [
@@ -181,9 +181,9 @@ class TestEClassesAggregationsMissingId:
         }
         out = map_response(body, explain=False)
         aggs = out["summaries"]["eClassesAggregations"]
-        assert aggs == [{"name": "fallback-name", "count": 3}]
+        assert aggs == [{"id": "", "count": 3}]
 
-    def test_id_takes_precedence_over_name(self):
+    def test_id_preserved_extra_keys_stripped(self):
         body = _minimal_body()
         body["summaries"] = {
             "eClassesAggregations": [
@@ -192,7 +192,7 @@ class TestEClassesAggregationsMissingId:
         }
         out = map_response(body, explain=False)
         aggs = out["summaries"]["eClassesAggregations"]
-        assert aggs[0]["name"] == "primary"
+        assert aggs[0] == {"id": "primary", "count": 1}
 
     def test_empty_aggregations_list(self):
         body = _minimal_body()

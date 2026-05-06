@@ -68,29 +68,16 @@ def _ftsearch_body(**overrides) -> dict:
 
 
 # =========================================================================
-# BUG 1: eClassesAggregations id -> name rename missing
+# eClassesAggregations uses {id, count} — matching legacy spec
 # =========================================================================
-# The OpenAPI spec (acl/openapi.yaml) declares:
-#   Summaries.eClassesAggregations: array of NameCount
-#   NameCount: {name: string, count: integer}
-#
-# ftsearch returns EClassesAggregationCount with {id, count}.
-# The OpenAPI comment on NameCount.name says:
-#   "Reused for both `manufacturerSummaries[].name` and
-#    `eClassesAggregations[].id` -- second case sends "id" in the
-#    name slot. ACL response mapper handles the rename."
-#
-# But map_response never renames id -> name. It does a raw passthrough
-# of the summaries dict.
 
 
-class TestEClassesAggregationsRename:
-    """The ACL response spec uses NameCount {name, count} for
-    eClassesAggregations, but ftsearch sends {id, count}.
-    map_response must rename `id` to `name`."""
+class TestEClassesAggregationsFormat:
+    """eClassesAggregations items use {id, count} matching the legacy
+    API spec (EClassesAggregationWithCount)."""
 
-    def test_id_renamed_to_name(self) -> None:
-        """Each eClassesAggregations item should have `name`, not `id`."""
+    def test_id_preserved(self) -> None:
+        """Each eClassesAggregations item should have `id`, not `name`."""
         body = _ftsearch_body(summaries={
             "eClassesAggregations": [
                 {"id": "agg-1", "count": 5},
@@ -100,15 +87,8 @@ class TestEClassesAggregationsRename:
         out = map_response(body, explain=False)
         aggs = out["summaries"]["eClassesAggregations"]
         for item in aggs:
-            assert "name" in item, (
-                f"eClassesAggregations item has 'id' but not 'name': {item}. "
-                f"The ACL OpenAPI spec declares these as NameCount {{name, count}} "
-                f"and the spec comment says the ACL mapper handles the rename."
-            )
-            assert "id" not in item, (
-                f"eClassesAggregations item still has 'id' after mapping: {item}. "
-                f"Should have been renamed to 'name' per the ACL response contract."
-            )
+            assert "id" in item
+            assert "name" not in item
 
     def test_count_preserved(self) -> None:
         """The count field should pass through unchanged."""
@@ -117,11 +97,7 @@ class TestEClassesAggregationsRename:
         })
         out = map_response(body, explain=False)
         aggs = out["summaries"]["eClassesAggregations"]
-        # This assertion depends on the rename happening first
-        assert aggs[0].get("count") == 42
-        assert "name" in aggs[0], (
-            "After rename, item should have {name, count} per NameCount schema"
-        )
+        assert aggs[0] == {"id": "agg-1", "count": 42}
 
 
 # =========================================================================

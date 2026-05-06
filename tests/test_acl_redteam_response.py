@@ -76,34 +76,16 @@ def _check_services():
 
 
 # =========================================================================
-# BUG 1: eClassesAggregations items have {id, count} not {name, count}
+# eClassesAggregations items use {id, count} — matches legacy spec
 # =========================================================================
-# The OpenAPI spec declares `summaries.eClassesAggregations` as
-# `type: array, items: NameCount` where NameCount is
-# `{name: string, count: integer}` with `additionalProperties: false`.
-#
-# ftsearch's wire model `EClassesAggregationCount` has fields `id` and
-# `count` (no alias on `id`).  The ACL response mapper
-# (`response.py:53`) passes summaries through unchanged:
-#     summaries_out = ftsearch_body.get("summaries") or {}
-#
-# Result: `eClassesAggregations` items arrive at the client as
-# `{id: "...", count: N}` — missing the required `name` key and
-# carrying the forbidden `id` key.
-#
-# The spec comment (openapi.yaml line 368-369) explicitly says:
-#   "second case sends 'id' in the name slot.
-#    ACL response mapper handles the rename."
-# But the rename never happens.
 
 
 class TestEClassesAggregationsFieldNaming:
-    """Spec: eClassesAggregations items are NameCount {name, count}.
-    Bug: ftsearch's {id, count} passes through without renaming."""
+    """eClassesAggregations items use {id, count} per the legacy
+    EClassesAggregationWithCount schema."""
 
-    def test_eclass_aggregation_items_have_name_key(self):
-        """Each eClassesAggregations item must have a 'name' key
-        per the NameCount schema. Currently has 'id' instead."""
+    def test_eclass_aggregation_items_have_id_key(self):
+        """Each eClassesAggregations item must have an 'id' key."""
         r = _post(_base_body(
             queryString="schrauben",
             summaries=["ECLASS5SET"],
@@ -114,33 +96,13 @@ class TestEClassesAggregationsFieldNaming:
         aggs = data["summaries"]["eClassesAggregations"]
         assert len(aggs) > 0, "Expected at least one aggregation item"
         first = aggs[0]
-        assert "name" in first, (
-            f"eClassesAggregations[0] missing required 'name' key "
-            f"(NameCount schema). Got keys: {sorted(first.keys())}"
-        )
-
-    def test_eclass_aggregation_items_no_extra_id_key(self):
-        """NameCount has additionalProperties: false, so 'id' is
-        a forbidden extra key."""
-        r = _post(_base_body(
-            queryString="schrauben",
-            summaries=["ECLASS5SET"],
-            eClassesAggregations=[{"id": "agg1", "eClasses": [23]}],
-        ))
-        assert r.status_code == 200
-        data = r.json()
-        aggs = data["summaries"]["eClassesAggregations"]
-        assert len(aggs) > 0
-        first = aggs[0]
-        assert "id" not in first, (
-            f"eClassesAggregations[0] has forbidden 'id' key "
-            f"(NameCount declares additionalProperties: false). "
-            f"Got keys: {sorted(first.keys())}. "
-            f"The mapper should rename 'id' to 'name'."
+        assert "id" in first, (
+            f"eClassesAggregations[0] missing 'id' key. "
+            f"Got keys: {sorted(first.keys())}"
         )
 
     def test_eclass_aggregation_multiple_items(self):
-        """Verify the rename is needed for all items, not just the first."""
+        """Each eClassesAggregations item must have exactly {id, count}."""
         r = _post(_base_body(
             queryString="schrauben",
             summaries=["ECLASS5SET"],
@@ -154,15 +116,15 @@ class TestEClassesAggregationsFieldNaming:
         aggs = data["summaries"]["eClassesAggregations"]
         assert len(aggs) == 2, f"Expected 2 aggregation items, got {len(aggs)}"
         for i, item in enumerate(aggs):
-            allowed = {"name", "count"}
+            allowed = {"id", "count"}
             actual = set(item.keys())
             extra = actual - allowed
             assert not extra, (
                 f"eClassesAggregations[{i}] has extra keys {extra} "
-                f"forbidden by additionalProperties: false on NameCount"
+                f"forbidden by additionalProperties: false on EClassesAggregationCount"
             )
-            missing = {"name", "count"} - actual
+            missing = {"id", "count"} - actual
             assert not missing, (
                 f"eClassesAggregations[{i}] missing required keys {missing} "
-                f"from NameCount schema"
+                f"from EClassesAggregationCount schema"
             )
