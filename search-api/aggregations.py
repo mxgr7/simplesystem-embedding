@@ -132,23 +132,38 @@ def compute_summaries(
     *,
     article_rows: list[dict],
     offer_rows: list[dict],
+    category_article_rows: list[dict] | None = None,
+    s2class_article_rows: list[dict] | None = None,
+    vendor_offer_rows: list[dict] | None = None,
+    mfg_article_rows: list[dict] | None = None,
+    mfg_offer_rows: list[dict] | None = None,
 ) -> Summaries:
     """Compute the requested summary kinds. Kinds not in `req.summaries`
-    are left at default (empty list / None)."""
+    are left at default (empty list / None).
+
+    Disjunctive faceting: legacy ES computes each aggregation excluding
+    its own post-filter. When provided, the `*_rows` overrides use
+    unscoped rows instead of the default `article_rows`/`offer_rows`."""
     out = Summaries()
     requested = set(req.summaries)
 
+    cat_rows = category_article_rows if category_article_rows is not None else article_rows
+    s2c_rows = s2class_article_rows if s2class_article_rows is not None else article_rows
+    vnd_rows = vendor_offer_rows if vendor_offer_rows is not None else offer_rows
+    mfg_a = mfg_article_rows if mfg_article_rows is not None else article_rows
+    mfg_o = mfg_offer_rows if mfg_offer_rows is not None else offer_rows
+
     if SummaryKind.VENDORS in requested:
-        out.vendor_summaries = vendors_summary(offer_rows)
+        out.vendor_summaries = vendors_summary(vnd_rows)
     if SummaryKind.MANUFACTURERS in requested:
-        out.manufacturer_summaries = manufacturers_summary(article_rows, offer_rows)
+        out.manufacturer_summaries = manufacturers_summary(mfg_a, mfg_o)
     if SummaryKind.FEATURES in requested:
         out.feature_summaries = features_summary(offer_rows)
     if SummaryKind.PRICES in requested:
         out.prices_summary = prices_summary(offer_rows, req)
     if SummaryKind.CATEGORIES in requested:
         out.categories_summary = categories_summary(
-            article_rows, req.current_category_path_elements,
+            cat_rows, req.current_category_path_elements,
         )
     if SummaryKind.ECLASS5 in requested:
         out.eclass5_categories = eclass_summary(
@@ -160,27 +175,22 @@ def compute_summaries(
         )
     if SummaryKind.S2CLASS in requested:
         out.s2class_categories = eclass_summary(
-            article_rows, "s2class_code", req.current_s2class_code,
+            s2c_rows, "s2class_code", req.current_s2class_code,
         )
     if SummaryKind.ECLASS5SET in requested:
         out.eclasses_aggregations = eclass5set_summary(
             article_rows, req.eclasses_aggregations,
         )
     if SummaryKind.PLATFORM_CATEGORIES in requested:
-        # Per spec: PLATFORM_CATEGORIES is an alias of CATEGORIES, OR
-        # of S2CLASS when `s2ClassForProductCategories` is true. The
-        # response shape doesn't have a separate field — the alias
-        # populates the corresponding existing field if it isn't
-        # already populated by an explicit kind.
         if req.s2class_for_product_categories:
             if out.s2class_categories is None:
                 out.s2class_categories = eclass_summary(
-                    article_rows, "s2class_code", req.current_s2class_code,
+                    s2c_rows, "s2class_code", req.current_s2class_code,
                 )
         else:
             if out.categories_summary is None:
                 out.categories_summary = categories_summary(
-                    article_rows, req.current_category_path_elements,
+                    cat_rows, req.current_category_path_elements,
                 )
 
     return out
@@ -412,10 +422,10 @@ def eclass_summary(
     parent is the selection.
     """
     if selected is None:
-        return _eclass_root_summary(article_rows, field)
+        return None
 
     sel_depth = _eclass_depth(selected)
-    parent = selected // 100 if sel_depth > 1 else None
+    parent = _eclass_parent(selected)
 
     sibling_counts: dict[int, set[str]] = defaultdict(set)
     children_counts: dict[int, set[str]] = defaultdict(set)
@@ -428,9 +438,9 @@ def eclass_summary(
             code = int(code)
             d = _eclass_depth(code)
             if d == sel_depth:
-                if parent is None or code // 100 == parent:
+                if parent is None or _eclass_parent(code) == parent:
                     sibling_counts[code].add(h)
-            elif d == sel_depth + 1 and code // 100 == selected:
+            elif d == sel_depth + 1 and _eclass_parent(code) == selected:
                 children_counts[code].add(h)
 
     same = _to_eclass_buckets(sibling_counts)
@@ -470,13 +480,29 @@ def _eclass_root_summary(
 
 
 def _eclass_depth(code: int) -> int:
-    """eClass / S2Class depth from code. Two digits per level.
-    23 → 1, 2317 → 2, 231720 → 3, 23172001 → 4. Codes with an odd
-    number of digits round up — defensive against rare malformed
-    inputs."""
+    """eClass / S2Class depth from a zero-padded 8-digit code.
+
+    Codes are stored as 8-digit ints with trailing zero pairs:
+    21000000 → 1, 21040000 → 2, 21042100 → 3, 21042101 → 4.
+    Compact codes (no zero padding) also work: 23 → 1, 2317 → 2."""
     if code <= 0:
         return 0
-    return (len(str(code)) + 1) // 2
+    s = f"{code:08d}"
+    depth = 0
+    for i in range(0, 8, 2):
+        if s[i:i+2] != "00":
+            depth = i // 2 + 1
+    return depth
+
+
+def _eclass_parent(code: int) -> int | None:
+    """Parent code: zero out the deepest non-zero 2-digit group.
+    21042101 → 21042100, 21040000 → 21000000, 21000000 → None."""
+    d = _eclass_depth(code)
+    if d <= 1:
+        return None
+    s = f"{code:08d}"
+    return int(s[: (d - 1) * 2] + "0" * (8 - (d - 1) * 2))
 
 
 def _to_eclass_buckets(counts: dict[int, set[str]]) -> list[EClassBucket]:

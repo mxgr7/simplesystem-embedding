@@ -71,6 +71,7 @@ from models import (
     SearchRequest,
     SortDirection,
     Summaries,
+    SummaryKind,
 )
 from prices import resolve_price
 from sorting import (
@@ -336,6 +337,7 @@ async def dispatch_dedup(
             req,
             article_expr=article_expr, offer_expr=offer_expr,
             path_b_distinct_hashes=materialised_hashes or path_b_distinct_hashes,
+            probe_hashes=path_b_distinct_hashes,
             client=client,
             articles_collection=articles_collection,
             offers_collection=offers_collection,
@@ -1073,6 +1075,7 @@ async def _compute_summaries(
     article_expr: str | None,
     offer_expr: str | None,
     path_b_distinct_hashes: list[str] | None,
+    probe_hashes: list[str] | None = None,
     client: MilvusClient,
     articles_collection: str,
     offers_collection: str,
@@ -1147,8 +1150,118 @@ async def _compute_summaries(
                     limit=fetch_limit,
                 )
 
+    # Disjunctive faceting: category and s2class summaries need article
+    # rows fetched WITHOUT their own filter atom, so the aggregation
+    # shows all sibling categories / eclass groups (legacy ES post-filter
+    # pattern). Only fetch extra rows when the filter is actually active.
+    cat_rows: list[dict] | None = None
+    s2c_rows: list[dict] | None = None
+    requested = set(req.summaries)
+
+    # For disjunctive fetches, use probe_hashes (offer-filtered but not
+    # article-filtered) so the category/s2class aggregation sees all
+    # articles from the offer set, not just those passing the current
+    # category/s2class filter.
+    disjunctive_hashes = probe_hashes or path_b_distinct_hashes
+
+    if (SummaryKind.CATEGORIES in requested or SummaryKind.PLATFORM_CATEGORIES in requested) \
+            and req.current_category_path_elements:
+        cat_expr = build_article_expr(req, exclude_category=True)
+        if disjunctive_hashes is not None:
+            cat_expr = _and_exprs(_hash_in_expr(disjunctive_hashes), cat_expr)
+        elif cat_expr is None:
+            cat_expr = 'article_hash != ""'
+        cat_rows = await asyncio.to_thread(
+            client.query,
+            collection_name=articles_collection,
+            filter=cat_expr,
+            output_fields=sorted(article_fields | {"category_l1", "category_l2", "category_l3", "category_l4", "category_l5"}),
+            limit=fetch_limit,
+        )
+
+    if (SummaryKind.S2CLASS in requested or SummaryKind.PLATFORM_CATEGORIES in requested) \
+            and req.current_s2class_code is not None:
+        s2c_expr = build_article_expr(req, exclude_s2class=True)
+        if disjunctive_hashes is not None:
+            s2c_expr = _and_exprs(_hash_in_expr(disjunctive_hashes), s2c_expr)
+        elif s2c_expr is None:
+            s2c_expr = 'article_hash != ""'
+        s2c_rows = await asyncio.to_thread(
+            client.query,
+            collection_name=articles_collection,
+            filter=s2c_expr,
+            output_fields=sorted(article_fields | {"s2class_code"}),
+            limit=fetch_limit,
+        )
+
+    # Disjunctive vendor: vendorIdsFilter is a post-filter — vendor
+    # summary should see all vendors, not just the filtered one.
+    # We need article hashes from all articles passing article-level
+    # filters (not just vendor-filtered probe hashes). Fetch from the
+    # articles collection directly, then query offers for those hashes
+    # without vendor filter.
+    vendor_offer_rows: list[dict] | None = None
+    if SummaryKind.VENDORS in requested and req.vendor_ids_filter:
+        vnd_art_expr = article_expr or 'article_hash != ""'
+        vnd_article_rows = await asyncio.to_thread(
+            client.query,
+            collection_name=articles_collection,
+            filter=vnd_art_expr,
+            output_fields=["article_hash"],
+            limit=fetch_limit,
+        )
+        vnd_hashes = list(dict.fromkeys(
+            str(r["article_hash"]) for r in vnd_article_rows
+        ))
+        if vnd_hashes:
+            vnd_expr = _and_exprs(
+                _hash_in_expr(vnd_hashes),
+                build_offer_expr(req, exclude_vendor=True),
+            )
+            vendor_offer_rows = await asyncio.to_thread(
+                client.query,
+                collection_name=offers_collection,
+                filter=vnd_expr or 'article_hash != ""',
+                output_fields=sorted(offer_fields | {"vendor_id"}),
+                limit=fetch_limit,
+            )
+
+    # Disjunctive manufacturer: manufacturersFilter is a post-filter —
+    # manufacturer summary should see all manufacturers.
+    mfg_article_rows: list[dict] | None = None
+    mfg_offer_rows: list[dict] | None = None
+    if SummaryKind.MANUFACTURERS in requested and req.manufacturers_filter:
+        mfg_art_expr = build_article_expr(req, exclude_manufacturer=True)
+        if disjunctive_hashes is not None:
+            mfg_art_expr = _and_exprs(_hash_in_expr(disjunctive_hashes), mfg_art_expr)
+        elif mfg_art_expr is None:
+            mfg_art_expr = 'article_hash != ""'
+        mfg_article_rows = await asyncio.to_thread(
+            client.query,
+            collection_name=articles_collection,
+            filter=mfg_art_expr,
+            output_fields=sorted(article_fields | {"manufacturerName"}),
+            limit=fetch_limit,
+        )
+        mfg_hashes = list(dict.fromkeys(
+            str(r["article_hash"]) for r in mfg_article_rows
+        ))
+        if mfg_hashes:
+            mfg_offer_expr = _and_exprs(_hash_in_expr(mfg_hashes), offer_expr)
+            mfg_offer_rows = await asyncio.to_thread(
+                client.query,
+                collection_name=offers_collection,
+                filter=mfg_offer_expr or 'article_hash != ""',
+                output_fields=sorted(offer_fields),
+                limit=fetch_limit,
+            )
+
     return aggregations.compute_summaries(
         req, article_rows=article_rows, offer_rows=offer_rows,
+        category_article_rows=cat_rows, s2class_article_rows=s2c_rows,
+        vendor_offer_rows=vendor_offer_rows,
+        mfg_article_rows=mfg_article_rows,
+        mfg_offer_rows=mfg_offer_rows,
     )
 
 

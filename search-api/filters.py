@@ -415,24 +415,39 @@ def build_milvus_expr(req: SearchRequest) -> str | None:
     ])
 
 
-def build_article_expr(req: SearchRequest) -> str | None:
+def build_article_expr(
+    req: SearchRequest,
+    *,
+    exclude_category: bool = False,
+    exclude_s2class: bool = False,
+    exclude_manufacturer: bool = False,
+) -> str | None:
     """Article-side scalar expression for the F9 dedup topology.
 
     Composes only atoms whose fields live on `articles_v{N}`:
     manufacturer, category prefix, eclass hierarchies, eClasses-filter,
     plus the global (no `vendor_ids`) entries of
     `blocked_eclass_vendors_filters`.
+
+    The `exclude_*` flags support disjunctive faceting: legacy ES
+    computes each summary aggregation with all post-filters except
+    the summary's own filter. Category and s2class summaries need
+    article_expr without their own filter atom.
     """
     return _and([
-        _manufacturers(req),
-        _category_prefix(req),
-        _eclass_codes(req),
+        None if exclude_manufacturer else _manufacturers(req),
+        None if exclude_category else _category_prefix(req),
+        None if exclude_s2class else _eclass_codes(req),
         _eclasses_filter(req),
         _blocked_eclass_vendors(req, mode="article_global"),
     ])
 
 
-def build_offer_expr(req: SearchRequest) -> str | None:
+def build_offer_expr(
+    req: SearchRequest,
+    *,
+    exclude_vendor: bool = False,
+) -> str | None:
     """Offer-side scalar expression for the F9 dedup topology.
 
     Composes only atoms whose fields live on `offers_v{N}`: vendor,
@@ -454,7 +469,7 @@ def build_offer_expr(req: SearchRequest) -> str | None:
     pre-filter shrinks the page the post-pass operates on.
     """
     return _and([
-        _vendor_ids(req),
+        None if exclude_vendor else _vendor_ids(req),
         _article_ids(req),
         _delivery_time(req),
         _required_features(req),
