@@ -115,6 +115,11 @@ result set that legacy ES uses.
 24. **eClassesAggregations: s2class + per-offer counting** — `search-api/aggregations.py`
 25. **eclass/s2class summary per-offer counting** — `search-api/aggregations.py`
 26. **Sort tiebreak: friendlyId-format sort key** — `search-api/sorting.py`
+27. **Accept null for optional list fields** — `acl/models.py` (Java sends null instead of [])
+28. **Accept Java Optional wrapper for currentCategoryPathElements** — `acl/models.py` ({"present":true,"undefined":false} → [])
+29. **Case-insensitive sort direction** — `acl/app.py` (relevance,ASC → relevance,asc)
+30. **currentS2ClassCode=0 is no-filter** — `search-api/filters.py` (legacy treats 0 as absent)
+31. **eclass_summary root-level for selected=0** — `search-api/aggregations.py` (children = depth-1 groups)
 
 ## Accepted deviations
 

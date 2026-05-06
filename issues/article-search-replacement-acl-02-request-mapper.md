@@ -12,6 +12,8 @@ References: spec §3 (legacy request contract), §4.x (forwarding rules), §8 (c
 
 A subsequent A6 run surfaced one mapper bug fixed in commit `17ddc62`: ftsearch's `SelectedArticleSources` rejects three legacy customer-article-number fields (the §2.1 enum collapse retired them). The mapper now strips them before forwarding.
 
+Portal integration (commit `391c52e`) surfaced three wire-format quirks: (1) the Java backend sends `null` for optional list fields (`articleIdsFilter`, `eClassesFilter`, `eClassesAggregations`) instead of `[]`; (2) `currentCategoryPathElements` is serialised as a Java Optional wrapper (`{"present":true,"undefined":false}`) instead of an array; (3) sort direction is uppercase (`relevance,ASC`). The ACL now coerces null/wrapper → `[]` via a Pydantic before-validator and accepts case-insensitive sort directions.
+
 **Legacy reference** (next-gen): request shape `api-spec/specs/article-search/query-search-api.yaml` `SearchParams` (lines 113-237). `searchArticlesBy` enum at `article/search/query/src/main/java/com/simplesystem/nextgen/article/search/query/api/ArticleSearchOperations.java:91-117` (only `STANDARD` survives §2.1).
 
 ## Scope
