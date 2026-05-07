@@ -253,15 +253,20 @@ async def dispatch_dedup(
         distinct_hashes = sorted({r["article_hash"] for r in probe_rows})
         timings.distinct_hashes = len(distinct_hashes)
 
-        if len(distinct_hashes) > path_b_hash_limit:
+        if len(probe_rows) > path_b_hash_limit or len(distinct_hashes) > path_b_hash_limit:
             # Probe overflow → Path A fallback with clipped hit count
             # (the true count is unknown beyond the probe limit).
+            # The probe limit is enforced on offer rows, not distinct
+            # article hashes. Multi-offer articles can therefore fill the
+            # row window while the distinct hash count still looks safe;
+            # treating the extra row as overflow avoids silently ranking a
+            # truncated subset of catalog-matching articles.
             timings.probe_overflowed = True
             timings.path = "A_fallback"
             materialised, _hit_count_unused, _clipped_unused = await _path_a(
                 req, query_text, article_expr,
                 sort_plan=sort_plan,
-                rank_limit=rank_limit,
+                rank_limit=_MILVUS_MAX_QUERY_WINDOW,
                 relevance_pool_max=relevance_pool_max,
                 relevance_score_floor=relevance_score_floor,
                 hitcount_cap=hitcount_cap,
@@ -273,6 +278,7 @@ async def dispatch_dedup(
                 rrf_k=rrf_k, num_candidates=num_candidates,
                 timings=timings,
                 skip_count=True,
+                resolve_offer_expr=offer_expr,
             )
             # hit_count for the fallback request is not the article-side
             # count — the user filtered by per-offer expr that we
@@ -305,8 +311,10 @@ async def dispatch_dedup(
     # primary sort with the universal articleId-asc tiebreak.
     sorted_items = sort_items(materialised, sort_plan)
 
-    # hit_count: use the materialised offer count (one result per offer)
-    # rather than the article-level count from the collection query.
+    # hit_count: use the materialised article count after representative
+    # offer selection and post-passes, rather than the raw article-side
+    # collection count. This keeps `pageCount` aligned with the number of
+    # visible article rows.
     if not hit_count_clipped:
         hit_count = len(sorted_items)
 
@@ -418,6 +426,7 @@ async def _path_a(
     num_candidates: int | None,
     timings: _Timings,
     skip_count: bool = False,
+    resolve_offer_expr: str | None = None,
 ) -> tuple[list[_Materialised], int, bool]:
     """Vector-first path. Article expression pushed down to ANN/BM25;
     offer resolve attaches per-hash offers (no offer-side filter)."""
@@ -469,7 +478,7 @@ async def _path_a(
     # Concurrent: offer resolve, article meta (name/eclass), hit count.
     offers_task = asyncio.to_thread(
         _resolve_offers, client, offers_collection,
-        hashes=hashes, offer_expr=None,
+        hashes=hashes, offer_expr=resolve_offer_expr,
         need_eclass_post_pass=has_per_vendor_blocked_eclass(req),
     )
     meta_task = _fetch_article_meta(
@@ -614,9 +623,14 @@ async def _rank_articles(
     `article_hash`. Mirrors the classifier in `hybrid.py` for routing
     multi-word vs single-token strict-identifier queries."""
 
-    # Multi-word → vector-only (BM25 over identifier corpus contributes
-    # noise on phrase queries — same logic as legacy hybrid_classified).
-    multi_word = len(query_text.split()) > 1
+    # Multi-word natural-language phrase → vector-only (BM25 over the
+    # identifier corpus contributes noise). If any token is itself a strict
+    # identifier/MPN, prefer BM25: queries such as
+    # `vmpac-m4x38 schraube` rely on exact code matching and dense vectors
+    # tend to blur the opaque identifier away.
+    query_tokens = query_text.split()
+    multi_word = len(query_tokens) > 1
+    has_strict_identifier_token = any(is_strict_identifier(t) for t in query_tokens)
     strict_id = not multi_word and is_strict_identifier(query_text)
 
     async def do_dense() -> list[tuple[str, float]]:
@@ -643,6 +657,13 @@ async def _rank_articles(
         )
         timings.bm25_ms = (time.perf_counter() - t0) * 1000
         return out
+
+    if multi_word and has_strict_identifier_token:
+        bm = await do_bm25()
+        if bm:
+            return bm[:limit]
+        dense = await do_dense()
+        return dense[:limit]
 
     if multi_word:
         dense = await do_dense()
@@ -868,17 +889,22 @@ def _materialise(
         if sort_plan.field in (SortField.NAME, SortField.RELEVANCE, SortField.ARTICLE_ID) and article_meta is not None:
             article_name = (article_meta.get(hash_) or {}).get("name")
 
-        for offer in offers:
-            resolved_price = _resolver(offer)
-            if price_active and resolved_price is None:
-                continue
-            out.append(_Materialised(
-                article_hash=hash_,
-                relevance_score=score,
-                representative_offer=offer,
-                resolved_price=resolved_price,
-                article_name=article_name,
-            ))
+        picked = pick_representative(
+            offers,
+            plan=sort_plan,
+            price_filter_active=price_active,
+            price_resolver=_resolver,
+        )
+        if picked is None:
+            continue
+        offer, resolved_price = picked
+        out.append(_Materialised(
+            article_hash=hash_,
+            relevance_score=score,
+            representative_offer=offer,
+            resolved_price=resolved_price,
+            article_name=article_name,
+        ))
     return out
 
 
