@@ -105,20 +105,36 @@ def _sql_eclass_extract_lateral(eclass_groups_expr):
     )
 
 
-def _sql_s2class_case_expr(prefix):
-    default_sql = f"expand_eclass({DEFAULT_S2CLASS_CODE})"
-    cases = []
+def _sql_s2class_default_expr():
+    return f"expand_eclass({DEFAULT_S2CLASS_CODE})"
+
+
+def _sql_s2class_source_select(prefix):
+    version_cases = []
+    leafs_cases = []
     for key in S2CLASS_SOURCE_KEYS_DESC:
         leafs_col = f"{prefix}{_eclass_leaf_col(key)}"
-        cases.append(
-            f"""WHEN len({leafs_col}) > 0 THEN COALESCE(
-                (SELECT list_sort(list_distinct(flatten(list(s.s2_groups))))
-                 FROM unnest({leafs_col}) AS src(leaf)
-                 JOIN s2map s ON s.version_key = '{key}' AND s.from_code = src.leaf),
-                {default_sql}
-            )"""
-        )
-    return "CASE\n                " + "\n                ".join(cases) + f"\n                ELSE {default_sql}\n            END"
+        version_cases.append(f"WHEN len({leafs_col}) > 0 THEN '{key}'")
+        leafs_cases.append(f"WHEN len({leafs_col}) > 0 THEN {leafs_col}")
+    return f"""CASE
+                {' '.join(version_cases)}
+                ELSE NULL
+            END AS s2_source_version_key,
+            CASE
+                {' '.join(leafs_cases)}
+                ELSE []::INTEGER[]
+            END AS s2_source_leafs"""
+
+
+def _sql_s2class_join_lateral(source_alias):
+    return f"""SELECT
+            list_sort(list_distinct(flatten(list(s.s2_groups)))) AS s2class_code
+        FROM unnest({source_alias}.s2_source_leafs) AS src(leaf)
+        JOIN s2map s ON s.version_key = {source_alias}.s2_source_version_key AND s.from_code = src.leaf"""
+
+
+def _sql_s2class_from_join_expr(join_alias):
+    return f"COALESCE({join_alias}.s2class_code, {_sql_s2class_default_expr()})"
 
 
 # DuckDB SQL macros — reusable transforms that mirror helpers in
@@ -763,14 +779,25 @@ projected AS (
         SELECT
             __ECLASS_EXTRACT_LATERAL__
     ) ec
+    CROSS JOIN LATERAL (
+        SELECT
+            __S2CLASS_SOURCE_SELECT__
+    ) s2src
+    LEFT JOIN LATERAL (
+        __S2CLASS_JOIN_LATERAL__
+    ) s2 ON TRUE
 )""".replace(
     "__ECLASS5_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_5_1_leafs")
 ).replace(
     "__ECLASS7_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_7_1_leafs")
 ).replace(
-    "__S2CLASS_CODE_EXPR__", _sql_s2class_case_expr("ec.")
+    "__S2CLASS_CODE_EXPR__", _sql_s2class_from_join_expr("s2")
 ).replace(
     "__ECLASS_EXTRACT_LATERAL__", _sql_eclass_extract_lateral("params.eclassGroups")
+).replace(
+    "__S2CLASS_SOURCE_SELECT__", _sql_s2class_source_select("ec.")
+).replace(
+    "__S2CLASS_JOIN_LATERAL__", _sql_s2class_join_lateral("s2src")
 )
 
 
@@ -1144,6 +1171,13 @@ WITH offer_derived AS (
         SELECT
             __OP_ECLASS_EXTRACT_LATERAL__
     ) ec
+    CROSS JOIN LATERAL (
+        SELECT
+            __OP_S2CLASS_SOURCE_SELECT__
+    ) s2src
+    LEFT JOIN LATERAL (
+        __OP_S2CLASS_JOIN_LATERAL__
+    ) s2 ON TRUE
 )
 SELECT
     *,
@@ -1167,9 +1201,13 @@ FROM offer_derived
 ).replace(
     "__OP_ECLASS7_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_7_1_leafs")
 ).replace(
-    "__OP_S2CLASS_CODE_EXPR__", _sql_s2class_case_expr("ec.")
+    "__OP_S2CLASS_CODE_EXPR__", _sql_s2class_from_join_expr("s2")
 ).replace(
     "__OP_ECLASS_EXTRACT_LATERAL__", _sql_eclass_extract_lateral('o."offer".offerParams.eclassGroups')
+).replace(
+    "__OP_S2CLASS_SOURCE_SELECT__", _sql_s2class_source_select("ec.")
+).replace(
+    "__OP_S2CLASS_JOIN_LATERAL__", _sql_s2class_join_lateral("s2src")
 )
 
 
