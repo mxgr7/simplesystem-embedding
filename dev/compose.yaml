@@ -6,7 +6,7 @@ services:
     environment:
       EMBED_URL: http://host.docker.internal:8080
       MILVUS_URI: http://host.docker.internal:19530
-      MILVUS_ARTICLES_COLLECTION: articles_v6_dev
+      MILVUS_ARTICLES_COLLECTION: articles_v7
       USE_DEDUP_TOPOLOGY: "1"
     ports:
       - "8001:8001"
@@ -20,9 +20,9 @@ services:
       dockerfile: acl/Dockerfile
     environment:
       FTSEARCH_URL: http://search-api:8001
-      MILVUS_ARTICLES_COLLECTION: offers_v6_dev
+      MILVUS_ARTICLES_COLLECTION: offers_v7
     ports:
-      - "8081:8081"
+      - "8018:8081"
     depends_on:
       - search-api
     restart: unless-stopped
