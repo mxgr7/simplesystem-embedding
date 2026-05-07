@@ -189,6 +189,47 @@ def _minimal_record(**overrides) -> dict:
     return rec
 
 
+def test_s2class_uses_highest_available_non_s2_version() -> None:
+    rec = _minimal_record(offerParams={
+        "eclassGroups": {
+            "ECLASS_5_1": [17019100],
+            "ECLASS_7_1": [27010100],
+        },
+    })
+    row = project(rec).row
+    assert row["s2class_code"] == [27000000, 27010000, 27010100]
+
+
+def test_s2class_ignores_source_provided_s2class() -> None:
+    rec = _minimal_record(offerParams={
+        "eclassGroups": {
+            "ECLASS_7_1": [27010100],
+            "S2CLASS": [42424242],
+        },
+    })
+    row = project(rec).row
+    assert row["s2class_code"] == [27000000, 27010000, 27010100]
+
+
+def test_s2class_does_not_fall_back_to_lower_version_when_higher_misses() -> None:
+    rec = _minimal_record(offerParams={
+        "eclassGroups": {
+            "ECLASS_5_1": [17019100],
+            "ECLASS_7_1": [42424242],
+        },
+    })
+    row = project(rec).row
+    assert row["s2class_code"] == [90000000, 90900000, 90909000, 90909090]
+
+
+def test_s2class_uses_default_when_no_non_s2_version_exists() -> None:
+    rec = _minimal_record(offerParams={
+        "eclassGroups": {"S2CLASS": [11111111]},
+    })
+    row = project(rec).row
+    assert row["s2class_code"] == [90000000, 90900000, 90909000, 90909090]
+
+
 def test_long_pk_round_trips() -> None:
     """Acceptance: a representative legacy `articleId` (≥80 chars) lands in
     the PK without truncation and round-trips. Post-F9-correction the PK is

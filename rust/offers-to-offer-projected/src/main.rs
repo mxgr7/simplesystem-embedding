@@ -1,11 +1,12 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use arrow_array::builder::{BooleanBuilder, Int32Builder, Int64Builder, LargeStringBuilder};
+use arrow_array::builder::{BooleanBuilder, Int32Builder, Int64Builder, LargeStringBuilder, ListBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use clap::{ArgAction, Parser, ValueEnum};
@@ -103,6 +104,9 @@ struct ShardStats {
     compressed_bytes: u64,
     parquet_bytes: u64,
 }
+
+const DEFAULT_S2CLASS_CODE: i32 = 90909090;
+static S2_MAPPINGS: OnceLock<Vec<Option<HashMap<i32, i32>>>> = OnceLock::new();
 
 #[derive(Debug, Default, Clone, Copy)]
 struct Count(i32);
@@ -235,6 +239,127 @@ impl MaybeI64<'_> {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CodeI32(i32);
+
+impl<'de> Deserialize<'de> for CodeI32 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CodeI32Visitor;
+
+        impl<'de> Visitor<'de> for CodeI32Visitor {
+            type Value = CodeI32;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an int-like eclass code")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<CodeI32, E>
+            where
+                E: serde::de::Error,
+            {
+                i32::try_from(value)
+                    .map(CodeI32)
+                    .map_err(|_| E::custom("code out of i32 range"))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<CodeI32, E>
+            where
+                E: serde::de::Error,
+            {
+                i32::try_from(value)
+                    .map(CodeI32)
+                    .map_err(|_| E::custom("code out of i32 range"))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<CodeI32, E>
+            where
+                E: serde::de::Error,
+            {
+                value
+                    .parse::<i32>()
+                    .map(CodeI32)
+                    .map_err(|_| E::custom("invalid code string"))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<CodeI32, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                while let Some(key) = map.next_key::<&str>()? {
+                    match key {
+                        "$numberInt" | "$numberLong" => {
+                            let value = map.next_value::<&str>()?;
+                            let parsed = value
+                                .parse::<i32>()
+                                .map_err(|_| serde::de::Error::custom("invalid extended-json code"))?;
+                            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                            return Ok(CodeI32(parsed));
+                        }
+                        _ => {
+                            let _ = map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+                Err(serde::de::Error::custom("missing extended-json code"))
+            }
+        }
+
+        deserializer.deserialize_any(CodeI32Visitor)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EclassGroups {
+    #[serde(default, rename = "ECLASS_5_1")]
+    eclass_5_1: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_6")]
+    eclass_6: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_7_1")]
+    eclass_7_1: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_8")]
+    eclass_8: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_9")]
+    eclass_9: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_10")]
+    eclass_10: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_11")]
+    eclass_11: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_12")]
+    eclass_12: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_13")]
+    eclass_13: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_14")]
+    eclass_14: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_15")]
+    eclass_15: Vec<CodeI32>,
+    #[serde(default, rename = "ECLASS_16")]
+    eclass_16: Vec<CodeI32>,
+    #[allow(dead_code)]
+    #[serde(default, rename = "S2CLASS")]
+    s2class: Vec<CodeI32>,
+}
+
+impl EclassGroups {
+    fn highest_non_s2(&self) -> Option<(usize, &[CodeI32])> {
+        if !self.eclass_16.is_empty() { return Some((16, &self.eclass_16)); }
+        if !self.eclass_15.is_empty() { return Some((15, &self.eclass_15)); }
+        if !self.eclass_14.is_empty() { return Some((14, &self.eclass_14)); }
+        if !self.eclass_13.is_empty() { return Some((13, &self.eclass_13)); }
+        if !self.eclass_12.is_empty() { return Some((12, &self.eclass_12)); }
+        if !self.eclass_11.is_empty() { return Some((11, &self.eclass_11)); }
+        if !self.eclass_10.is_empty() { return Some((10, &self.eclass_10)); }
+        if !self.eclass_9.is_empty() { return Some((9, &self.eclass_9)); }
+        if !self.eclass_8.is_empty() { return Some((8, &self.eclass_8)); }
+        if !self.eclass_7_1.is_empty() { return Some((7, &self.eclass_7_1)); }
+        if !self.eclass_6.is_empty() { return Some((6, &self.eclass_6)); }
+        if !self.eclass_5_1.is_empty() { return Some((5, &self.eclass_5_1)); }
+        None
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ExportRow<'a> {
     #[serde(borrow, rename = "_id")]
@@ -313,6 +438,8 @@ struct OfferParams<'a> {
     downloads: Count,
     #[serde(default, rename = "categoryPaths")]
     category_paths: Count,
+    #[serde(default, rename = "eclassGroups")]
+    eclass_groups: EclassGroups,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,6 +507,7 @@ struct BatchBuilder {
     pricing_count: Int32Builder,
     marker_count: Int32Builder,
     customer_article_number_count: Int32Builder,
+    s2class_code: ListBuilder<Int32Builder>,
     open_price: LargeStringBuilder,
     open_currency: LargeStringBuilder,
     closed_price: LargeStringBuilder,
@@ -441,6 +569,7 @@ impl BatchBuilder {
             pricing_count: Int32Builder::with_capacity(capacity),
             marker_count: Int32Builder::with_capacity(capacity),
             customer_article_number_count: Int32Builder::with_capacity(capacity),
+            s2class_code: ListBuilder::new(Int32Builder::with_capacity(capacity.saturating_mul(4))),
             open_price: LargeStringBuilder::with_capacity(capacity, avg),
             open_currency: LargeStringBuilder::with_capacity(capacity, avg),
             closed_price: LargeStringBuilder::with_capacity(capacity, avg),
@@ -463,6 +592,14 @@ impl BatchBuilder {
 
     fn len(&self) -> usize {
         self.rows
+    }
+
+    fn append_s2class_codes(&mut self, codes: &[i32]) {
+        let values = self.s2class_code.values();
+        for code in codes {
+            values.append_value(*code);
+        }
+        self.s2class_code.append(true);
     }
 
     fn append(&mut self, source_file_id: i32, row: &Value, include_json_blobs: bool, include_raw_json: bool) {
@@ -542,6 +679,9 @@ impl BatchBuilder {
         self.marker_count.append_value(array_len(row, &["markers"]));
         self.customer_article_number_count
             .append_value(array_len(row, &["customerArticleNumbers"]));
+        self.append_s2class_codes(&derive_s2class_hierarchy_from_value(
+            get_path(row, &["offer", "offerParams", "eclassGroups"]),
+        ));
 
         push_opt_str(
             &mut self.open_price,
@@ -680,6 +820,9 @@ impl BatchBuilder {
         self.pricing_count.append_value(0);
         self.marker_count.append_value(0);
         self.customer_article_number_count.append_value(0);
+        self.append_s2class_codes(&derive_s2class_hierarchy(
+            params.map(|v| &v.eclass_groups),
+        ));
 
         push_opt_str(
             &mut self.open_price,
@@ -746,6 +889,7 @@ impl BatchBuilder {
             Arc::new(self.pricing_count.finish()),
             Arc::new(self.marker_count.finish()),
             Arc::new(self.customer_article_number_count.finish()),
+            Arc::new(self.s2class_code.finish()),
             Arc::new(self.open_price.finish()),
             Arc::new(self.open_currency.finish()),
             Arc::new(self.closed_price.finish()),
@@ -784,6 +928,7 @@ fn main() -> Result<()> {
         .context("failed to build rayon thread pool")?;
 
     prepare_output_dir(&args.output_dir, args.overwrite)?;
+    init_s2_mappings()?;
 
     let start = Instant::now();
     let files = collect_files(&args.input_glob, args.limit, args.selection_mode)?;
@@ -876,6 +1021,7 @@ fn schema() -> SchemaRef {
         Field::new("pricing_count", DataType::Int32, false),
         Field::new("marker_count", DataType::Int32, false),
         Field::new("customer_article_number_count", DataType::Int32, false),
+        Field::new("s2class_code", DataType::List(Arc::new(Field::new("item", DataType::Int32, true))), false),
         Field::new("open_price", DataType::LargeUtf8, true),
         Field::new("open_currency", DataType::LargeUtf8, true),
         Field::new("closed_price", DataType::LargeUtf8, true),
@@ -957,6 +1103,180 @@ fn write_manifest(output_dir: &Path, files: &[FileEntry]) -> Result<()> {
     }
     writer.flush()?;
     Ok(())
+}
+
+fn init_s2_mappings() -> Result<()> {
+    if S2_MAPPINGS.get().is_none() {
+        let mappings = load_s2_mappings()?;
+        let _ = S2_MAPPINGS.set(mappings);
+    }
+    Ok(())
+}
+
+fn load_s2_mappings() -> Result<Vec<Option<HashMap<i32, i32>>>> {
+    let mut mappings = (0..17).map(|_| None).collect::<Vec<_>>();
+    let mapping_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../indexer/classification_mapping");
+
+    for version in 5..=16 {
+        let path = mapping_dir.join(format!("{version}-s2.bin.gz"));
+        if !path.exists() {
+            continue;
+        }
+
+        let file = File::open(&path)
+            .with_context(|| format!("failed to open s2 mapping {}", path.display()))?;
+        let mut decoder = GzDecoder::new(BufReader::with_capacity(1024 * 1024, file));
+        let mut bytes = Vec::new();
+        decoder.read_to_end(&mut bytes)?;
+        if bytes.len() < 16 {
+            bail!("mapping file too small: {}", path.display());
+        }
+
+        let magic = i32::from_be_bytes(bytes[0..4].try_into().unwrap());
+        let format_version = i32::from_be_bytes(bytes[4..8].try_into().unwrap());
+        let count = i32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        if magic != 0x4D415050 {
+            bail!("bad magic in {}", path.display());
+        }
+        if format_version != 1 {
+            bail!("unsupported s2 mapping version {} in {}", format_version, path.display());
+        }
+        if bytes.len() < 16 + count.saturating_mul(8) {
+            bail!("truncated mapping file: {}", path.display());
+        }
+
+        let mut map = HashMap::with_capacity(count);
+        for i in 0..count {
+            let off = 16 + i * 8;
+            let from_code = i32::from_be_bytes(bytes[off..off + 4].try_into().unwrap());
+            let to_code = i32::from_be_bytes(bytes[off + 4..off + 8].try_into().unwrap());
+            map.insert(from_code, to_code);
+        }
+        mappings[version] = Some(map);
+    }
+
+    Ok(mappings)
+}
+
+fn default_s2class_hierarchy() -> Vec<i32> {
+    let mut out = Vec::with_capacity(4);
+    expand_eclass_hierarchy(DEFAULT_S2CLASS_CODE, &mut out);
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn derive_s2class_hierarchy(groups: Option<&EclassGroups>) -> Vec<i32> {
+    let Some(groups) = groups else {
+        return default_s2class_hierarchy();
+    };
+    let Some((version, codes)) = groups.highest_non_s2() else {
+        return default_s2class_hierarchy();
+    };
+    let mappings = S2_MAPPINGS.get().expect("s2 mappings initialized");
+    let Some(map) = mappings[version].as_ref() else {
+        return default_s2class_hierarchy();
+    };
+
+    let mut leaves = Vec::with_capacity(codes.len());
+    for code in codes {
+        if let Some(mapped) = map.get(&code.0) {
+            leaves.push(*mapped);
+        }
+    }
+    if leaves.is_empty() {
+        return default_s2class_hierarchy();
+    }
+
+    leaves.sort_unstable();
+    leaves.dedup();
+
+    let mut hierarchy = Vec::with_capacity(leaves.len().saturating_mul(4));
+    for leaf in leaves {
+        expand_eclass_hierarchy(leaf, &mut hierarchy);
+    }
+    hierarchy.sort_unstable();
+    hierarchy.dedup();
+    hierarchy
+}
+
+fn derive_s2class_hierarchy_from_value(value: Option<&Value>) -> Vec<i32> {
+    let Some(value) = value else {
+        return default_s2class_hierarchy();
+    };
+    let Some(obj) = value.as_object() else {
+        return default_s2class_hierarchy();
+    };
+
+    for version in [
+        (16usize, "ECLASS_16"),
+        (15usize, "ECLASS_15"),
+        (14usize, "ECLASS_14"),
+        (13usize, "ECLASS_13"),
+        (12usize, "ECLASS_12"),
+        (11usize, "ECLASS_11"),
+        (10usize, "ECLASS_10"),
+        (9usize, "ECLASS_9"),
+        (8usize, "ECLASS_8"),
+        (7usize, "ECLASS_7_1"),
+        (6usize, "ECLASS_6"),
+        (5usize, "ECLASS_5_1"),
+    ] {
+        let Some(values) = obj.get(version.1).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        if values.is_empty() {
+            continue;
+        }
+        let mappings = S2_MAPPINGS.get().expect("s2 mappings initialized");
+        let Some(map) = mappings[version.0].as_ref() else {
+            return default_s2class_hierarchy();
+        };
+
+        let mut leaves = Vec::with_capacity(values.len());
+        for code in values {
+            if let Some(code) = json_code_i32(code) {
+                if let Some(mapped) = map.get(&code) {
+                    leaves.push(*mapped);
+                }
+            }
+        }
+        if leaves.is_empty() {
+            return default_s2class_hierarchy();
+        }
+
+        leaves.sort_unstable();
+        leaves.dedup();
+        let mut hierarchy = Vec::with_capacity(leaves.len().saturating_mul(4));
+        for leaf in leaves {
+            expand_eclass_hierarchy(leaf, &mut hierarchy);
+        }
+        hierarchy.sort_unstable();
+        hierarchy.dedup();
+        return hierarchy;
+    }
+
+    default_s2class_hierarchy()
+}
+
+fn expand_eclass_hierarchy(code: i32, out: &mut Vec<i32>) {
+    out.push((code / 1_000_000) * 1_000_000);
+    out.push((code / 10_000) * 10_000);
+    out.push((code / 100) * 100);
+    out.push(code);
+}
+
+fn json_code_i32(value: &Value) -> Option<i32> {
+    match value {
+        Value::Number(n) => n.as_i64().and_then(|v| i32::try_from(v).ok()).or_else(|| n.as_u64().and_then(|v| i32::try_from(v).ok())),
+        Value::String(s) => s.parse().ok(),
+        Value::Object(obj) => obj
+            .get("$numberInt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .or_else(|| obj.get("$numberLong").and_then(|v| v.as_str()).and_then(|s| s.parse().ok())),
+        _ => None,
+    }
 }
 
 fn bucketize(files: Vec<FileEntry>, shards: usize) -> Vec<Vec<FileEntry>> {
@@ -1248,4 +1568,69 @@ fn human_bytes(bytes: u64) -> String {
         unit += 1;
     }
     format!("{value:.2}{}", UNITS[unit])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn groups_with(version: &str, codes: &[i32]) -> EclassGroups {
+        let mut groups = EclassGroups::default();
+        let values = codes.iter().copied().map(CodeI32).collect::<Vec<_>>();
+        match version {
+            "ECLASS_5_1" => groups.eclass_5_1 = values,
+            "ECLASS_6" => groups.eclass_6 = values,
+            "ECLASS_7_1" => groups.eclass_7_1 = values,
+            "ECLASS_8" => groups.eclass_8 = values,
+            "ECLASS_9" => groups.eclass_9 = values,
+            "ECLASS_10" => groups.eclass_10 = values,
+            "ECLASS_11" => groups.eclass_11 = values,
+            "ECLASS_12" => groups.eclass_12 = values,
+            "ECLASS_13" => groups.eclass_13 = values,
+            "ECLASS_14" => groups.eclass_14 = values,
+            "ECLASS_15" => groups.eclass_15 = values,
+            "ECLASS_16" => groups.eclass_16 = values,
+            "S2CLASS" => groups.s2class = values,
+            other => panic!("unexpected version {other}"),
+        }
+        groups
+    }
+
+    #[test]
+    fn s2class_uses_highest_available_non_s2_version() {
+        init_s2_mappings().unwrap();
+        let mut groups = groups_with("ECLASS_5_1", &[17019100]);
+        groups.eclass_7_1 = vec![CodeI32(27010100)];
+        assert_eq!(derive_s2class_hierarchy(Some(&groups)), vec![27000000, 27010000, 27010100]);
+    }
+
+    #[test]
+    fn s2class_ignores_source_provided_s2class() {
+        init_s2_mappings().unwrap();
+        let mut groups = groups_with("ECLASS_7_1", &[27010100]);
+        groups.s2class = vec![CodeI32(42424242)];
+        assert_eq!(derive_s2class_hierarchy(Some(&groups)), vec![27000000, 27010000, 27010100]);
+    }
+
+    #[test]
+    fn s2class_does_not_fall_back_to_lower_version_when_higher_misses() {
+        init_s2_mappings().unwrap();
+        let mut groups = groups_with("ECLASS_5_1", &[17019100]);
+        groups.eclass_7_1 = vec![CodeI32(42424242)];
+        assert_eq!(derive_s2class_hierarchy(Some(&groups)), default_s2class_hierarchy());
+    }
+
+    #[test]
+    fn s2class_uses_default_when_no_non_s2_version_exists() {
+        init_s2_mappings().unwrap();
+        let groups = groups_with("S2CLASS", &[11111111]);
+        assert_eq!(derive_s2class_hierarchy(Some(&groups)), default_s2class_hierarchy());
+    }
+
+    #[test]
+    fn s2class_maps_eclass_5_1_through_binary_mapping() {
+        init_s2_mappings().unwrap();
+        let groups = groups_with("ECLASS_5_1", &[17019100]);
+        assert_eq!(derive_s2class_hierarchy(Some(&groups)), vec![17000000, 17010000, 17019000]);
+    }
 }

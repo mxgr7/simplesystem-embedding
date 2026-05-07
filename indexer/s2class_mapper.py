@@ -2,8 +2,8 @@
 
 Replicates the legacy Java ``S2ClassOfferMapper`` + ``EclassMapper``:
 the article-search-indexer derives ``s2classGroups`` at index time from
-the highest available eclass version (ECLASS_8 > ECLASS_5_1) through
-a deterministic lookup table.
+the highest available non-S2CLASS eclass version through a deterministic
+lookup table.
 
 Binary file format (big-endian):
   - 4 bytes: magic ``0x4D415050`` ("MAPP")
@@ -24,6 +24,27 @@ _FORMAT_VERSION = 1
 _DIR = Path(__file__).parent / "classification_mapping"
 DEFAULT_S2CLASS_CODE = 90909090
 
+# Legacy `EClassVersion` priority: highest non-S2CLASS version wins. The
+# enum names encode dotted versions (`ECLASS_5_1` == eClass 5.1) while the
+# mapping resources collapse them to whole-number filenames (`5-s2.bin.gz`).
+S2CLASS_VERSION_TO_FILE_VERSION = {
+    "ECLASS_5_1": 5,
+    "ECLASS_6": 6,
+    "ECLASS_7_1": 7,
+    "ECLASS_8": 8,
+    "ECLASS_9": 9,
+    "ECLASS_10": 10,
+    "ECLASS_11": 11,
+    "ECLASS_12": 12,
+    "ECLASS_13": 13,
+    "ECLASS_14": 14,
+    "ECLASS_15": 15,
+    "ECLASS_16": 16,
+}
+S2CLASS_SOURCE_KEYS_DESC = [
+    key for key, _ in sorted(S2CLASS_VERSION_TO_FILE_VERSION.items(), key=lambda kv: kv[1], reverse=True)
+]
+
 
 def _load_mapping(path: Path) -> dict[int, int]:
     data = gzip.decompress(path.read_bytes())
@@ -40,52 +61,37 @@ def _load_mapping(path: Path) -> dict[int, int]:
     return mapping
 
 
-_ECLASS5_TO_S2: dict[int, int] | None = None
-_ECLASS8_TO_S2: dict[int, int] | None = None
+_S2_MAP_CACHE: dict[str, dict[int, int]] = {}
 
 
-def _eclass5_map() -> dict[int, int]:
-    global _ECLASS5_TO_S2
-    if _ECLASS5_TO_S2 is None:
-        _ECLASS5_TO_S2 = _load_mapping(_DIR / "5-s2.bin.gz")
-    return _ECLASS5_TO_S2
-
-
-def _eclass8_map() -> dict[int, int]:
-    global _ECLASS8_TO_S2
-    if _ECLASS8_TO_S2 is None:
-        _ECLASS8_TO_S2 = _load_mapping(_DIR / "8-s2.bin.gz")
-    return _ECLASS8_TO_S2
-
-
-def from_eclass5(code: int) -> int | None:
-    return _eclass5_map().get(code)
-
-
-def from_eclass8(code: int) -> int | None:
-    return _eclass8_map().get(code)
+def mapping_for_version_key(version_key: str) -> dict[int, int]:
+    file_version = S2CLASS_VERSION_TO_FILE_VERSION[version_key]
+    mapping = _S2_MAP_CACHE.get(version_key)
+    if mapping is None:
+        mapping = _load_mapping(_DIR / f"{file_version}-s2.bin.gz")
+        _S2_MAP_CACHE[version_key] = mapping
+    return mapping
 
 
 def derive_s2class_codes(eclass_groups: dict[str, list] | None) -> set[int]:
     """Derive S2CLASS codes from the highest available eclass version.
 
-    Mirrors the Java ``S2ClassOfferMapper.map()`` logic: pick the best
-    source (highest version number, non-empty), map each leaf code
-    through the mapping table, fall back to DEFAULT_S2CLASS_CODE.
+    Mirrors the Java ``S2ClassOfferMapper.map()`` logic exactly:
+      - ignore source-provided S2CLASS
+      - pick the highest non-S2CLASS version whose list is non-empty
+      - map every leaf through that version's `{version}-s2.bin.gz`
+      - if that chosen version yields no mappings, fall back to the
+        default S2CLASS code instead of trying lower versions
     """
     if not eclass_groups:
         return {DEFAULT_S2CLASS_CODE}
 
-    # Priority: ECLASS_8 > ECLASS_5_1 (higher version wins)
-    for key, mapper_fn in [("ECLASS_8", from_eclass8), ("ECLASS_5_1", from_eclass5)]:
+    for key in S2CLASS_SOURCE_KEYS_DESC:
         codes = eclass_groups.get(key)
         if not codes:
             continue
-        mapped = set()
-        for c in codes:
-            s2 = mapper_fn(int(c))
-            if s2 is not None:
-                mapped.add(s2)
+        mapping = mapping_for_version_key(key)
+        mapped = {s2 for c in codes if (s2 := mapping.get(int(c))) is not None}
         return mapped if mapped else {DEFAULT_S2CLASS_CODE}
 
     return {DEFAULT_S2CLASS_CODE}
