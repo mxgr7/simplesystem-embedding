@@ -44,6 +44,82 @@ from typing import Any
 
 import duckdb
 
+from indexer.s2class_mapper import (
+    DEFAULT_S2CLASS_CODE,
+    S2CLASS_SOURCE_KEYS_DESC,
+    mapping_for_version_key,
+)
+
+
+def _expand_eclass_hierarchy_py(code):
+    s = f"{int(code):08d}"
+    return [int(s[:end].ljust(8, "0")) for end in range(2, 9, 2)]
+
+
+_S2MAP_ROWS = None
+_ECLASS_KEYS_FOR_EXTRACTION = (
+    "ECLASS_5_1",
+    "ECLASS_6",
+    "ECLASS_7_1",
+    "ECLASS_8",
+    "ECLASS_9",
+    "ECLASS_10",
+    "ECLASS_11",
+    "ECLASS_12",
+    "ECLASS_13",
+    "ECLASS_14",
+    "ECLASS_15",
+    "ECLASS_16",
+)
+
+
+def _eclass_leaf_col(key):
+    return f"{key.lower()}_leafs"
+
+
+def _sql_eclass_leafs_expr(eclass_groups_expr, key):
+    return f"""COALESCE(
+            list_transform(
+                json_extract({eclass_groups_expr}::JSON, '$.{key}')::JSON[],
+                j -> CAST(unwrap_int(j) AS INTEGER)
+            ),
+            []::INTEGER[]
+        )"""
+
+
+def _sql_expand_eclass_leafs_expr(leafs_expr):
+    return f"""COALESCE(
+            list_sort(list_distinct(flatten(list_transform(
+                {leafs_expr},
+                leaf -> expand_eclass(leaf)
+            )))),
+            []::INTEGER[]
+        )"""
+
+
+def _sql_eclass_extract_lateral(eclass_groups_expr):
+    return "\n            ".join(
+        f"{_sql_eclass_leafs_expr(eclass_groups_expr, key)} AS {_eclass_leaf_col(key)}"
+        + ("," if i < len(_ECLASS_KEYS_FOR_EXTRACTION) - 1 else "")
+        for i, key in enumerate(_ECLASS_KEYS_FOR_EXTRACTION)
+    )
+
+
+def _sql_s2class_case_expr(prefix):
+    default_sql = f"expand_eclass({DEFAULT_S2CLASS_CODE})"
+    cases = []
+    for key in S2CLASS_SOURCE_KEYS_DESC:
+        leafs_col = f"{prefix}{_eclass_leaf_col(key)}"
+        cases.append(
+            f"""WHEN len({leafs_col}) > 0 THEN COALESCE(
+                (SELECT list_sort(list_distinct(flatten(list(s.s2_groups))))
+                 FROM unnest({leafs_col}) AS src(leaf)
+                 JOIN s2map s ON s.version_key = '{key}' AND s.from_code = src.leaf),
+                {default_sql}
+            )"""
+        )
+    return "CASE\n                " + "\n                ".join(cases) + f"\n                ELSE {default_sql}\n            END"
+
 
 # DuckDB SQL macros — reusable transforms that mirror helpers in
 # `indexer.projection`. Loaded once per connection by `_init_macros`.
@@ -237,17 +313,25 @@ CATALOG_CURRENCIES = ("eur", "chf", "huf", "pln", "gbp", "czk", "cny")
 
 
 def _load_s2class_map(con: duckdb.DuckDBPyConnection) -> None:
-    """Load the ECLASS→S2CLASS mapping tables into DuckDB for derivation."""
-    from indexer.s2class_mapper import _load_mapping, _DIR
+    """Load the legacy ECLASS→S2CLASS mapping tables into DuckDB.
 
-    rows_5 = list(_load_mapping(_DIR / "5-s2.bin.gz").items())
-    rows_8 = list(_load_mapping(_DIR / "8-s2.bin.gz").items())
-    con.execute("CREATE OR REPLACE TABLE s2map_5(from_code INTEGER, to_code INTEGER)")
-    con.execute("CREATE OR REPLACE TABLE s2map_8(from_code INTEGER, to_code INTEGER)")
-    if rows_5:
-        con.executemany("INSERT INTO s2map_5 VALUES (?, ?)", rows_5)
-    if rows_8:
-        con.executemany("INSERT INTO s2map_8 VALUES (?, ?)", rows_8)
+    Each row carries the fully expanded S2CLASS ancestor chain so the SQL
+    projection can JOIN once and skip per-row `expand_eclass(...)` work on
+    the mapped result.
+    """
+    global _S2MAP_ROWS
+    if _S2MAP_ROWS is None:
+        rows = []
+        for version_key in S2CLASS_SOURCE_KEYS_DESC:
+            for from_code, to_code in mapping_for_version_key(version_key).items():
+                rows.append((version_key, from_code, _expand_eclass_hierarchy_py(to_code)))
+        _S2MAP_ROWS = rows
+
+    con.execute(
+        "CREATE OR REPLACE TABLE s2map(version_key VARCHAR, from_code INTEGER, s2_groups INTEGER[])"
+    )
+    if _S2MAP_ROWS:
+        con.executemany("INSERT INTO s2map VALUES (?, ?, ?)", _S2MAP_ROWS)
 
 
 def _init_macros(con: duckdb.DuckDBPyConnection) -> None:
@@ -533,50 +617,14 @@ projected AS (
         CAST(COALESCE(unwrap_int(params.deliveryTime), 0) AS INTEGER) AS delivery_time_days_max,
 
         -- ---- eClass / S2Class hierarchies ----
-        -- Use JSON-path access on the struct cast: DuckDB's auto-detected
-        -- schema only includes fields seen in the sample, so a sample with
-        -- no S2CLASS rows fails compile if we use `.S2CLASS`. Round-tripping
-        -- through JSON makes missing keys NULL-safe at the cost of one
-        -- cast per row (negligible for this column count). Each element
-        -- goes through `unwrap_int` because raw S3 wraps the array
-        -- elements (`[{"$numberInt": "27270911"}, ...]`) while the
-        -- wrapper-JSON pre-strips them (`[27270911, ...]`).
-        COALESCE(
-            list_sort(list_distinct(flatten(list_transform(
-                json_extract(params.eclassGroups::JSON, '$.ECLASS_5_1')::JSON[],
-                j -> expand_eclass(CAST(unwrap_int(j) AS INTEGER))
-            )))),
-            []::INTEGER[]
-        ) AS eclass5_code,
-        COALESCE(
-            list_sort(list_distinct(flatten(list_transform(
-                json_extract(params.eclassGroups::JSON, '$.ECLASS_7_1')::JSON[],
-                j -> expand_eclass(CAST(unwrap_int(j) AS INTEGER))
-            )))),
-            []::INTEGER[]
-        ) AS eclass7_code,
-        -- S2CLASS is derived from the highest available eclass version
-        -- through binary mapping tables (mirroring Java S2ClassOfferMapper).
-        -- Priority: ECLASS_8 > ECLASS_5_1.
-        COALESCE(
-            CASE
-                WHEN json_extract(params.eclassGroups::JSON, '$.ECLASS_8') IS NOT NULL
-                     AND json_array_length(json_extract(params.eclassGroups::JSON, '$.ECLASS_8')) > 0
-                THEN (SELECT list_sort(list_distinct(flatten(list(expand_eclass(m.to_code)))))
-                      FROM unnest(list_transform(
-                               json_extract(params.eclassGroups::JSON, '$.ECLASS_8')::JSON[],
-                               j -> CAST(unwrap_int(j) AS INTEGER))) AS src(leaf)
-                      JOIN s2map_8 m ON src.leaf = m.from_code)
-                WHEN json_extract(params.eclassGroups::JSON, '$.ECLASS_5_1') IS NOT NULL
-                     AND json_array_length(json_extract(params.eclassGroups::JSON, '$.ECLASS_5_1')) > 0
-                THEN (SELECT list_sort(list_distinct(flatten(list(expand_eclass(m.to_code)))))
-                      FROM unnest(list_transform(
-                               json_extract(params.eclassGroups::JSON, '$.ECLASS_5_1')::JSON[],
-                               j -> CAST(unwrap_int(j) AS INTEGER))) AS src(leaf)
-                      JOIN s2map_5 m ON src.leaf = m.from_code)
-            END,
-            []::INTEGER[]
-        ) AS s2class_code,
+        -- Extract the raw per-version eclass arrays once in a lateral
+        -- subquery, then reuse the typed INTEGER[] lists here. This keeps
+        -- the projection aligned with legacy's "highest available non-
+        -- S2CLASS version wins" rule while avoiding repeated JSON-path
+        -- extraction on the same blob.
+        __ECLASS5_CODE_EXPR__ AS eclass5_code,
+        __ECLASS7_CODE_EXPR__ AS eclass7_code,
+        __S2CLASS_CODE_EXPR__ AS s2class_code,
 
         -- ---- relationships ----
         -- Schema is pinned to VARCHAR[] for all three (see RECORDS_ELEMENT_TYPE).
@@ -711,7 +759,19 @@ projected AS (
             COALESCE(params.manufacturerArticleType, '')
         ) AS article_hash
     FROM flat
-)"""
+    CROSS JOIN LATERAL (
+        SELECT
+            __ECLASS_EXTRACT_LATERAL__
+    ) ec
+)""".replace(
+    "__ECLASS5_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_5_1_leafs")
+).replace(
+    "__ECLASS7_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_7_1_leafs")
+).replace(
+    "__S2CLASS_CODE_EXPR__", _sql_s2class_case_expr("ec.")
+).replace(
+    "__ECLASS_EXTRACT_LATERAL__", _sql_eclass_extract_lateral("params.eclassGroups")
+)
 
 
 # Finalized CTE — coalesces nullables + filters NULL price entries. Reads
@@ -997,40 +1057,9 @@ WITH offer_derived AS (
         CAST(COALESCE(unwrap_int(o."offer".offerParams.deliveryTime), 0) AS INTEGER) AS delivery_time_days_max,
 
         -- ---- eClass / S2Class hierarchies ----
-        COALESCE(
-            list_transform(
-                json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_5_1')::JSON[],
-                j -> CAST(unwrap_int(j) AS INTEGER)
-            ),
-            []::INTEGER[]
-        ) AS eclass5_code,
-        COALESCE(
-            list_transform(
-                json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_7_1')::JSON[],
-                j -> CAST(unwrap_int(j) AS INTEGER)
-            ),
-            []::INTEGER[]
-        ) AS eclass7_code,
-        -- S2CLASS derived from highest available eclass via mapping table.
-        COALESCE(
-            CASE
-                WHEN json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_8') IS NOT NULL
-                     AND json_array_length(json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_8')) > 0
-                THEN (SELECT list(m.to_code)
-                      FROM unnest(list_transform(
-                               json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_8')::JSON[],
-                               j -> CAST(unwrap_int(j) AS INTEGER))) AS src(leaf)
-                      JOIN s2map_8 m ON src.leaf = m.from_code)
-                WHEN json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_5_1') IS NOT NULL
-                     AND json_array_length(json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_5_1')) > 0
-                THEN (SELECT list(m.to_code)
-                      FROM unnest(list_transform(
-                               json_extract(o."offer".offerParams.eclassGroups::JSON, '$.ECLASS_5_1')::JSON[],
-                               j -> CAST(unwrap_int(j) AS INTEGER))) AS src(leaf)
-                      JOIN s2map_5 m ON src.leaf = m.from_code)
-            END,
-            []::INTEGER[]
-        ) AS s2class_code,
+        __OP_ECLASS5_CODE_EXPR__ AS eclass5_code,
+        __OP_ECLASS7_CODE_EXPR__ AS eclass7_code,
+        __OP_S2CLASS_CODE_EXPR__ AS s2class_code,
 
         -- ---- relationships ----
         list_slice(COALESCE(o."offer".relatedArticleNumbers.accessoryFor, []::VARCHAR[]), 1, 4096) AS relationship_accessory_for,
@@ -1111,6 +1140,10 @@ WITH offer_derived AS (
         COALESCE(o."offer".offerParams.manufacturerArticleNumber, '') AS _hash_mfg_article_number,
         COALESCE(o."offer".offerParams.manufacturerArticleType, '') AS _hash_mfg_article_type
     FROM raw_offers o
+    CROSS JOIN LATERAL (
+        SELECT
+            __OP_ECLASS_EXTRACT_LATERAL__
+    ) ec
 )
 SELECT
     *,
@@ -1129,7 +1162,15 @@ SELECT
         _hash_mfg_article_type
     ) AS article_hash
 FROM offer_derived
-"""
+""".replace(
+    "__OP_ECLASS5_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_5_1_leafs")
+).replace(
+    "__OP_ECLASS7_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_7_1_leafs")
+).replace(
+    "__OP_S2CLASS_CODE_EXPR__", _sql_s2class_case_expr("ec.")
+).replace(
+    "__OP_ECLASS_EXTRACT_LATERAL__", _sql_eclass_extract_lateral('o."offer".offerParams.eclassGroups')
+)
 
 
 # Chunk-time projection that reuses precomputed offer_projected. Drop-in

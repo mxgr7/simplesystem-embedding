@@ -1,0 +1,29 @@
+[package]
+name = "offers-to-offer-projected"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+glob = "0.3"
+num_cpus = "1"
+parquet = { version = "56", default-features = false, features = ["arrow", "snap", "zstd"] }
+rayon = "1"
+rust_decimal = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+simd-json = { version = "0.15", features = ["serde_impl"] }
+uuid = "1"
+arrow-array = "56"
+arrow-schema = "56"
+arrow-select = "56"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "symbols"
