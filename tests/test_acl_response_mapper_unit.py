@@ -92,6 +92,37 @@ class TestArticleIdMalformedUUID:
         assert result["articles"][0]["articleId"] == f"{bad}:MTIz:{valid}"
 
 
+class TestRawFtsearchArticleNumbers:
+    """v7 offer ids carry raw article numbers; legacy IDs require b64url."""
+
+    def test_raw_article_number_with_space_is_encoded(self):
+        vendor = "e010afef-7c16-4cd7-a16a-5993771f1e6a"
+        catalog = str(uuid.uuid4())
+        body = _minimal_body(articles=[{"articleId": f"{vendor}:3M 2184:{catalog}", "score": 0.9}])
+        result = map_response(body, explain=False)
+        assert result["articles"][0]["articleId"] == "6onuFoCx32VT2qfobQz0Hq:M00gMjE4NA"
+
+    def test_raw_numeric_article_number_is_encoded(self):
+        vendor = "e010afef-7c16-4cd7-a16a-5993771f1e6a"
+        catalog = str(uuid.uuid4())
+        body = _minimal_body(articles=[{"articleId": f"{vendor}:100337445:{catalog}", "score": 0.9}])
+        result = map_response(body, explain=False)
+        assert result["articles"][0]["articleId"] == "6onuFoCx32VT2qfobQz0Hq:MTAwMzM3NDQ1"
+
+    def test_duplicate_offers_for_same_article_are_deduplicated(self):
+        vendor = "190a1577-011b-45d1-a1ea-cc5016aaa809"
+        body = _minimal_body(
+            articles=[
+                {"articleId": f"{vendor}:005630 390090    1:{uuid.uuid4()}", "score": 1.0},
+                {"articleId": f"{vendor}:005630 390090    1:{uuid.uuid4()}", "score": 0.9},
+            ]
+        )
+        result = map_response(body, explain=True)
+        assert result["articles"] == [
+            {"articleId": "0lFPp2xpJJNaHYjbHJjWo5:MDA1NjMwIDM5MDA5MCAgICAx", "explanation": "N/A"}
+        ]
+
+
 # ---------------------------------------------------------------------------
 # 3. Empty articles list
 # ---------------------------------------------------------------------------

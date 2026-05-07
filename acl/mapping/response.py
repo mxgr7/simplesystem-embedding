@@ -24,6 +24,8 @@ real work:
 
 from __future__ import annotations
 
+import base64
+import string
 import uuid
 from typing import Any
 
@@ -33,20 +35,52 @@ _BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 def _uuid_to_friendly(u: uuid.UUID) -> str:
     """Devskiller FriendlyId-compatible base62 encoding of a UUID."""
     n = int.from_bytes(u.bytes, "big", signed=False)
-    if n == 0:
-        return "0"
     digits: list[str] = []
     while n:
         n, rem = divmod(n, 62)
         digits.append(_BASE62[rem])
-    return "".join(reversed(digits))
+    return "".join(reversed(digits)).rjust(22, "0")
+
+
+def _b64url_no_pad(value: str) -> str:
+    return (
+        base64.urlsafe_b64encode(value.encode("utf-8"))
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+
+
+def _is_b64url_utf8_token(value: str) -> bool:
+    """Best-effort detection for already legacy-encoded article numbers.
+
+    Historical ftsearch offer ids used ``{uuid}:{b64url(articleNumber)}:{uuid}``,
+    while the v7 collections currently used for local testing use
+    ``{uuid}:{rawArticleNumber}:{uuid}``. The legacy backend always expects
+    the second part to be b64url. Preserve already-encoded ids, but encode raw
+    ids before forwarding them.
+    """
+    if not value or value.isdigit() or any(c.isspace() for c in value):
+        return False
+    if any(c not in string.ascii_letters + string.digits + "-_" for c in value):
+        return False
+    if len(value) % 4 == 1:
+        return False
+    try:
+        padded = value + ("=" * ((4 - len(value) % 4) % 4))
+        decoded = base64.urlsafe_b64decode(padded).decode("utf-8")
+    except Exception:
+        return False
+    if not decoded or any(not c.isprintable() for c in decoded):
+        return False
+    return _b64url_no_pad(decoded) == value
 
 
 def _to_legacy_article_id(ftsearch_id: str) -> str:
     """Convert ftsearch's 3-part articleId to legacy 2-part format.
 
-    ftsearch: ``{rawUUID}:{b64url(artNum)}:{rawUUID}``
-    legacy:   ``{friendlyId(vendorUUID)}:{b64url(artNum)}``
+    ftsearch v7: ``{rawUUID}:{rawArtNum}:{rawUUID}``
+    older ids:   ``{rawUUID}:{b64url(artNum)}:{rawUUID}``
+    legacy:      ``{friendlyId(vendorUUID)}:{b64url(artNum)}``
     """
     parts = ftsearch_id.split(":")
     if len(parts) == 3:
@@ -54,7 +88,10 @@ def _to_legacy_article_id(ftsearch_id: str) -> str:
             vendor_uuid = uuid.UUID(parts[0])
         except ValueError:
             return ftsearch_id
-        return f"{_uuid_to_friendly(vendor_uuid)}:{parts[1]}"
+        article_part = (
+            parts[1] if _is_b64url_utf8_token(parts[1]) else _b64url_no_pad(parts[1])
+        )
+        return f"{_uuid_to_friendly(vendor_uuid)}:{article_part}"
     return ftsearch_id
 
 
@@ -71,8 +108,18 @@ def map_response(
     it (we drop it on the request side per A2)."""
     raw_articles = ftsearch_body.get("articles") or []
     articles_out: list[dict[str, Any]] = []
+    seen_article_ids: set[str] = set()
     for raw in raw_articles:
-        legacy: dict[str, Any] = {"articleId": _to_legacy_article_id(raw["articleId"])}
+        legacy_article_id = _to_legacy_article_id(raw["articleId"])
+        # ftsearch v7 returns offer ids (`vendor:article:catalogVersion`).
+        # The legacy backend consumes article ids (`vendor:article`) and
+        # fails on duplicates when multiple catalog versions of the same
+        # article appear in one page. Preserve first-hit order and drop
+        # duplicate offers for the same legacy article.
+        if legacy_article_id in seen_article_ids:
+            continue
+        seen_article_ids.add(legacy_article_id)
+        legacy: dict[str, Any] = {"articleId": legacy_article_id}
         if explain:
             # §2.2 — stub. The legacy schema lets clients parse a
             # non-null string here without trying to deserialize a
