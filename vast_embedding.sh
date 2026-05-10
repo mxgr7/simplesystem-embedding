@@ -53,8 +53,9 @@ echo "tei: $NUM_GPUS gpu(s), $TOTAL_CPUS cpu(s), $WORKERS_PER_GPU tokenization w
 # launch one TEI per GPU on 3001..300N
 # logs stream to main stdout (visible via `vastai logs`) with a [tei<i>] prefix
 # and are tee'd to /var/log/tei.<i>.log for later inspection
-for i in $(seq 0 $((NUM_GPUS - 1))); do
-  PORT=$((3001 + i))
+launch_tei() {
+  local i=$1
+  local PORT=$((3001 + i))
   (
     CUDA_VISIBLE_DEVICES=$i /entrypoint.sh \
       --model-id mxgr/simplesystem-embedding \
@@ -70,6 +71,23 @@ for i in $(seq 0 $((NUM_GPUS - 1))); do
       --payload-limit 10000000 \
       2>&1 | stdbuf -oL sed -u "s/^/[tei$i] /" | tee -a /var/log/tei.$i.log
   ) &
+}
+
+# Launch tei0 alone first so it populates the HF cache without contention.
+# If we launch all N at once they race on the cache lock; only the winner
+# downloads model.safetensors, the losers fall through to pytorch_model.bin
+# (which doesn't exist in this repo) and exit. Once tei0 reports healthy,
+# the on-disk cache is complete and tei1..N start instantly without re-downloading.
+echo "starting tei0 first to warm HF cache..."
+launch_tei 0
+for _ in $(seq 1 180); do
+  curl -sf "http://127.0.0.1:3001/health" >/dev/null && break
+  sleep 5
+done
+
+# fan out the rest now that the cache is hot
+for i in $(seq 1 $((NUM_GPUS - 1))); do
+  launch_tei $i
 done
 
 # nginx round-robin on :3000 -> backends

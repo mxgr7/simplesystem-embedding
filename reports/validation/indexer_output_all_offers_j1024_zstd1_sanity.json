@@ -1,0 +1,390 @@
+{
+  "output_root": "/data/mongodb-export-2026-03-04/indexer_output_all_offers_j1024_zstd1",
+  "offer_rows_files": {
+    "path": "/data/mongodb-export-2026-03-04/indexer_output_all_offers_j1024_zstd1/offer_rows",
+    "parquet_files": 1024,
+    "total_bytes": 106104845160,
+    "total_gb": 106.105
+  },
+  "articles_files": {
+    "path": "/data/mongodb-export-2026-03-04/indexer_output_all_offers_j1024_zstd1/articles",
+    "parquet_files": 1024,
+    "total_bytes": 40158295965,
+    "total_gb": 40.158
+  },
+  "offer_rows_schema": [
+    {
+      "column": "id",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "article_hash",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "_placeholder_vector",
+      "type": "FLOAT[]",
+      "null": "YES"
+    },
+    {
+      "column": "ean",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "article_number",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "vendor_id",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "catalog_version_id",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "prices",
+      "type": "STRUCT(price DOUBLE, currency VARCHAR, priority INTEGER, sourcePriceListId VARCHAR)[]",
+      "null": "YES"
+    },
+    {
+      "column": "delivery_time_days_max",
+      "type": "INTEGER",
+      "null": "YES"
+    },
+    {
+      "column": "core_marker_enabled_sources",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "core_marker_disabled_sources",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "features",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "relationship_accessory_for",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "relationship_spare_part_for",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "relationship_similar_to",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "price_list_ids",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "currencies",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "eur_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "eur_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "chf_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "chf_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "huf_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "huf_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "pln_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "pln_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "gbp_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "gbp_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "czk_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "czk_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "cny_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "cny_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    }
+  ],
+  "offer_rows_schema_elapsed_s": 0.021,
+  "articles_schema": [
+    {
+      "column": "article_hash",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "name",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "manufacturerName",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "category_l1",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "category_l2",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "category_l3",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "category_l4",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "category_l5",
+      "type": "VARCHAR[]",
+      "null": "YES"
+    },
+    {
+      "column": "eclass5_code",
+      "type": "INTEGER[]",
+      "null": "YES"
+    },
+    {
+      "column": "eclass7_code",
+      "type": "INTEGER[]",
+      "null": "YES"
+    },
+    {
+      "column": "s2class_code",
+      "type": "INTEGER[]",
+      "null": "YES"
+    },
+    {
+      "column": "text_codes",
+      "type": "VARCHAR",
+      "null": "YES"
+    },
+    {
+      "column": "customer_article_numbers",
+      "type": "STRUCT(\"value\" VARCHAR, version_ids VARCHAR[])[]",
+      "null": "YES"
+    },
+    {
+      "column": "eur_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "eur_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "chf_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "chf_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "huf_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "huf_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "pln_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "pln_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "gbp_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "gbp_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "czk_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "czk_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "cny_price_min",
+      "type": "DOUBLE",
+      "null": "YES"
+    },
+    {
+      "column": "cny_price_max",
+      "type": "DOUBLE",
+      "null": "YES"
+    }
+  ],
+  "articles_schema_elapsed_s": 0.005,
+  "offer_rows_aggregates": {
+    "rows": 521763985,
+    "empty_id": 0,
+    "empty_article_hash": 0,
+    "empty_article_number": 0,
+    "empty_vendor_id": 0,
+    "empty_catalog_version_id": 0,
+    "rows_with_prices": 521763196,
+    "rows_with_features": 356705432,
+    "rows_with_markers": 6236923,
+    "rows_with_currencies": 521763196,
+    "min_delivery_time_days_max": 1,
+    "max_delivery_time_days_max": 94950
+  },
+  "offer_rows_aggregates_elapsed_s": 59.475,
+  "articles_aggregates": {
+    "rows": 159228293,
+    "empty_article_hash": 0,
+    "empty_name": 0,
+    "empty_manufacturer_name": 10627127,
+    "empty_text_codes": 0,
+    "rows_with_customer_article_numbers": 11037186,
+    "rows_with_category_l1": 149564788,
+    "rows_with_eclass5": 146187909,
+    "rows_with_eclass7": 46203729,
+    "rows_with_s2class": 159228293
+  },
+  "articles_aggregates_elapsed_s": 8.319,
+  "offer_rows_samples": [
+    {
+      "id": "d24ef22e-c7ff-4312-8556-b06c2680b814:MjQ5NjE4My1CUA:3a5ead46-43f8-4d98-a1e7-dfca4ee2382c",
+      "article_hash": "0f7b0a4655e1d337dff64d1d8e3bcc36",
+      "article_number": "2496183-BP",
+      "vendor_id": "d24ef22e-c7ff-4312-8556-b06c2680b814",
+      "catalog_version_id": "3a5ead46-43f8-4d98-a1e7-dfca4ee2382c",
+      "price_count": 2
+    },
+    {
+      "id": "d24ef22e-c7ff-4312-8556-b06c2680b814:MjQ5NjE4My1CUA:5d595139-b001-4c7e-b9ee-947197f2ce97",
+      "article_hash": "0f7b0a4655e1d337dff64d1d8e3bcc36",
+      "article_number": "2496183-BP",
+      "vendor_id": "d24ef22e-c7ff-4312-8556-b06c2680b814",
+      "catalog_version_id": "5d595139-b001-4c7e-b9ee-947197f2ce97",
+      "price_count": 2
+    },
+    {
+      "id": "d24ef22e-c7ff-4312-8556-b06c2680b814:MjQ5NjEzMy1CUA:3a5ead46-43f8-4d98-a1e7-dfca4ee2382c",
+      "article_hash": "9b64e33b13394b134059556be4c77d67",
+      "article_number": "2496133-BP",
+      "vendor_id": "d24ef22e-c7ff-4312-8556-b06c2680b814",
+      "catalog_version_id": "3a5ead46-43f8-4d98-a1e7-dfca4ee2382c",
+      "price_count": 2
+    }
+  ],
+  "offer_rows_samples_elapsed_s": 0.028,
+  "articles_samples": [
+    {
+      "article_hash": "0db93565ae086992b4989d481b7e983a",
+      "name": "Skylotec Dynamikseil X-TREM kantengeeignet abriebfest 240m",
+      "manufacturerName": "Skylotec",
+      "customer_article_number_count": 0,
+      "s2class_count": 4
+    },
+    {
+      "article_hash": "7d515b42b06367441ac241f12b046662",
+      "name": "C+C-Wagen 2970",
+      "manufacturerName": "fetra - Fechtel Transportger\u00e4te",
+      "customer_article_number_count": 0,
+      "s2class_count": 4
+    },
+    {
+      "article_hash": "4d265194f35f774b599c368e7d22f48c",
+      "name": "RS PRO Kapcsol\u00f3huzal, keresztmetszet ter\u00fclete: 0,75 mm2, r\u00e9szei: 24/0,2 mm, Z\u00f6ld/S\u00e1rga burkolat, 1 kV DC, 600 V AC,",
+      "manufacturerName": "RS PRO",
+      "customer_article_number_count": 0,
+      "s2class_count": 4
+    }
+  ],
+  "articles_samples_elapsed_s": 0.007
+}

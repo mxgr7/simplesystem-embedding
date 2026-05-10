@@ -1,0 +1,11 @@
+{
+  "source_rows": 74454646,
+  "parquet_rows": 74454646,
+  "source_duplicate_offer_ids": 0,
+  "parquet_duplicate_offer_ids": 0,
+  "missing_in_parquet": 0,
+  "missing_in_source": 0,
+  "mismatched_s2class_code": 0,
+  "elapsed_seconds": 1527.832,
+  "status": "ok"
+}

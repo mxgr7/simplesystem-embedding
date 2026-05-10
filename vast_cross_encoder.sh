@@ -67,7 +67,7 @@ EOF
 )
 
 vastai create instance "$1" \
-  --image ghcr.io/mxgr7/simplesystem-embedding/cross-encoder-serve:sha-65d6a9d \
+  --image ghcr.io/mxgr7/simplesystem-embedding/cross-encoder-serve:sha-6c941eb \
   --env "-e CKPT=${CKPT} -e HF_TOKEN=${HF_TOKEN} -e SERVE_DTYPE=${SERVE_DTYPE} -e TORCHDYNAMO_DISABLE=1 -p 8080:8080 -p 9100:9100 -p 9835:9835" \
   --disk 50 \
   --entrypoint /bin/bash \
