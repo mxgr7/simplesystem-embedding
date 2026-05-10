@@ -1211,6 +1211,179 @@ FROM offer_derived
 )
 
 
+# Alternative offer_projected builder: dedupe identical `eclassGroups`
+# first, derive eclass/S2 arrays once per unique JSON blob, then join
+# back to the full offer stream. This keeps the existing build path intact
+# for A/B comparison while making repeated classification blobs much
+# cheaper on catalogs with high reuse.
+_OFFER_PROJECTED_BUILD_SELECT_DEDUP_ECLASS_SQL = """
+WITH base AS (
+    SELECT
+        o.*,
+        COALESCE(CAST(to_json(o."offer".offerParams.eclassGroups) AS VARCHAR), 'null') AS eclass_groups_json
+    FROM raw_offers o
+),
+unique_eclass_groups AS (
+    SELECT eclass_groups_json
+    FROM base
+    GROUP BY 1
+),
+classification_dedup AS (
+    SELECT
+        eg.eclass_groups_json,
+        __OP_DEDUP_ECLASS5_CODE_EXPR__ AS eclass5_code,
+        __OP_DEDUP_ECLASS7_CODE_EXPR__ AS eclass7_code,
+        __OP_DEDUP_S2CLASS_CODE_EXPR__ AS s2class_code
+    FROM unique_eclass_groups eg
+    CROSS JOIN LATERAL (
+        SELECT
+            __OP_DEDUP_ECLASS_EXTRACT_LATERAL__
+    ) ec
+    CROSS JOIN LATERAL (
+        SELECT
+            __OP_DEDUP_S2CLASS_SOURCE_SELECT__
+    ) s2src
+    LEFT JOIN LATERAL (
+        __OP_DEDUP_S2CLASS_JOIN_LATERAL__
+    ) s2 ON TRUE
+),
+offer_derived AS (
+    SELECT
+        o.vendorId."$binary".base64 AS vk,
+        o.articleNumber AS ak,
+
+        -- ---- PK + identifiers ----
+        uuid_str(o.vendorId) AS vendor_id,
+        o.articleNumber AS article_number,
+        uuid_str(o.vendorId)
+            || ':' || b64url_no_pad(o.articleNumber)
+            || ':' || uuid_str(o.catalogVersionId) AS id,
+
+        -- ---- article-level retrieval / display ----
+        COALESCE(o."offer".offerParams."name", '') AS "name",
+        COALESCE(o."offer".offerParams.manufacturerName, '') AS manufacturerName,
+        COALESCE(o."offer".offerParams.ean, '') AS ean,
+
+        -- ---- catalog version (singular per source mongo offer post-F9 correction) ----
+        uuid_str(o.catalogVersionId) AS catalog_version_id,
+
+        -- ---- delivery ----
+        CAST(COALESCE(unwrap_int(o."offer".offerParams.deliveryTime), 0) AS INTEGER) AS delivery_time_days_max,
+
+        -- ---- eClass / S2Class hierarchies ----
+        cd.eclass5_code,
+        cd.eclass7_code,
+        cd.s2class_code,
+
+        -- ---- relationships ----
+        list_slice(COALESCE(o."offer".relatedArticleNumbers.accessoryFor, []::VARCHAR[]), 1, 4096) AS relationship_accessory_for,
+        list_slice(COALESCE(o."offer".relatedArticleNumbers.sparePartFor, []::VARCHAR[]), 1, 4096) AS relationship_spare_part_for,
+        list_slice(COALESCE(o."offer".relatedArticleNumbers.similarTo,    []::VARCHAR[]), 1, 4096) AS relationship_similar_to,
+
+        -- ---- categories: per-depth dedup ----
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 1
+            ),
+            cp -> encode_category_path(cp.elements[1:1])
+        )), []::VARCHAR[]) AS category_l1,
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 2
+            ),
+            cp -> encode_category_path(cp.elements[1:2])
+        )), []::VARCHAR[]) AS category_l2,
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 3
+            ),
+            cp -> encode_category_path(cp.elements[1:3])
+        )), []::VARCHAR[]) AS category_l3,
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 4
+            ),
+            cp -> encode_category_path(cp.elements[1:4])
+        )), []::VARCHAR[]) AS category_l4,
+        COALESCE(ordered_distinct(list_transform(
+            list_filter(
+                COALESCE(o."offer".offerParams.categoryPaths, []::STRUCT(elements VARCHAR[])[]),
+                cp -> len(cp.elements) >= 5
+            ),
+            cp -> encode_category_path(cp.elements[1:5])
+        )), []::VARCHAR[]) AS category_l5,
+
+        -- ---- features ----
+        COALESCE(flatten(list_transform(
+            COALESCE(o."offer".offerParams.features,
+                     []::STRUCT("name" VARCHAR, "values" VARCHAR[], unit VARCHAR, description VARCHAR)[]),
+            f -> list_transform(
+                list_filter(COALESCE(f."values", []::VARCHAR[]), v -> NOT contains(v, '=')),
+                v -> f."name" || '=' || v
+            )
+        )), []::VARCHAR[]) AS features,
+
+        -- ---- carry-through: raw inline pricings (used at chunk-time) ----
+        o."offer".pricings.open AS inline_pricings_open,
+        o."offer".pricings.closed AS inline_pricings_closed,
+
+        -- ---- carry-through: offer-inline can pair (UNIONed at chunk-time
+        -- with joined cans) ----
+        CASE
+            WHEN o."offer".offerParams.customerArticleNumber IS NOT NULL
+             AND o."offer".offerParams.customerArticleNumber <> ''
+             AND o.catalogVersionId IS NOT NULL
+            THEN {
+                'value': o."offer".offerParams.customerArticleNumber,
+                'version_id': uuid_str(o.catalogVersionId)
+            }
+            ELSE NULL
+        END AS inline_can_pair,
+
+        -- ---- carry-through: raw v2-hash inputs (used in the outer
+        -- SELECT to compute article_hash). These columns are not
+        -- consumed downstream by the indexer beyond the hash, so they
+        -- carry through offer_projected for completeness only.
+        COALESCE(o."offer".offerParams."description", '') AS _hash_description,
+        COALESCE(o."offer".offerParams.categoryPaths,
+                 []::STRUCT(elements VARCHAR[])[]) AS _hash_category_paths,
+        COALESCE(o."offer".offerParams.manufacturerArticleNumber, '') AS _hash_mfg_article_number,
+        COALESCE(o."offer".offerParams.manufacturerArticleType, '') AS _hash_mfg_article_type
+    FROM base o
+    JOIN classification_dedup cd USING (eclass_groups_json)
+)
+SELECT
+    *,
+    compute_article_hash(
+        "name",
+        manufacturerName,
+        _hash_description,
+        _hash_category_paths,
+        ean,
+        article_number,
+        _hash_mfg_article_number,
+        _hash_mfg_article_type
+    ) AS article_hash
+FROM offer_derived
+""".replace(
+    "__OP_DEDUP_ECLASS5_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_5_1_leafs")
+).replace(
+    "__OP_DEDUP_ECLASS7_CODE_EXPR__", _sql_expand_eclass_leafs_expr("ec.eclass_7_1_leafs")
+).replace(
+    "__OP_DEDUP_S2CLASS_CODE_EXPR__", _sql_s2class_from_join_expr("s2")
+).replace(
+    "__OP_DEDUP_ECLASS_EXTRACT_LATERAL__", _sql_eclass_extract_lateral("eg.eclass_groups_json")
+).replace(
+    "__OP_DEDUP_S2CLASS_SOURCE_SELECT__", _sql_s2class_source_select("ec.")
+).replace(
+    "__OP_DEDUP_S2CLASS_JOIN_LATERAL__", _sql_s2class_join_lateral("s2src")
+)
+
+
 # Chunk-time projection that reuses precomputed offer_projected. Drop-in
 # replacement for `_PROJECTION_CTE_SQL` when offer_projected is available.
 # Reads from a table named `offer_projected` (operator's responsibility to
@@ -1282,6 +1455,12 @@ projected AS (
 )"""
 
 
+def _offer_projected_from_clause(source_table_or_glob):
+    if source_table_or_glob.endswith(".parquet") or "*.parquet" in source_table_or_glob:
+        return f"read_parquet('{source_table_or_glob}') o"
+    return f"{source_table_or_glob} o"
+
+
 def offer_projected_build_sql(*, source_table_or_glob: str) -> str:
     """Render the SELECT that produces offer_projected output.
 
@@ -1290,12 +1469,19 @@ def offer_projected_build_sql(*, source_table_or_glob: str) -> str:
       - a parquet path/glob (e.g. '/path/to/offers.parquet/chunk_0000.parquet'),
         in which case it's wrapped in `read_parquet(...)`.
     """
-    if source_table_or_glob.endswith(".parquet") or "*.parquet" in source_table_or_glob:
-        from_clause = f"read_parquet('{source_table_or_glob}') o"
-    else:
-        from_clause = f"{source_table_or_glob} o"
-    # Substitute `raw_offers o` with the chosen FROM clause.
+    from_clause = _offer_projected_from_clause(source_table_or_glob)
     return _OFFER_PROJECTED_BUILD_SELECT_SQL.replace("FROM raw_offers o", f"FROM {from_clause}")
+
+
+def offer_projected_build_sql_dedup_eclass(*, source_table_or_glob: str) -> str:
+    """Render the offer_projected SELECT with deduped `eclassGroups` parsing.
+
+    Keeps the existing builder intact for A/B comparisons while reducing
+    classification work on catalogs where many offers share identical
+    `offerParams.eclassGroups` blobs.
+    """
+    from_clause = _offer_projected_from_clause(source_table_or_glob)
+    return _OFFER_PROJECTED_BUILD_SELECT_DEDUP_ECLASS_SQL.replace("FROM raw_offers o", f"FROM {from_clause}")
 
 
 def _resolve_flat_cte(source: str) -> str:
@@ -1548,6 +1734,8 @@ __all__ = [
     "project_records",
     "aggregate_articles",
     "project_offer_rows",
+    "offer_projected_build_sql",
+    "offer_projected_build_sql_dedup_eclass",
     "load_raw_collections",
     "aggregate_articles_from_collections",
     "project_offer_rows_from_collections",
