@@ -74,6 +74,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 
+# /v1/rerank bundled-offers config. Env-driven so the rerank service and the
+# ES indexer agree on the sentinel without sharing code. Default `\x1F` (ASCII
+# Unit Separator) is safe — it never appears in product text.
+_V1_OFFER_SEP = os.environ.get("V1_RERANK_OFFER_SEP", "\x1f")
+_V1_AGG = os.environ.get("V1_RERANK_AGG", "max")  # "max" | "mean"
+
+
 # --- Schemas ---------------------------------------------------------------
 
 
@@ -302,12 +309,15 @@ async def rerank(request: Request):
 async def rerank_v1(request: Request):
     """TEI/HF-compatible rerank for ES `text_similarity_reranker`.
 
+    One text per ES doc, one score returned per doc. For
+    articles-with-nested-offers indexes that store a separator-joined
+    bundle of offer texts per article, use `/v1/rerank_grouped` instead.
+
     Input  (TEI rerank shape): {"query": str, "texts": [str, ...]}
       `raw_scores`, `return_text`, `truncate` accepted but ignored.
       `texts[i]` must already be in the offer-template format — call
       `cross_encoder_serve.inference.render_offer_text(offer)` at ES index
-      time to populate a `rerank_text` field, then point the retriever at
-      that field. The endpoint does NOT re-render the input.
+      time. The endpoint does NOT re-render the input.
     Output: [{"index": int, "score": float}, ...], sorted by score desc.
       `score` is `p_exact_calibrated` (calibrated against held-out NLL).
     """
@@ -323,6 +333,58 @@ async def rerank_v1(request: Request):
     reranker = _get_reranker()
     scores = await asyncio.to_thread(reranker.rerank_texts, query, texts)
     indexed = sorted(enumerate(scores), key=lambda x: -x[1])
+    return ORJSONResponse([{"index": i, "score": float(s)} for i, s in indexed])
+
+
+@app.post("/v1/rerank_grouped")
+async def rerank_grouped_v1(request: Request):
+    """TEI/HF-compatible rerank for ES articles-with-bundled-offers indexes.
+
+    Each `texts[i]` is a `V1_RERANK_OFFER_SEP`-joined bundle (default
+    `\\x1F`) of per-offer rendered texts — typically the offers of one
+    article. The server splits each bundle, scores every offer
+    independently through the cross-encoder, then aggregates per bundle
+    via `V1_RERANK_AGG` (default `max`) to a single score. ES sees one
+    score per article and stays oblivious to the inner structure.
+
+    Request shape is identical to `/v1/rerank`; only the semantics of
+    `texts[i]` differ. A bundle with no separator (single offer) scores
+    identically to the plain endpoint.
+
+    Input:  {"query": str, "texts": [str, ...]}   # each str is SEP-joined
+    Output: [{"index": int, "score": float}, ...] # sorted by score desc
+    """
+    import asyncio
+    import orjson
+    body = await request.body()
+    payload = orjson.loads(body)
+    query = payload.get("query") or ""
+    texts = payload.get("texts") or []
+    if not texts:
+        return ORJSONResponse([])
+
+    flat: list[str] = []
+    bounds: list[int] = [0]
+    for t in texts:
+        parts = t.split(_V1_OFFER_SEP) if _V1_OFFER_SEP in t else [t]
+        flat.extend(parts)
+        bounds.append(len(flat))
+
+    reranker = _get_reranker()
+    scores = await asyncio.to_thread(reranker.rerank_texts, query, flat)
+
+    out: list[float] = []
+    for i in range(len(texts)):
+        s, e = bounds[i], bounds[i + 1]
+        chunk = scores[s:e]
+        if not chunk:
+            out.append(0.0)
+        elif _V1_AGG == "mean":
+            out.append(sum(chunk) / len(chunk))
+        else:
+            out.append(max(chunk))
+
+    indexed = sorted(enumerate(out), key=lambda x: -x[1])
     return ORJSONResponse([{"index": i, "score": float(s)} for i, s in indexed])
 
 

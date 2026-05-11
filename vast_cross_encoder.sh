@@ -25,7 +25,8 @@ Usage: HF_TOKEN=<token> $0 [options] <vast-offer-id>
                     Compile showed 0% gain on the bench'd 4090; toggle
                     on to A/B on other GPUs. (default ${SERVE_COMPILE})
 
-Pass-through env (forwarded if set): LGBM, TEMPERATURE, ENSEMBLE_W.
+Pass-through env (forwarded if set): LGBM, TEMPERATURE, ENSEMBLE_W,
+V1_RERANK_OFFER_SEP, V1_RERANK_AGG.
 USAGE
 }
 
@@ -51,6 +52,8 @@ ENV_ARGS="-e HF_TOKEN=${HF_TOKEN} -e CKPT=${CKPT} -e SERVE_DTYPE=${SERVE_DTYPE} 
 [[ -n "${LGBM:-}" ]]          && ENV_ARGS="$ENV_ARGS -e LGBM=${LGBM}"
 [[ -n "${TEMPERATURE:-}" ]]   && ENV_ARGS="$ENV_ARGS -e TEMPERATURE=${TEMPERATURE}"
 [[ -n "${ENSEMBLE_W:-}" ]]    && ENV_ARGS="$ENV_ARGS -e ENSEMBLE_W=${ENSEMBLE_W}"
+[[ -n "${V1_RERANK_OFFER_SEP:-}" ]] && ENV_ARGS="$ENV_ARGS -e V1_RERANK_OFFER_SEP=${V1_RERANK_OFFER_SEP}"
+[[ -n "${V1_RERANK_AGG:-}" ]]       && ENV_ARGS="$ENV_ARGS -e V1_RERANK_AGG=${V1_RERANK_AGG}"
 ENV_ARGS="$ENV_ARGS -p 8080:8080"
 
 STARTUP=$(cat <<'EOF'
