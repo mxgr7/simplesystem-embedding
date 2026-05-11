@@ -3,9 +3,57 @@
 # Vast.ai instance. Multi-GPU: launches one TEI per GPU and fronts them
 # with nginx round-robin on :3000.
 #
-# Usage:  HF_TOKEN=<token> ./vast_embedding.sh <vast-offer-id>
+# Usage:  HF_TOKEN=<token> ./vast_embedding.sh [--arch NAME] [--max-batch-tokens N] <vast-offer-id>
 
 set -euo pipefail
+
+MAX_BATCH_TOKENS=1048576
+ARCH=ampere
+
+usage() {
+  cat <<USAGE
+Usage: HF_TOKEN=<token> $0 [--arch NAME] [--max-batch-tokens N] <vast-offer-id>
+
+  --arch NAME           GPU architecture; picks the matching TEI image tag.
+                        One of: turing, ampere, ampere86, ada, hopper.
+                          turing   -> T4, RTX 20xx
+                          ampere   -> A100, A30                  (default)
+                          ampere86 -> A10, RTX 30xx
+                          ada      -> L4, L40, RTX 40xx
+                          hopper   -> H100, H200
+  --max-batch-tokens N  tokens packed per GPU forward pass; all other
+                        TEI limits scale from this. (default ${MAX_BATCH_TOKENS})
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --arch)             ARCH=$2; shift 2;;
+    --max-batch-tokens) MAX_BATCH_TOKENS=$2; shift 2;;
+    -h|--help)          usage; exit 0;;
+    -*)                 echo "unknown flag: $1" >&2; usage >&2; exit 2;;
+    *)                  break;;
+  esac
+done
+
+[[ $# -eq 1 ]] || { usage >&2; exit 2; }
+OFFER_ID=$1
+
+case "$ARCH" in
+  turing)   IMAGE_TAG=turing-1.9 ;;
+  ampere)   IMAGE_TAG=1.9 ;;
+  ampere86) IMAGE_TAG=86-1.9 ;;
+  ada)      IMAGE_TAG=89-1.9 ;;
+  hopper)   IMAGE_TAG=hopper-1.9 ;;
+  *)        echo "unknown --arch: $ARCH" >&2; usage >&2; exit 2;;
+esac
+
+# Derivations assume ~256 tok/req floor and ~2.5KB/req on the wire.
+MAX_BATCH_REQUESTS=$(( MAX_BATCH_TOKENS / 256 ))
+MAX_CLIENT_BATCH_SIZE=$MAX_BATCH_REQUESTS
+MAX_CONCURRENT_REQUESTS=$(( MAX_BATCH_REQUESTS * 2 ))
+PAYLOAD_LIMIT=$(( MAX_CLIENT_BATCH_SIZE * 2500 ))
+
 : "${HF_TOKEN:?HF_TOKEN must be set (used to pull the embedding model from HF)}"
 
 STARTUP=$(cat <<'EOF'
@@ -62,13 +110,13 @@ launch_tei() {
       --pooling mean \
       --port $PORT \
       --dtype float16 \
-      --max-batch-tokens 1048576 \
-      --max-concurrent-requests 8192 \
-      --max-client-batch-size 4096 \
-      --max-batch-requests 4096 \
+      --max-batch-tokens $MAX_BATCH_TOKENS \
+      --max-concurrent-requests $MAX_CONCURRENT_REQUESTS \
+      --max-client-batch-size $MAX_CLIENT_BATCH_SIZE \
+      --max-batch-requests $MAX_BATCH_REQUESTS \
       --tokenization-workers $WORKERS_PER_GPU \
       --auto-truncate \
-      --payload-limit 10000000 \
+      --payload-limit $PAYLOAD_LIMIT \
       2>&1 | stdbuf -oL sed -u "s/^/[tei$i] /" | tee -a /var/log/tei.$i.log
   ) &
 }
@@ -130,9 +178,9 @@ exec nginx -g 'daemon off;'
 EOF
 )
 
-vastai create instance "$1" \
-  --image ghcr.io/huggingface/text-embeddings-inference:1.9 \
-  --env "-e HF_TOKEN=${HF_TOKEN} -p 3000:3000" \
+vastai create instance "$OFFER_ID" \
+  --image ghcr.io/huggingface/text-embeddings-inference:${IMAGE_TAG} \
+  --env "-e HF_TOKEN=${HF_TOKEN} -e MAX_BATCH_TOKENS=${MAX_BATCH_TOKENS} -e MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS} -e MAX_CLIENT_BATCH_SIZE=${MAX_CLIENT_BATCH_SIZE} -e MAX_BATCH_REQUESTS=${MAX_BATCH_REQUESTS} -e PAYLOAD_LIMIT=${PAYLOAD_LIMIT} -p 3000:3000" \
   --disk 40 \
   --entrypoint /bin/bash \
   --args -c "$STARTUP"

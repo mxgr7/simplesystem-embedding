@@ -1,30 +1,57 @@
 #!/usr/bin/env bash
 # Deploy the Soup cross-encoder rerank server to a Vast.ai instance.
 #
-# Usage:
-#   HF_TOKEN=<token> ./vast_cross_encoder.sh <vast-offer-id>
-#
-# CKPT defaults to mxgr/simplesystem-cross-encoder:soup.ckpt (HF Hub).
-# Override for a different revision or a local/mounted path:
-#   CKPT=mxgr/simplesystem-cross-encoder@<rev>:soup.ckpt
-#   CKPT=/app/checkpoints/soup.ckpt
-#
-# LGBM defaults to the booster baked into the image at
-# /app/artifacts/lgbm_soup.txt; override via env if you want to disable
-# (LGBM=) or pull a different one.
-#
-# Server runs eager (no torch.compile). Compile gave 0% throughput
-# improvement on this model+GPU class while costing ~20s/new-shape and
-# ~25% of the per-request batch budget — see TORCHDYNAMO_DISABLE in the
-# image entrypoint.
+# Usage:  HF_TOKEN=<token> ./vast_cross_encoder.sh [options] <vast-offer-id>
 
 set -euo pipefail
-: "${HF_TOKEN:?HF_TOKEN must be set (used to pull the CE checkpoint from HF)}"
 
 CKPT="${CKPT:-mxgr/simplesystem-cross-encoder:soup.ckpt}"
-# bf16 autocast roughly doubles max-batch capacity at S=512 vs fp32 with no
-# measurable accuracy delta on this 330M model. Set SERVE_DTYPE=fp32 to disable.
 SERVE_DTYPE="${SERVE_DTYPE:-bf16}"
+SERVE_MAX_BATCH="${SERVE_MAX_BATCH:-128}"
+SERVE_COMPILE="${SERVE_COMPILE:-0}"
+
+usage() {
+  cat <<USAGE
+Usage: HF_TOKEN=<token> $0 [options] <vast-offer-id>
+
+  --ckpt SPEC       path or HF spec for the Soup CE checkpoint.
+                    (default ${CKPT})
+  --dtype DTYPE     autocast dtype: bf16|fp16|fp32|auto. bf16 ~2x batch
+                    capacity at S=512 vs fp32, no measurable accuracy
+                    delta on this 330M model. (default ${SERVE_DTYPE})
+  --max-batch N     encoder forward chunk size. 128 is the bench'd 4090
+                    sweet spot; re-bench for other GPUs. (default ${SERVE_MAX_BATCH})
+  --compile {0,1}   torch.compile the encoder. 0 sets TORCHDYNAMO_DISABLE=1.
+                    Compile showed 0% gain on the bench'd 4090; toggle
+                    on to A/B on other GPUs. (default ${SERVE_COMPILE})
+
+Pass-through env (forwarded if set): LGBM, TEMPERATURE, ENSEMBLE_W.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ckpt)      CKPT=$2; shift 2;;
+    --dtype)     SERVE_DTYPE=$2; shift 2;;
+    --max-batch) SERVE_MAX_BATCH=$2; shift 2;;
+    --compile)   SERVE_COMPILE=$2; shift 2;;
+    -h|--help)   usage; exit 0;;
+    -*)          echo "unknown flag: $1" >&2; usage >&2; exit 2;;
+    *)           break;;
+  esac
+done
+
+[[ $# -eq 1 ]] || { usage >&2; exit 2; }
+OFFER_ID=$1
+
+: "${HF_TOKEN:?HF_TOKEN must be set (used to pull the CE checkpoint from HF)}"
+
+ENV_ARGS="-e HF_TOKEN=${HF_TOKEN} -e CKPT=${CKPT} -e SERVE_DTYPE=${SERVE_DTYPE} -e SERVE_MAX_BATCH=${SERVE_MAX_BATCH} -e SERVE_COMPILE=${SERVE_COMPILE}"
+[[ "$SERVE_COMPILE" != "1" ]] && ENV_ARGS="$ENV_ARGS -e TORCHDYNAMO_DISABLE=1"
+[[ -n "${LGBM:-}" ]]          && ENV_ARGS="$ENV_ARGS -e LGBM=${LGBM}"
+[[ -n "${TEMPERATURE:-}" ]]   && ENV_ARGS="$ENV_ARGS -e TEMPERATURE=${TEMPERATURE}"
+[[ -n "${ENSEMBLE_W:-}" ]]    && ENV_ARGS="$ENV_ARGS -e ENSEMBLE_W=${ENSEMBLE_W}"
+ENV_ARGS="$ENV_ARGS -p 8080:8080"
 
 STARTUP=$(cat <<'EOF'
 set -e
@@ -66,9 +93,9 @@ exec uv run uvicorn cross_encoder_serve.server:app --host 0.0.0.0 --port 8080
 EOF
 )
 
-vastai create instance "$1" \
+vastai create instance "$OFFER_ID" \
   --image ghcr.io/mxgr7/simplesystem-embedding/cross-encoder-serve:sha-6c941eb \
-  --env "-e CKPT=${CKPT} -e HF_TOKEN=${HF_TOKEN} -e SERVE_DTYPE=${SERVE_DTYPE} -e TORCHDYNAMO_DISABLE=1 -p 8080:8080 -p 9100:9100 -p 9835:9835" \
+  --env "$ENV_ARGS" \
   --disk 50 \
   --entrypoint /bin/bash \
   --args -c "$STARTUP"
