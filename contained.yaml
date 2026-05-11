@@ -1,0 +1,4 @@
+defaults:
+  mounts:
+    - ../../data:/data
+    - ../next-gen:/next-gen
