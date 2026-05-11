@@ -97,7 +97,7 @@ EOF
 )
 
 vastai create instance "$OFFER_ID" \
-  --image ghcr.io/mxgr7/simplesystem-embedding/cross-encoder-serve:sha-6c941eb \
+  --image ghcr.io/mxgr7/simplesystem-embedding/cross-encoder-serve:sha-8417855 \
   --env "$ENV_ARGS" \
   --disk 50 \
   --entrypoint /bin/bash \
