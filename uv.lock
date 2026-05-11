@@ -587,6 +587,7 @@ dependencies = [
     { name = "lightgbm" },
     { name = "lightning" },
     { name = "numpy" },
+    { name = "orjson" },
     { name = "torch" },
     { name = "transformers" },
     { name = "uvicorn" },
@@ -598,7 +599,6 @@ serve = [
     { name = "onnx" },
     { name = "onnxruntime-gpu" },
     { name = "onnxscript" },
-    { name = "orjson" },
     { name = "tensorrt" },
 ]
 train = [
@@ -649,7 +649,7 @@ requires-dist = [
     { name = "onnx", marker = "extra == 'serve'", specifier = ">=1.21.0" },
     { name = "onnxruntime-gpu", marker = "extra == 'serve'", specifier = ">=1.25.1" },
     { name = "onnxscript", marker = "extra == 'serve'", specifier = ">=0.7.0" },
-    { name = "orjson", marker = "extra == 'serve'", specifier = ">=3.11.8" },
+    { name = "orjson", specifier = ">=3.11.8" },
     { name = "pandas", marker = "extra == 'train'", specifier = ">=2.2.3" },
     { name = "prometheus-fastapi-instrumentator", marker = "extra == 'train'", specifier = ">=7.0.0" },
     { name = "pyarrow", marker = "extra == 'train'", specifier = ">=19.0.1" },

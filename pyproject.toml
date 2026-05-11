@@ -20,6 +20,7 @@ dependencies = [
   "lightgbm>=4.6.0",
   "lightning>=2.5.0",
   "numpy>=2.2.4",
+  "orjson>=3.11.8",
   "torch>=2.6.0",
   "transformers>=4.49.0",
   "uvicorn>=0.30.0",
@@ -49,7 +50,6 @@ serve = [
     "onnx>=1.21.0",
     "onnxruntime-gpu>=1.25.1",
     "onnxscript>=0.7.0",
-    "orjson>=3.11.8",
     "tensorrt>=10.16.1.11",
 ]
 
