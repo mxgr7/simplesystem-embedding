@@ -298,6 +298,34 @@ async def rerank(request: Request):
     return resp
 
 
+@app.post("/v1/rerank")
+async def rerank_v1(request: Request):
+    """TEI/HF-compatible rerank for ES `text_similarity_reranker`.
+
+    Input  (TEI rerank shape): {"query": str, "texts": [str, ...]}
+      `raw_scores`, `return_text`, `truncate` accepted but ignored.
+      `texts[i]` must already be in the offer-template format — call
+      `cross_encoder_serve.inference.render_offer_text(offer)` at ES index
+      time to populate a `rerank_text` field, then point the retriever at
+      that field. The endpoint does NOT re-render the input.
+    Output: [{"index": int, "score": float}, ...], sorted by score desc.
+      `score` is `p_exact_calibrated` (calibrated against held-out NLL).
+    """
+    import asyncio
+    import orjson
+    body = await request.body()
+    payload = orjson.loads(body)
+    query = payload.get("query") or ""
+    texts = payload.get("texts") or []
+    if not texts:
+        return ORJSONResponse([])
+
+    reranker = _get_reranker()
+    scores = await asyncio.to_thread(reranker.rerank_texts, query, texts)
+    indexed = sorted(enumerate(scores), key=lambda x: -x[1])
+    return ORJSONResponse([{"index": i, "score": float(s)} for i, s in indexed])
+
+
 @app.post("/rerank_pretokenized")
 async def rerank_pretokenized(request: Request):
     """Rerank using a pre-tokenized offer cache.

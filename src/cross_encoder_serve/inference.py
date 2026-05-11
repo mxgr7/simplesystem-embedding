@@ -658,6 +658,28 @@ class Reranker:
             )
         return out
 
+    @torch.no_grad()
+    def rerank_texts(self, query: str, texts: list[str]) -> list[float]:
+        """Score pre-rendered offer texts against `query`.
+
+        Texts must already be in the offer-template format the model was
+        trained on — call `render_offer_text(offer)` at index time to produce
+        them. Returns `p_exact_calibrated` per text, in input order. Used by
+        the `/v1/rerank` endpoint for ES `text_similarity_reranker`: ES
+        pre-renders the field at index time and sends raw strings, not
+        structured offers.
+        """
+        if not texts:
+            return []
+        query_text = _normalize_text_fast(query)
+        logits = self._forward(query_text, texts).float()
+        p_exact_cal = (
+            F.softmax(logits / self.cfg.temperature, dim=-1)[:, EXACT_IDX]
+            .cpu()
+            .numpy()
+        )
+        return p_exact_cal.tolist()
+
     def _prepare_texts(self, query: str, offers: list[dict]):
         # Fast path replacing Jinja-based rendering. The Jinja loop costs ~1.3
         # ms/offer (≈2.5s for a 2000-offer request) and was *bigger* than the
@@ -966,6 +988,17 @@ def _render_offer_fast(offer: dict, clean_html: bool) -> str:
         if desc:
             _add("Beschreibung", desc)
     return body
+
+
+def render_offer_text(offer: dict, clean_html: bool = True) -> str:
+    """Render an offer dict to the cross-encoder's training-time input format.
+
+    Exposed for clients that pre-render at index time and send only strings
+    to `/v1/rerank` (e.g., Elasticsearch `text_similarity_reranker` against
+    an indexed `rerank_text` field). Byte-equal to the renderer used inside
+    `Reranker.rerank`.
+    """
+    return _render_offer_fast(offer, clean_html)
 
 
 _DIGIT_RUN = re.compile(r"\d+")
