@@ -4,7 +4,7 @@ Three artifacts (v1 default: 1k queries × 200k article sample, unfiltered):
 
   queries.parquet         (query, count)                — top-N queries by frequency
   query_vectors.npy       float32[N, 128]               — TEI-embedded query vectors
-  vector_article_ids.parquet (article_id)               — article_id per corpus vector row
+  vector_article_ids.parquet (article_id, input_hash)   — one row per corpus vector
   corpus_vectors.npy      float32[M, 128]               — all embeddings from the article sample
   ground_truth.npy        int32[N, GT_TOPK]             — exact top-K corpus indices per query
   manifest.json                                         — config snapshot
@@ -15,9 +15,13 @@ Sources:
            alphanumeric SKUs) are filtered out by default — they short-circuit
            through identifier profiles and don't exercise the vector path.
 
-  Vectors: local-article-index-v1 on localhost:9200. Random-scored sample of
-           N articles, all `embeddings.vector` entries extracted (one row per
-           vector, tagged with its article_id).
+  Vectors: per the FT_ELASTIC §2.1.1 shape, the dense_vector itself is NOT
+           stored in `_source` — only the indexed HNSW graph has it, and the
+           graph is not source-readable. Each nested `embeddings` entry carries
+           an `inputHash` keyword that doubles as the Redis cache key
+           (`tei:{HASH_VERSION}:{hash}` → 256-byte fp16 payload). So we pull
+           (articleId, inputHash) tuples from ES, then MGET the vectors from
+           Redis and decode fp16 → float32.
 
 Ground truth is computed at the *vector* level via FAISS IndexFlatIP on
 L2-normalized vectors (cosine ≡ inner product when normalized). HNSW returns
@@ -35,6 +39,7 @@ import argparse
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -44,20 +49,28 @@ import httpx
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import redis
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from indexer.projection import HASH_VERSION  # noqa: E402
+
 DEFAULT_OUT_DIR = REPO_ROOT / "reports" / "hnsw_eval"
 
 POSTHOG_DIR = "/data/datasets/posthog_queries.parquet"
 ES_URL = "http://localhost:9200"
-ES_INDEX = "local-article-index-v1"
+ES_INDEX = "local-article-index-v2"
 TEI_URL = "http://localhost:8080"
+REDIS_URL = "redis://localhost:6379/0"
 DIM = 128
+VECTOR_BYTES = DIM * 2  # fp16 — matches indexer/tei_cache.py
 GT_TOPK = 100
 
 TEI_BATCH = 32          # matches TEI --max-client-batch-size
 ES_PAGE_SIZE = 1000
 PIT_KEEP_ALIVE = "5m"
+REDIS_MGET_CHUNK = 10000
 RANDOM_SEED = 42
 
 # Heuristic: identifier-shaped queries (EAN, alphanumeric SKU, hyphen-digit).
@@ -118,12 +131,14 @@ def embed_queries(queries: list[str]) -> np.ndarray:
     return out
 
 
-def pull_article_vectors(n_articles: int) -> tuple[list[str], np.ndarray]:
+def pull_article_hashes(es_url: str, n_articles: int) -> tuple[list[str], list[str]]:
     """Random-score-paginate `n_articles` from ES, expanding each into its
-    embeddings entries. Returns (article_ids per vector, vectors)."""
+    `embeddings.inputHash` entries. Returns (article_ids, input_hashes) — one
+    aligned pair per (article, embedding) tuple. Vectors are fetched in a
+    separate Redis pass; see fetch_vectors_from_redis()."""
     ids: list[str] = []
-    vecs: list[np.ndarray] = []
-    with httpx.Client(base_url=ES_URL, timeout=180.0) as client:
+    hashes: list[str] = []
+    with httpx.Client(base_url=es_url, timeout=180.0) as client:
         # Open a point-in-time view for stable pagination.
         r = client.post(f"/{ES_INDEX}/_pit", params={"keep_alive": PIT_KEEP_ALIVE})
         r.raise_for_status()
@@ -138,7 +153,7 @@ def pull_article_vectors(n_articles: int) -> tuple[list[str], np.ndarray]:
                     "size": page,
                     "track_total_hits": False,
                     "pit": {"id": pit_id, "keep_alive": PIT_KEEP_ALIVE},
-                    "_source": ["articleId", "embeddings.vector"],
+                    "_source": ["articleId", "embeddings.inputHash"],
                     "query": {
                         "function_score": {
                             "query": {"match_all": {}},
@@ -162,11 +177,11 @@ def pull_article_vectors(n_articles: int) -> tuple[list[str], np.ndarray]:
                     if aid is None:
                         continue
                     for e in src.get("embeddings") or []:
-                        v = e.get("vector")
-                        if v is None:
+                        ih = e.get("inputHash")
+                        if not ih:
                             continue
                         ids.append(aid)
-                        vecs.append(np.asarray(v, dtype=np.float32))
+                        hashes.append(ih)
 
                 articles_seen += len(hits)
                 search_after = hits[-1]["sort"]
@@ -176,9 +191,51 @@ def pull_article_vectors(n_articles: int) -> tuple[list[str], np.ndarray]:
             except Exception:
                 pass
 
+    if not hashes:
+        raise SystemExit(
+            "No `embeddings.inputHash` entries found in the sampled articles. "
+            "Has the index been reindexed against the FT_ELASTIC §2.1.1 mapping yet?"
+        )
+    return ids, hashes
+
+
+def fetch_vectors_from_redis(
+    hashes: list[str], redis_url: str
+) -> tuple[list[int], np.ndarray]:
+    """Bulk-MGET fp16 vectors for the input hashes. Returns (kept_indices, vectors)
+    where kept_indices is the subset of input positions whose cache entry was
+    present and well-formed. Decodes fp16 → fp32 on the way out."""
+    r = redis.Redis.from_url(redis_url, decode_responses=False)
+    keys = [f"tei:{HASH_VERSION}:{h}" for h in hashes]
+
+    raw: list[bytes | None] = []
+    for i in range(0, len(keys), REDIS_MGET_CHUNK):
+        raw.extend(r.mget(keys[i : i + REDIS_MGET_CHUNK]))
+
+    kept_indices: list[int] = []
+    vecs: list[np.ndarray] = []
+    bad_length = 0
+    for i, v in enumerate(raw):
+        if v is None:
+            continue
+        if len(v) != VECTOR_BYTES:
+            bad_length += 1
+            continue
+        kept_indices.append(i)
+        vecs.append(np.frombuffer(v, dtype=np.float16).astype(np.float32))
+
+    missing = len(hashes) - len(kept_indices) - bad_length
+    if missing or bad_length:
+        print(
+            f"  warning: {missing:,} of {len(hashes):,} hashes missing from Redis; "
+            f"{bad_length:,} had unexpected byte length (skipped)"
+        )
     if not vecs:
-        raise SystemExit("No embeddings found in the sampled articles.")
-    return ids, np.vstack(vecs)
+        raise SystemExit(
+            f"All {len(hashes):,} hashes missed the Redis cache at {redis_url} "
+            f"(HASH_VERSION={HASH_VERSION!r}). Has the cache been warmed?"
+        )
+    return kept_indices, np.vstack(vecs)
 
 
 def normalize_rows(x: np.ndarray) -> np.ndarray:
@@ -203,6 +260,8 @@ def main() -> None:
     p.add_argument("--articles", type=int, default=200_000)
     p.add_argument("--gt-topk", type=int, default=GT_TOPK)
     p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    p.add_argument("--es-url", default=ES_URL)
+    p.add_argument("--redis-url", default=REDIS_URL)
     p.add_argument(
         "--keep-identifiers",
         action="store_true",
@@ -231,12 +290,23 @@ def main() -> None:
 
     t0 = time.time()
     print(
-        f"[3/4] Pulling {args.articles:,} random articles' embeddings "
-        f"from {ES_URL}/{ES_INDEX} ..."
+        f"[3a/4] Pulling {args.articles:,} random articles' inputHash entries "
+        f"from {args.es_url}/{ES_INDEX} ..."
     )
-    aids, cvecs = pull_article_vectors(args.articles)
+    aids_all, hashes_all = pull_article_hashes(args.es_url, args.articles)
     print(
-        f"      {cvecs.shape[0]:,} vectors across {len(set(aids)):,} articles "
+        f"       got {len(hashes_all):,} (articleId, inputHash) pairs across "
+        f"{len(set(aids_all)):,} articles in {time.time() - t0:.1f}s"
+    )
+
+    t0 = time.time()
+    print(f"[3b/4] Fetching vectors from Redis at {args.redis_url} (key prefix tei:{HASH_VERSION}:) ...")
+    kept_idx, cvecs = fetch_vectors_from_redis(hashes_all, args.redis_url)
+    aids = [aids_all[i] for i in kept_idx]
+    input_hashes = [hashes_all[i] for i in kept_idx]
+    print(
+        f"       resolved {cvecs.shape[0]:,} vectors across "
+        f"{len(set(aids)):,} articles "
         f"(avg {cvecs.shape[0] / max(len(set(aids)), 1):.2f}/article) "
         f"in {time.time() - t0:.1f}s"
     )
@@ -252,7 +322,10 @@ def main() -> None:
     # Write artifacts.
     pq.write_table(pa.table({"query": queries, "count": counts}), out / "queries.parquet")
     np.save(out / "query_vectors.npy", qvecs)
-    pq.write_table(pa.table({"article_id": aids}), out / "vector_article_ids.parquet")
+    pq.write_table(
+        pa.table({"article_id": aids, "input_hash": input_hashes}),
+        out / "vector_article_ids.parquet",
+    )
     np.save(out / "corpus_vectors.npy", cvecs)
     np.save(out / "ground_truth.npy", gt)
 
@@ -264,8 +337,10 @@ def main() -> None:
         "dim": DIM,
         "gt_topk": args.gt_topk,
         "tei_url": TEI_URL,
-        "es_url": ES_URL,
+        "es_url": args.es_url,
         "es_index": ES_INDEX,
+        "redis_url": args.redis_url,
+        "hash_version": HASH_VERSION,
         "posthog_source": POSTHOG_DIR,
         "random_seed": RANDOM_SEED,
         "drop_identifiers": not args.keep_identifiers,
