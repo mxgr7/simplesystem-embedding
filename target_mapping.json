@@ -1,0 +1,337 @@
+{
+  "mappings": {
+    "properties": {
+      "_class": {
+        "type": "keyword",
+        "index": false,
+        "doc_values": false
+      },
+      "articleId": {
+        "type": "keyword"
+      },
+      "articleNumber": {
+        "type": "keyword",
+        "doc_values": false
+      },
+      "customerArticleNumbers": {
+        "type": "nested",
+        "properties": {
+          "_class": {
+            "type": "keyword",
+            "index": false,
+            "doc_values": false
+          },
+          "value": {
+            "type": "keyword",
+            "doc_values": false,
+            "fields": {
+              "normalized": {
+                "type": "text",
+                "analyzer": "article_number_normalized"
+              },
+              "partial": {
+                "type": "text",
+                "analyzer": "article_number_normalized_partial",
+                "search_analyzer": "article_number_normalized"
+              },
+              "prefix": {
+                "type": "text",
+                "analyzer": "article_number_normalized_incremental",
+                "search_analyzer": "article_number_normalized"
+              },
+              "raw": {
+                "type": "text",
+                "analyzer": "article_number_keyword"
+              },
+              "seg": {
+                "type": "text",
+                "analyzer": "article_number_segments_analyzer"
+              }
+            }
+          },
+          "versionIds": {
+            "type": "keyword",
+            "doc_values": false
+          }
+        }
+      },
+      "disabledCoreArticleMarkerSources": {
+        "type": "keyword"
+      },
+      "embeddingModelVersion": {
+        "type": "keyword"
+      },
+      "embeddings": {
+        "type": "nested",
+        "properties": {
+          "vector": {
+            "type": "dense_vector",
+            "dims": 128,
+            "similarity": "cosine",
+            "index": true,
+            "index_options": {
+              "type": "int8_hnsw",
+              "m": 16,
+              "ef_construction": 100
+            }
+          },
+          "inputHash": {
+            "type": "keyword",
+            "doc_values": false
+          }
+        }
+      },
+      "enabledCoreArticleMarkerSources": {
+        "type": "keyword"
+      },
+      "offers": {
+        "type": "nested",
+        "properties": {
+          "_class": {
+            "type": "keyword",
+            "index": false,
+            "doc_values": false
+          },
+          "accessoryFor": {
+            "type": "keyword",
+            "doc_values": false
+          },
+          "articleNumber": {
+            "type": "keyword",
+            "ignore_above": 75,
+            "normalizer": "sort_normalizer",
+            "fields": {
+              "normalized": {
+                "type": "text",
+                "analyzer": "article_number_normalized"
+              },
+              "partial": {
+                "type": "text",
+                "analyzer": "article_number_normalized_partial",
+                "search_analyzer": "article_number_normalized"
+              },
+              "prefix": {
+                "type": "text",
+                "analyzer": "article_number_normalized_incremental",
+                "search_analyzer": "article_number_normalized"
+              },
+              "raw": {
+                "type": "text",
+                "analyzer": "article_number_keyword"
+              },
+              "seg": {
+                "type": "text",
+                "analyzer": "article_number_segments_analyzer"
+              }
+            }
+          },
+          "catalogVersionIds": {
+            "type": "keyword"
+          },
+          "categoryPaths": {
+            "properties": {
+              "_class": {
+                "type": "keyword",
+                "index": false,
+                "doc_values": false
+              },
+              "upToLevel1": {
+                "type": "keyword"
+              },
+              "upToLevel2": {
+                "type": "keyword"
+              },
+              "upToLevel3": {
+                "type": "keyword"
+              },
+              "upToLevel4": {
+                "type": "keyword"
+              },
+              "upToLevel5": {
+                "type": "keyword"
+              }
+            }
+          },
+          "deliveryTime": {
+            "type": "integer",
+            "doc_values": false
+          },
+          "ean": {
+            "type": "text",
+            "fields": {
+              "raw": {
+                "type": "text",
+                "analyzer": "standard",
+                "search_analyzer": "ean_search"
+              }
+            },
+            "analyzer": "article_number_analyzer_starts_with"
+          },
+          "eclass51Groups": {
+            "type": "keyword"
+          },
+          "eclass71Groups": {
+            "type": "keyword"
+          },
+          "features": {
+            "type": "nested",
+            "properties": {
+              "_class": {
+                "type": "keyword",
+                "index": false,
+                "doc_values": false
+              },
+              "name": {
+                "type": "keyword"
+              },
+              "values": {
+                "type": "keyword"
+              }
+            }
+          },
+          "keywords": {
+            "type": "text",
+            "fields": {
+              "de2": {
+                "type": "text",
+                "analyzer": "german_strict"
+              }
+            },
+            "analyzer": "german_stemmed"
+          },
+          "manufacturerArticleNumber": {
+            "type": "keyword",
+            "doc_values": false,
+            "fields": {
+              "normalized": {
+                "type": "text",
+                "analyzer": "article_number_normalized"
+              },
+              "partial": {
+                "type": "text",
+                "analyzer": "article_number_normalized_partial",
+                "search_analyzer": "article_number_normalized"
+              },
+              "prefix": {
+                "type": "text",
+                "analyzer": "article_number_normalized_incremental",
+                "search_analyzer": "article_number_normalized"
+              },
+              "raw": {
+                "type": "text",
+                "analyzer": "article_number_keyword"
+              },
+              "seg": {
+                "type": "text",
+                "analyzer": "article_number_segments_analyzer"
+              }
+            }
+          },
+          "manufacturerName": {
+            "type": "keyword",
+            "fields": {
+              "de2": {
+                "type": "text",
+                "analyzer": "german_company",
+                "search_analyzer": "german_strict"
+              }
+            }
+          },
+          "name": {
+            "type": "keyword",
+            "ignore_above": 75,
+            "normalizer": "sort_normalizer",
+            "fields": {
+              "de3": {
+                "type": "text",
+                "analyzer": "german_text_decompounded"
+              },
+              "de_joined": {
+                "type": "text",
+                "analyzer": "german_strict_joined",
+                "search_analyzer": "german_strict"
+              },
+              "de_strict": {
+                "type": "text",
+                "analyzer": "german_strict"
+              }
+            }
+          },
+          "offerCoordinates": {
+            "type": "keyword",
+            "doc_values": false
+          },
+          "s2classGroups": {
+            "type": "keyword"
+          },
+          "similarTo": {
+            "type": "keyword",
+            "doc_values": false
+          },
+          "sparePartFor": {
+            "type": "keyword",
+            "doc_values": false
+          },
+          "vendorName": {
+            "type": "keyword",
+            "fields": {
+              "de2": {
+                "type": "text",
+                "analyzer": "german_company",
+                "search_analyzer": "german_strict"
+              }
+            }
+          }
+        }
+      },
+      "prices": {
+        "type": "nested",
+        "properties": {
+          "_class": {
+            "type": "keyword",
+            "index": false,
+            "doc_values": false
+          },
+          "currency": {
+            "type": "keyword"
+          },
+          "importEpoch": {
+            "type": "long"
+          },
+          "price": {
+            "type": "float"
+          },
+          "priceListId": {
+            "type": "keyword",
+            "doc_values": false
+          },
+          "priority": {
+            "type": "keyword",
+            "doc_values": false
+          }
+        }
+      },
+      "syntheticKeywords": {
+        "type": "text",
+        "fields": {
+          "de2": {
+            "type": "text",
+            "analyzer": "german_strict"
+          },
+          "de_v2": {
+            "type": "text",
+            "analyzer": "german_strict"
+          }
+        },
+        "analyzer": "german_stemmed"
+      },
+      "updatedAt": {
+        "type": "date",
+        "format": "date_optional_time||epoch_millis"
+      },
+      "vendorId": {
+        "type": "keyword"
+      }
+    }
+  }
+}
