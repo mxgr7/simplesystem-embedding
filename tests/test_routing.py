@@ -186,10 +186,10 @@ def test_path_a_with_query_runs_dense_and_bm25_then_resolves_offers() -> None:
     assert res.hit_count == 2
     assert res.hit_count_clipped is False
     assert sorted(h.id for h in res.hits) == ["o1a", "o2"]
-    # 2 ANN searches + 1 offer query + 1 articles count query.
+    # 2 ANN searches + offer resolve + article meta + article count.
     methods = [m for m, _ in c.calls]
     assert methods.count("search") == 2
-    assert methods.count("query") == 2
+    assert methods.count("query") == 3
 
 
 def test_path_a_with_article_filter_pushes_down() -> None:
@@ -363,7 +363,8 @@ def test_article_ids_filter_routed_to_offer_side() -> None:
     )
     assert res.debug["path"] == "B"
     probe = c.calls[0]
-    assert 'id in ["a:1", "b:2"]' in probe[1]["filter"]
+    assert 'id like "a:1%"' in probe[1]["filter"]
+    assert 'id like "b:2%"' in probe[1]["filter"]
     assert sorted(h.id for h in res.hits) == ["a:1", "b:2"]
 
 
@@ -757,10 +758,13 @@ def test_hit_count_capped_when_count_overflows() -> None:
         [_ann_hit("h1", 0.8)],
     ]
     c.query_by_collection["offers"] = [[_offer("o1", "h1")]]
-    # Count returns more than the cap.
     c.query_by_collection["articles"] = [
-        [{"article_hash": f"h{i}"} for i in range(5)],
+        [{"article_hash": "h1", "name": "Name"}],   # article meta
     ]
+    # Count returns more than the cap.
+    c.query_by_filter = {
+        'article_hash != ""': [{"article_hash": f"h{i}"} for i in range(5)],
+    }
     req = _req(query="x")
     res = _dispatch(
         req, page_size=10, overfetch_n=10,
@@ -787,9 +791,9 @@ def test_hit_count_path_b_no_article_expr_uses_distinct_hash_count() -> None:
     )
     assert res.hit_count == 3
     assert res.hit_count_clipped is False
-    # Only the probe query against offers — no count query.
+    # Probe query against offers + article meta fetch for deterministic sort.
     queries = [kw for m, kw in c.calls if m == "query"]
-    assert len(queries) == 1
+    assert len(queries) == 2
     assert queries[0]["collection_name"] == "offers"
 
 
@@ -861,14 +865,17 @@ def test_both_mode_path_a_fetches_articles_for_summaries() -> None:
     from models import SummaryKind
     c = MockClient()
     c.search_results = [[_ann_hit("h1", 0.9)], [_ann_hit("h1", 0.8)]]
-    c.query_by_collection["offers"] = [[_offer("o1", "h1")]]
-    # Disambiguate by filter pattern: count uses sentinel, summaries
-    # query uses sentinel too — same pattern. Use per-collection FIFO
-    # ordered as: count first, then summary fetch.
+    c.query_by_collection["offers"] = [
+        [_offer("o1", "h1")],   # offer resolve
+        [_offer("o1", "h1")],   # summary offer fetch
+    ]
     c.query_by_collection["articles"] = [
-        [{"article_hash": "h1"}],                                  # count
+        [{"article_hash": "h1", "name": "Name"}],                  # article meta
         [{"article_hash": "h1", "manufacturerName": "Bosch"}],     # summaries
     ]
+    c.query_by_filter = {
+        'article_hash != ""': [{"article_hash": "h1"}],              # count
+    }
     req = _req_summaries(SummaryKind.MANUFACTURERS, query="x")
     res = _dispatch(
         req, page_size=10, overfetch_n=10,
@@ -912,7 +919,15 @@ def test_summaries_only_mode_skips_rank_and_returns_empty_hits() -> None:
         [
             {"article_hash": "h1", "manufacturerName": "Bosch"},
             {"article_hash": "h2", "manufacturerName": "Makita"},
-        ],   # summary fetch
+        ],   # summary article fetch
+        [
+            {"article_hash": "h1", "manufacturerName": "Bosch"},
+            {"article_hash": "h2", "manufacturerName": "Makita"},
+        ],   # disjunctive manufacturer article fetch
+    ]
+    c.query_by_collection["offers"] = [
+        [_offer("o1", "h1"), _offer("o2", "h2")],
+        [_offer("o1", "h1"), _offer("o2", "h2")],
     ]
     req = _req_summaries(SummaryKind.MANUFACTURERS,
                          query="x", search_mode=SearchMode.SUMMARIES_ONLY,
