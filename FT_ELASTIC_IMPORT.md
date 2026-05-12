@@ -461,8 +461,10 @@ TEST_PROFILE_18 extends the §1.1 staging mapping with two additions; everything
 The complete target mapping lives in [`target_mapping.json`](target_mapping.json) — a single copy-pasteable JSON object suitable for `PUT /new-index { "mappings": ... }`. The additions vs. §1.1 are:
 
 - Top-level scalar `embeddingModelVersion` (keyword) — §2.1.2.
-- Top-level nested group `embeddings` with `vector` (dense_vector, 128-dim, cosine, int8_hnsw) and `inputHash` (keyword, doc_values off) — §2.1.1.
+- Top-level nested group `embeddings` with `vector` (dense_vector, 128-dim, cosine, full-precision `hnsw`) and `inputHash` (keyword, doc_values off) — §2.1.1.
 - `_source.excludes: ["embeddings.vector"]` so the raw float arrays are not duplicated in `_source` — see §2.1.1.
+
+Quantization choice (`hnsw` vs `int8_hnsw` / `int4_hnsw` / `bbq_hnsw`) and the HNSW graph params (`m`, `ef_construction`) were validated offline against the production embedding model on a 1k-query × 400k-vector eval set — see §2.1.4 for methodology, full result tables, and the verdict that drives the values below.
 
 To create the new index against an ES cluster:
 
@@ -492,7 +494,7 @@ The kNN target. One **nested** entry per **unique embedding** for the article �
         "similarity": "cosine",
         "index": true,
         "index_options": {
-          "type": "int8_hnsw",
+          "type": "hnsw",
           "m": 16,
           "ef_construction": 100
         }
@@ -510,10 +512,10 @@ Why these choices:
 
 - **`dims: 128`** — matches the fine-tuned TEI model output.
 - **`similarity: cosine`** — the model is trained for cosine; normalized vectors at write time keep dot-product equivalence.
-- **`int8_hnsw`** — quantizes vectors to int8 in the HNSW graph. ≈4× memory reduction vs. float, negligible recall loss at this dimensionality. HNSW graph build is the single most expensive step at index time; turning replicas to 0 and disabling refresh during the embed pass is the main lever (see §2.1.3).
-- **`m: 16`, `ef_construction: 100`** — ES defaults. Good baseline; tune later if recall@k on the eval set is unsatisfactory.
+- **`type: "hnsw"` (no quantization)** — at 128 dims the offline bench (§2.1.4) shows int8 quantization costs ~7 recall points (0.987 → 0.917 at num_candidates=1000) while *increasing* on-disk size (ES stores the raw fp32 vector alongside the quantized copy for rescore). int4 and BBQ are worse on both axes. fp32 is the smallest, most accurate option for 128-dim. The "quantize for memory" heuristic is calibrated for 768+ dim models and doesn't apply here.
+- **`m: 16`, `ef_construction: 100`** — the (m, ef_construction) sweep in §2.1.4 shows the recall surface is essentially flat above the production defaults; m=64/ef=400 only buys ~0.4 points of recall@10 at 4× build cost.
 - **`inputHash`** — stable hash (e.g. SHA-256) of the exact string that was sent to TEI to produce this vector. Drives both intra-article dedup (collapse identical content clusters before calling TEI) and incremental invalidation (re-embed iff the current input hash diverges from the stored one). Indexed `keyword` but `doc_values: false` — the importer reads it via `_source`, never aggregates or filters on it at query time.
-- **`_source.excludes: ["embeddings.vector"]`** — the dense_vector field still indexes into the HNSW graph and rescore file, but the raw float array is dropped from `_source`. Saves ~15 GB on a ~12M-nested-entry index (the `_source` JSON otherwise dominates per-vector cost). The vector is unrecoverable via `_source` afterwards — query-time access reads from doc_values / the graph instead, which is what kNN and rescoring need anyway. **Must be set at index creation**; ES rejects `_source.excludes` changes on a live index, so omitting it on first cut means a full reindex to fix.
+- **`_source.excludes: ["embeddings.vector"]`** — the dense_vector field still indexes into the HNSW graph and rescore file, but the raw float array is dropped from `_source`. Saves ~30 GB on a ~12M-nested-entry index at fp32 (a fp32 vector as JSON text is ~1.2 KB; otherwise dominates per-vector `_source` cost). The vector is unrecoverable via `_source` afterwards — query-time access reads from doc_values / the graph instead, which is what kNN and rescoring need anyway. **Must be set at index creation**; ES rejects `_source.excludes` changes on a live index, so omitting it on first cut means a full reindex to fix.
 
 ### 2.1.2 Supporting top-level scalars
 
@@ -527,6 +529,70 @@ Why these choices:
 - **Replicas to 0 + `refresh_interval: -1` during the embed pass**, then flip back after. HNSW build cost is per replica, so doing it once and replicating the on-disk segments back is materially cheaper than indexing both replicas live.
 - **Dedup and incremental skip via `inputHash`.** For each article, compute the embedding input string per unique content cluster and hash it. Drop intra-article duplicates. Then fetch the existing `embeddings[*].inputHash` set for the article and skip TEI calls for hashes that are already present (and whose `embeddingModelVersion` matches the current model). Net effect: an unchanged article does zero TEI calls; an article with one new offer text does exactly one.
 - **Model upgrades short-circuit `inputHash`.** When `embeddingModelVersion` on the stored doc ≠ the currently deployed model, re-embed the entire article regardless of hashes. The new vectors replace the old ones; the new model version is written alongside.
+
+### 2.1.4 Benchmark: HNSW param selection
+
+The mapping recommendations in §2.1.1 and the `num_candidates` budget in §2.2.2 / §2.2.5 are validated against an offline eval set. This subsection records the methodology and findings.
+
+**Methodology.** 1k free-text queries mined from PostHog `search_performed` logs (top by frequency over ~90 days; EAN/SKU-shaped queries filtered out — they short-circuit through identifier profiles in production and don't exercise the vector retriever). Queries embedded with the deployed fine-tuned TEI model (`embeddingModelVersion = useful-cub-58`). Article corpus: 200,000 random-sampled articles from `local-article-index-v2` via point-in-time + `function_score{random_score, field: _seq_no, seed: 42}`, all `embeddings.inputHash` entries expanded → 399,050 (articleId, vector) tuples. Vectors fetched from the local Redis TEI cache (`tei:v2:{hash}` → fp16, 256 bytes) and decoded to fp32. Brute-force exact top-100 nearest neighbors per query computed via FAISS `IndexFlatIP` on L2-normalized vectors (cosine equivalent) — this is the recall oracle.
+
+For each config: single-shard ES test index with the desired `index_options` (refresh disabled, replicas 0, async translog), bulk-load all 399k vectors as flat top-level docs (`{idx: int, vector: dense_vector}`), refresh, force-merge to one segment, sweep `num_candidates` ∈ {50, 100, 200, 500, 1000, 2000}, run all 1k queries with `perf_counter` timing, intersect returned `idx` lists with ground truth → recall@10 + p50/p95 latency + store size. Index deleted after each config.
+
+Scripts: `scripts/build_hnsw_eval_dataset.py` (dataset construction), `scripts/bench_hnsw.py` (sweep 1 — (m, ef_construction) at fixed `int8_hnsw`), `scripts/bench_hnsw_precision.py` (sweep 2 — precision at fixed (m=16, ef_construction=100)).
+
+**Sweep 1 — graph params × `num_candidates`, fixed `int8_hnsw`** (selected rows, full grid in `reports/hnsw_eval/bench_recall_at_10_es.json`):
+
+```
+  M  efC  numC   load_s  merge_s  store_MB  p50_ms  p95_ms   rec@10
+  16  100   500     40.8     42.4     269.2    2.12    2.58   0.9127
+  16  100  1000     40.8     42.4     269.2    2.79    3.43   0.9162
+  16  100  2000     40.8     42.4     269.2    4.01    4.94   0.9181
+  32  200  1000     79.4    102.2     276.1    2.86    3.60   0.9192
+  32  400  2000    143.8    178.3     278.3    4.50    5.56   0.9222
+  64  400  2000    143.6    230.4     284.8    4.58    5.79   0.9214
+```
+
+Findings:
+- Recall **ceilings at ~0.922** under int8 regardless of (m, ef_construction). m=64/efc=400 buys ~0.4 recall points over m=16/efc=100 at 4× build cost. Graph density is not the bottleneck.
+- `num_candidates` does most of the work. Knee at 500–1000; above 1000, recall gains are sub-1-point at >50% latency penalty.
+
+**Sweep 2 — precision × `num_candidates`, fixed (m=16, ef_construction=100)** (full results in `reports/hnsw_eval/bench_recall_at_10_precision_m16_efc100.json`):
+
+```
+  precision  numC   load_s  merge_s  store_MB  p50_ms  p95_ms   rec@10
+       hnsw   500     40.7     54.2     218.9    2.24    2.80   0.9793
+       hnsw  1000     40.7     54.2     218.9    3.12    4.03   0.9870
+       hnsw  2000     40.7     54.2     218.9    4.64    5.88   0.9911
+  int8_hnsw  1000     40.5     44.0     269.0    2.60    3.24   0.9146
+  int8_hnsw  2000     40.5     44.0     269.0    3.87    4.75   0.9173
+  int4_hnsw  1000     43.1     84.4     244.9    3.81    5.06   0.8509
+  int4_hnsw  2000     43.1     84.4     244.9    5.92    7.66   0.8528
+   bbq_hnsw  1000     43.3     75.9     488.0    3.92    5.39   0.7661
+   bbq_hnsw  2000     43.3     75.9     488.0    5.97    7.89   0.7669
+```
+
+Findings:
+- **`hnsw` (fp32) dominates every axis.** Recall@10 at numC=1000: fp32 = 0.987, int8 = 0.915 (–7.2 points), int4 = 0.851 (–13.6), BBQ = 0.766 (–22.1, and plateaus from numC=500).
+- **fp32 is also the smallest on disk** (218.9 MB vs 269.0 MB for int8 on the 400k-vector sample). ES stores the raw fp32 vector alongside the quantized copy for rescore, so "quantized" indices end up *larger* in total disk. The advertised memory savings only materialize at the graph-resident layer, which is a small fraction of total footprint and the OS page cache handles transparently.
+- **Latency is flat across precisions** (~3 ms p50 at numC=1000). int8 is marginally fastest; int4/BBQ pay a decode/rerank cost. fp32 sits between, well inside any reasonable budget.
+- BBQ at 128 dims is a non-starter — it's designed for 768+ dim models where its 32× graph-memory savings matter; at 128 dims it loses 22 recall points for a *larger* disk footprint (rotation matrix + bit-packed copy + raw vector).
+
+**Verdict / recommended config:**
+
+| Knob | Value | Source |
+|---|---|---|
+| `index_options.type` | `hnsw` | Sweep 2: fp32 wins on both recall and disk |
+| `m` | 16 | Sweep 1: graph density flat above default |
+| `ef_construction` | 100 | Sweep 1: graph density flat above default |
+| `num_candidates` (query time) | **1000** (down from 10000) | Sweep 2: 0.987 at numC=1000; 0.991 at numC=2000 buys negligible recall at 50% more latency |
+
+At numC=1000, fp32 hits **recall@10 = 0.987** with **p50 ≈ 3.1 ms** on a single-shard 400k-vector index. Dropping to numC=500 trades ~1 recall point for ~30% lower latency if needed.
+
+**Caveats for the 6M-article scale** (the bench used 400k vectors, ~15× smaller):
+- Recall curves transfer directly — graph quality is a function of (m, ef_construction, num_candidates, distance distribution), not corpus size.
+- Latency may rise modestly with corpus (more graph hops to reach top-k); allow headroom.
+- fp32 raw vectors at 6M × ~2 entries × 128 × 4 = ~6 GB. Trivially fits the page cache on any modern ES node. `_source.excludes: ["embeddings.vector"]` prevents the JSON copy from doubling that on disk.
+- 32-shard production indices will see segment-merging dynamics that the 1-shard bench doesn't model; periodic force-merge to single segments after major writes keeps the graph state aligned with what the bench measured.
 
 ## 2.2 TEST_PROFILE_18 (fine-tuned knn) search profile
 
@@ -563,7 +629,7 @@ Wrapped at the call site in `nested` with `path: "offers"`, same as STANDARD. Ra
 
 A new kNN retriever, built from scratch on top of the new `embeddings` nested group (§2.1.1):
 
-- Field: **`embeddings.vector`** — the importer populates the new nested group with **one entry per unique embedding for the article**, not one per offer and not a single article-level vector. Each entry is int8_hnsw, 128-dim, cosine. Typical fan-out: 1–2 entries per article, more when offers carry meaningfully distinct descriptive content.
+- Field: **`embeddings.vector`** — the importer populates the new nested group with **one entry per unique embedding for the article**, not one per offer and not a single article-level vector. Each entry is full-precision `hnsw`, 128-dim, cosine. Typical fan-out: 1–2 entries per article, more when offers carry meaningfully distinct descriptive content.
 
   **Why this shape was chosen over the alternatives considered:**
 
@@ -573,7 +639,7 @@ A new kNN retriever, built from scratch on top of the new `embeddings` nested gr
 
   **What this design trades:** the matched embedding has no recorded link to any specific offer, so `knn.filter` can only enforce *existence* of a passing offer — not that the matching offer is the one whose content informed the matched embedding. In practice this is acceptable because the displayed offer is chosen by independent rules (cheapest under the price-list filter, etc.) and the user's expectation is article-level relevance, not offer-level relevance.
 - Query vector: `teiEmbeddingClient.embed(queryString)` (the fine-tuned TEI model, output truncated/projected to 128 dims to match the index).
-- `k` and `num_candidates` both **10000**.
+- `k` and `num_candidates` both **1000** — validated against the eval set in §2.1.4 (recall@10 = 0.987 at numC=1000 with the recommended fp32 `hnsw` mapping). The legacy code uses 10000 inherited from the prior int8 implementation; that's pure latency cost for sub-1-point of additional recall.
 - **All filter clauses pushed into `knn.filter`** — both the structural pre-filters (offers context, prices context, ACL, catalog-view core articles, blocked eClass) **and** the user-selected facet filters (vendor, article ID, manufacturer, price range, delivery time, features, eClass, categories, core sortiment). `post_filter` is **not used** by TEST_PROFILE_18. HNSW navigates only docs that pass the combined filter, so the post-filter cliff (§1.3.1) cannot occur and pagination is stable. Rationale and trade-offs in §2.2.6.
 - **Construction rule (same-offer semantics):** all per-offer constraints must live inside **one** `nested(path: "offers", ...)` clause, with each constraint as a `filter` inside its inner `bool`. Splitting them across multiple sibling nested clauses weakens the semantics from "exists an offer satisfying *all* filters" to "exists an offer satisfying A, AND exists *some* offer satisfying B" — different offers can satisfy each, and the same-offer guarantee is lost. The same applies to per-price constraints on `nested(path: "prices")`.
 
@@ -677,13 +743,13 @@ Used by the hybrid path of §2.2.3 — single-token queries that aren't strict i
           "knn": {
             "field": "embeddings.vector",
             "query_vector": [<128 floats from TEI>],
-            "k": 10000,
-            "num_candidates": 10000,
+            "k": 1000,
+            "num_candidates": 1000,
             "filter": [ <full filter set — identical to the bool.filter list above> ]
           }
         }
       ],
-      "rank_window_size": 10000,
+      "rank_window_size": 1000,
       "rank_constant": 60
     }
   }
@@ -692,7 +758,7 @@ Used by the hybrid path of §2.2.3 — single-token queries that aren't strict i
 
 Notes:
 
-- `rank_window_size` should match the kNN `k` so both retrievers contribute their full result sets to the fusion. 10000 is the chosen candidate budget — see §2.2.2.
+- `rank_window_size` should match the kNN `k` so both retrievers contribute their full result sets to the fusion. 1000 is the candidate budget validated in §2.1.4.
 - `rank_constant: 60` is the standard RRF default; tune only with offline evals.
 - **One single filter set is applied to both retrievers** — the standard retriever's `bool.filter` and the kNN's `filter`. The list includes structural pre-filters *and* user-selected facets; there is **no `post_filter`** on the request. Build the list once and pass the same reference to both branches. If they ever diverge, lexical hits can include docs the kNN excludes (or vice versa) and the fused ranking gets noisy. Rationale for putting facets in the filter slot (not `post_filter`) is in §2.2.6.
 - The synthetic-keywords sub-query is omitted in both branches. Synthetic keywords were the previous workaround for missing semantic recall — the embedding replaces them.
@@ -701,9 +767,9 @@ Notes:
 
 TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — structural pre-filters and user-selected facet filters alike — is applied inside both retrievers' filter slots (`knn.filter` on the vector side, `bool.filter` on the lexical side). This is a deliberate divergence from the legacy design described in §1.3.1, and it changes facet count semantics. The reasoning:
 
-**The post-filter cliff is unacceptable under kNN.** With `num_candidates: 10000` and facets in `post_filter`, the kNN returns up to 10000 hits and `post_filter` then trims further. A narrow facet selection (e.g. a manufacturer with 50 articles) can collapse a page to single-digit hits while the retriever still thinks it ranked 10000. Pagination becomes unstable: the same query with the same facets can return different totals depending on how the candidate window happens to overlap the facet. For an embedding-driven search this is a frequent failure mode, not an edge case.
+**The post-filter cliff is unacceptable under kNN.** With `num_candidates: 1000` and facets in `post_filter`, the kNN returns up to 1000 hits and `post_filter` then trims further. A narrow facet selection (e.g. a manufacturer with 50 articles) can collapse a page to single-digit hits while the retriever still thinks it ranked 1000. Pagination becomes unstable: the same query with the same facets can return different totals depending on how the candidate window happens to overlap the facet. For an embedding-driven search this is a frequent failure mode, not an edge case.
 
-**The argument for keeping facets in `post_filter` doesn't survive kNN.** In a lexical world, `post_filter` exists so that aggregations see the full candidate set, which makes the standard "what-if" facet pattern work — each facet's count reflects "what would happen if you toggled X" rather than "how many of the currently-narrowed set are X." That pattern requires aggregations to operate on a set larger than the post-filtered hits. But under kNN, aggregations are already bounded by the retriever's `k`: at most 10000 documents, regardless of whether facets sit in pre- or post-filter. The "true global distribution" isn't recoverable from a single kNN request anyway, so preserving `post_filter` to defend it is a lexical-era reflex that no longer pays.
+**The argument for keeping facets in `post_filter` doesn't survive kNN.** In a lexical world, `post_filter` exists so that aggregations see the full candidate set, which makes the standard "what-if" facet pattern work — each facet's count reflects "what would happen if you toggled X" rather than "how many of the currently-narrowed set are X." That pattern requires aggregations to operate on a set larger than the post-filtered hits. But under kNN, aggregations are already bounded by the retriever's `k`: at most 1000 documents, regardless of whether facets sit in pre- or post-filter. The "true global distribution" isn't recoverable from a single kNN request anyway, so preserving `post_filter` to defend it is a lexical-era reflex that no longer pays.
 
 **TEST_PROFILE_18 facet count semantics: remaining, not what-if.** Each facet's bucket count reflects "how many of the currently-narrowed result set are X," not "how many would be X if you toggled X." Toggling a facet off requires reissuing the query rather than reading an inactive-facet hint. This matches what most modern marketplace UIs do (Amazon, eBay, etc.).
 
