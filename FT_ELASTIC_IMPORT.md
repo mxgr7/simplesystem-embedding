@@ -581,43 +581,47 @@ Findings:
 - **Latency is flat across precisions** (~3 ms p50 at numC=1000). int8 is marginally fastest; int4/BBQ pay a decode/rerank cost. fp32 sits between, well inside any reasonable budget.
 - BBQ at 128 dims is a non-starter — it's designed for 768+ dim models where its 32× graph-memory savings matter; at 128 dims it loses 22 recall points for a *larger* disk footprint (rotation matrix + bit-packed copy + raw vector).
 
-**Sweep 3 — filter selectivity × `num_candidates`, fixed fp32 `hnsw`** (full results in `reports/hnsw_eval/bench_recall_at_10_filtered.json`). Each query carries a production-shape `nested(offers)` filter clause attached to `knn.filter`; the test docs include the source article's offers list under `nested(offers)` so the filter expression is byte-equivalent to what TEST_PROFILE_18 will issue. Filter regimes were chosen to cover the realistic selectivity spectrum (ACL is always present; manufacturer/category facets compound on top):
+**Sweep 3 — filter selectivity × `num_candidates`, fixed fp32 `hnsw`** (full results in `reports/hnsw_eval/bench_recall_at_10_filtered.json`). Each query carries a production-shape filter clause attached to `knn.filter`. Offers-side constraints (ACL, manufacturer, category) sit inside one `nested(offers)` clause; the price range goes in a separate `nested(prices)` clause — byte-equivalent to what TEST_PROFILE_18 will issue. Filter regimes cover the realistic selectivity spectrum (ACL is always present; manufacturer / category / price compound on top):
 
 ```
-              regime   sel%   numC   p50_ms   p95_ms   rec@10
-          unfiltered 100.00%   1000     3.71     4.71   0.9886
-          unfiltered 100.00%  10000    16.00    18.92   0.9971
-             acl-top  33.42%   1000    11.03    14.03   0.9567
-             acl-top  33.42%   2000    14.99    19.20   0.9691
-             acl-top  33.42%   5000    23.52    29.33   0.9819
-             acl-top  33.42%  10000    33.91    39.40   0.9865
-             acl-mid  27.75%   1000    10.40    20.74   0.9541
-             acl-mid  27.75%   2000    14.04    22.35   0.9710
-             acl-mid  27.75%   5000    21.97    26.56   0.9835
-             acl-mid  27.75%  10000    25.71    27.16   0.9978
-     acl-top+mfr-mid   1.62%    500     4.30     8.10   0.9742
-     acl-top+mfr-mid   1.62%   1000     8.45     9.13   0.9986
-     acl-top+mfr-mid   1.62%  10000     6.18     6.79   0.9986
-   acl-top+mfr-small   0.00%   any      ~1ms     ~1ms   1.0000
+              regime              sel%   numC   p50_ms   p95_ms   rec@10
+          unfiltered           100.00%   2000     5.51     6.91   0.9920
+          unfiltered           100.00%   5000     9.95    11.93   0.9959
+             acl-top            33.42%   2000    17.83    22.51   0.9731
+             acl-top            33.42%   5000    27.39    33.28   0.9843
+             acl-mid            27.75%   2000    16.35    24.34   0.9653
+             acl-mid            27.75%   5000    24.97    29.99   0.9848
+     acl-top+cat-top             2.15%    200     5.73     6.37   0.9883
+     acl-top+cat-top             2.15%   1000     9.65    10.28   0.9991
+acl-top+price-50-200            10.87%   2000    59.33    63.53   0.9604
+acl-top+price-50-200            10.87%   5000    59.64    62.14   0.9975
+     acl-top+mfr-mid             1.62%   1000     9.37    10.18   0.9987
+acl-top+mfr-mid+price-50-200     0.89%    500    11.39    12.29   0.9985
+   acl-top+mfr-small             0.00%    any     ~1ms     ~1ms   1.0000
 ```
 
-Filter regimes (selectivities are empirical, measured on the 200k-article sample):
+Filter regimes (selectivities measured empirically on the 200k-article sample):
 
-| Regime | Filter | Sel% | Notes |
+| Regime | Filter shape | Sel% | Notes |
 |---|---|---|---|
-| `unfiltered` | none | 100% | Baseline (reproduces Sweep 2 numbers) |
+| `unfiltered` | none | 100% | Baseline |
 | `acl-top` | top catalogVersionId | 33% | Largest single-customer scope |
 | `acl-mid` | rank-20 catalogVersionId | 28% | Mid-tier customer |
-| `acl-top+mfr-mid` | top catalog + Weidmüller | 1.6% | Narrow facet on top of ACL |
-| `acl-top+mfr-small` | top catalog + ATORN | 0% | Empty intersection — sanity check |
+| `acl-top+cat-top` | + top `categoryPaths.upToLevel3` | 2.2% | Compound term filter on offers |
+| `acl-top+price-50-200` | + `prices.price ∈ [50, 200]` | 10.9% | Range filter on prices (separate nested) |
+| `acl-top+mfr-mid` | + Weidmüller | 1.6% | Narrow term facet |
+| `acl-top+mfr-mid+price-50-200` | three-way stack | 0.9% | Production-realistic compound |
+| `acl-top+mfr-small` | ATORN | 0% | Empty intersection — sanity check |
 
 Findings:
 
-- **Broad-ACL recall does drop at low `num_candidates`.** At numC=1000, acl-top hits 0.957 (vs 0.989 unfiltered); recovering to 0.97 needs numC=2000, to 0.98 needs numC=5000. Above 5000 the gains flatten.
-- **Narrow facets saturate quickly.** The 1.62%-selectivity regime jumps to recall=0.9986 by numC=1000 and stops moving. Once `num_candidates` >> the filter-passing count, recall is essentially exact. Curiously, latency *drops* at numC=10000 vs 1000 for narrow regimes (6 ms vs 8 ms) — ES appears to switch to an exact-search code path once the filter set is small enough.
-- **Empty intersections short-circuit at ~1 ms.** ES detects "no articles pass the filter" before running the kNN traversal at all.
-- **Filter evaluation is the dominant cost under broad ACL.** Same numC=1000: 3.7 ms unfiltered → 11 ms with acl-top. The `nested(offers)` join during HNSW traversal is roughly 3× the per-step cost. At numC=10000 under acl-top, p50 is 34 ms — pure filter cost.
-- **The 32% selectivity surprised us.** I estimated 20% from raw offers-doc counts; the per-article distribution is broader because articles typically belong to multiple catalog versions. ACL filtering is less aggressive than the offers-count cardinality suggests.
+- **Broad-ACL recall climbs steadily with `num_candidates`.** At numC=2000, acl-top hits 0.973; at numC=5000 it's 0.984. The 32% selectivity surprised us — articles typically belong to multiple catalog versions, so per-article ACL is broader than per-offer cardinalities suggest.
+- **Narrow term filters saturate very fast.** acl-top+mfr-mid (1.6%) jumps to recall=0.999 by numC=1000 and stops moving; acl-top+cat-top (2.2%) gets to 0.99 by numC=200. Once `num_candidates` >> filter-passing count, ES switches to an exact-search code path on the survivors — bumping numC further is a no-op, and some narrow regimes are even *faster* at numC=5000 because of this short-circuit.
+- **Category filters are well-behaved.** Adding a `term` predicate inside the existing `nested(offers)` clause costs essentially nothing beyond what manufacturer already costs. Recall@10 = 0.988 at numC=200 with p50 = 5.7 ms.
+- **Price-range filters are the worst-case by a wide margin.** acl-top+price-50-200 sits at ~50–60 ms p50 *regardless of numC*. Three things compound: (1) `nested(prices)` is a second join on top of the `nested(offers)` join, (2) a `range` query can't short-circuit on posting-list intersection the way `term` queries can, (3) prices fan out per article (~140 entries on average vs ~6 offers), so the inner predicate has much more work. Recall@10 also climbs slowly: 0.93 at numC=1000, 0.96 at numC=2000, **needs numC=5000 to hit 0.998**.
+- **Stacked filters paradoxically run fast** when at least one component is a tight term predicate. The 3-way stack (acl + mfr + price) at numC=500 hits recall=0.999 with p50 = 11 ms — the `term mfr` filter narrows the candidate set early, so the `range` predicate has far fewer prices to evaluate. Filter-cost burden depends on the *broadest* term in the stack, not the count of terms.
+- **Empty intersections short-circuit at ~1 ms.** ES recognizes that no docs pass the combined filter before running the HNSW traversal at all.
+- **Filter evaluation is the dominant cost under broad ACL.** Same numC=2000: 5.5 ms unfiltered → 17.8 ms with acl-top → 59 ms with acl-top+price. Graph traversal is fast; nested-join evaluation isn't.
 
 **Verdict / recommended config:**
 
@@ -626,18 +630,26 @@ Findings:
 | `index_options.type` | `hnsw` | Sweep 2: fp32 wins on both recall and disk |
 | `m` | 16 | Sweep 1: graph density flat above default |
 | `ef_construction` | 100 | Sweep 1: graph density flat above default |
-| `num_candidates` (query time) | **2000** | Sweep 3: holds recall@10 ≥ 0.97 under broad ACL filtering at p50 ≈ 15 ms / p95 ≈ 22 ms |
+| `num_candidates` (query time) | **5000** | Sweep 3: holds recall@10 ≥ 0.98 under broad ACL; ≥ 0.998 under price-range filtering — the only value that covers the worst case |
 
-Tiered `num_candidates` budget if the SLO allows tighter or looser targets:
+The case for a single uniform `num_candidates = 5000`:
 
-| Recall@10 target under broad ACL | `num_candidates` | p50 / p95 latency |
+- **Operational simplicity beats per-query knobs.** No conditional logic in the query builder, no "did someone forget to flip this when adding a new filter" bug surface, no inconsistent ranking behavior across query shapes.
+- **Narrow filters pay nothing extra.** All regimes with selectivity < ~3% (cat-top, mfr-mid, the 3-way stack) saturate before numC=2000 and ES short-circuits — bumping to 5000 is a no-op or *faster*.
+- **The cost is concentrated on broad-ACL queries.** Under acl-top (33%), p50 moves from 18 ms at numC=2000 to 27 ms at numC=5000 — +9 ms in the cheapest regime. The latency cost is exactly where the recall headroom is largest.
+- **Price-range filtering needs numC=5000 anyway** to hit acceptable recall. Picking anything lower forces conditional logic in the query builder for that specific filter shape.
+- **Compared to the legacy 10000**: numC=5000 is the latency knee under broad ACL (27 ms vs 39 ms p50) at minimal recall cost (0.984 vs 0.989).
+
+| Recall@10 target under the worst-case filter | `num_candidates` | p50 / p95 under broad ACL |
 |---|---|---|
-| ≥ 0.95 | 1000 | 11 / 14 ms |
-| ≥ 0.97 | **2000 (recommended)** | 15 / 22 ms |
-| ≥ 0.98 | 5000 | 24 / 30 ms |
-| ≥ 0.985 | 10000 | 34 / 40 ms |
+| ≥ 0.95 | 1000 | 13 / 17 ms |
+| ≥ 0.97 | 2000 | 18 / 23 ms |
+| ≥ 0.998 (price-filter required) | **5000 (recommended)** | 27 / 33 ms |
+| ≥ 0.99 (broad-ACL marginal) | 10000 | 39 / 45 ms |
 
-The legacy `KNN_NUM_CANDIDATES = 10000` is overkill — it buys ~2 recall points over numC=2000 at 2× p50 latency. The recall-only Sweep 2 suggested numC=1000, but Sweep 3 shows that's borderline under realistic filters; 2000 has the right margin without paying the legacy 10000 latency.
+When `num_candidates = 5000` would *not* be the right choice:
+- Broad-ACL-only queries dominate (>80% of traffic) and an aggressive interactive SLO (p95 ≤ 30 ms total) is binding — switch to conditional numC: 2000 by default, 5000 only when a price filter is present. ~3 lines in the query builder.
+- `nested(prices)` filtering gets eliminated (e.g. by materializing a top-level `minPrice` per article) — then the price-driven argument for 5000 evaporates and 2000 wins.
 
 **Caveats for the 6M-article scale** (the bench used 400k vectors, ~15× smaller):
 - Recall curves transfer directly — graph quality is a function of (m, ef_construction, num_candidates, distance distribution), not corpus size.
@@ -692,7 +704,7 @@ A new kNN retriever, built from scratch on top of the new `embeddings` nested gr
 - Query vector: `teiEmbeddingClient.embed(queryString)` in the backend (the fine-tuned TEI model, output truncated/projected to 128 dims to match the index). The backend passes the 128-float array to ES as `knn.query_vector`.
 
   *Considered and rejected: ES's `_inference` API + `knn.query_vector_builder.text_embedding`.* ES 8.11+ can register an inference endpoint (`service: "openai"` pointing at TEI's OpenAI-compat `/embeddings` route) and embed the user's query inside the kNN clause, eliminating the need for a backend TEI client. The wiring works, but the feature row "Inference API — support for Elastic managed, third party, and self managed embeddings, reranking, and LLM providers" is **Enterprise-tier only** on the [Elastic subscriptions matrix](https://www.elastic.co/subscriptions). Lower tiers can't register the endpoint. The custom-client path stays.
-- `k` and `num_candidates` both **2000** — validated against the eval set in §2.1.4 sweep 3 (recall@10 ≥ 0.97 under broad-ACL filtering at p50 ≈ 15 ms). The legacy code uses 10000; that's pure latency cost (p50 ≈ 34 ms under the same filter) for ~2 additional recall points. The unfiltered bench earlier suggested numC=1000, but the filtered sweep shows that's borderline once realistic ACL+facet filters drain the candidate window — see §2.1.4 sweep 3 for the tiered budget if your SLO accepts more or less recall.
+- `k` and `num_candidates` both **5000** — validated against the eval set in §2.1.4 sweep 3. This is the only single value that holds recall@10 ≥ 0.98 across every realistic filter regime, including price-range filtering where everything below 5000 leaves meaningful recall on the table. Under broad ACL (the common case), p50 ≈ 27 ms; under tighter facets, ES short-circuits to an exact search and the higher numC costs nothing. The legacy 10000 is overkill: ~5 ms more p50 for +1 recall point. See §2.1.4 sweep 3 for the conditional-numC alternative if broad-ACL queries dominate and a tighter latency SLO is binding.
 - **All filter clauses pushed into `knn.filter`** — both the structural pre-filters (offers context, prices context, ACL, catalog-view core articles, blocked eClass) **and** the user-selected facet filters (vendor, article ID, manufacturer, price range, delivery time, features, eClass, categories, core sortiment). `post_filter` is **not used** by TEST_PROFILE_18. HNSW navigates only docs that pass the combined filter, so the post-filter cliff (§1.3.1) cannot occur and pagination is stable. Rationale and trade-offs in §2.2.6.
 - **Construction rule (same-offer semantics):** all per-offer constraints must live inside **one** `nested(path: "offers", ...)` clause, with each constraint as a `filter` inside its inner `bool`. Splitting them across multiple sibling nested clauses weakens the semantics from "exists an offer satisfying *all* filters" to "exists an offer satisfying A, AND exists *some* offer satisfying B" — different offers can satisfy each, and the same-offer guarantee is lost. The same applies to per-price constraints on `nested(path: "prices")`.
 
@@ -796,13 +808,13 @@ Used by the hybrid path of §2.2.3 — single-token queries that aren't strict i
           "knn": {
             "field": "embeddings.vector",
             "query_vector": [<128 floats from TEI>],
-            "k": 2000,
-            "num_candidates": 2000,
+            "k": 5000,
+            "num_candidates": 5000,
             "filter": [ <full filter set — identical to the bool.filter list above> ]
           }
         }
       ],
-      "rank_window_size": 2000,
+      "rank_window_size": 5000,
       "rank_constant": 60
     }
   }
@@ -811,7 +823,7 @@ Used by the hybrid path of §2.2.3 — single-token queries that aren't strict i
 
 Notes:
 
-- `rank_window_size` should match the kNN `k` so both retrievers contribute their full result sets to the fusion. 2000 is the candidate budget validated in §2.1.4 (sweep 3).
+- `rank_window_size` should match the kNN `k` so both retrievers contribute their full result sets to the fusion. 5000 is the candidate budget validated in §2.1.4 (sweep 3).
 - `rank_constant: 60` is the standard RRF default; tune only with offline evals.
 - **One single filter set is applied to both retrievers** — the standard retriever's `bool.filter` and the kNN's `filter`. The list includes structural pre-filters *and* user-selected facets; there is **no `post_filter`** on the request. Build the list once and pass the same reference to both branches. If they ever diverge, lexical hits can include docs the kNN excludes (or vice versa) and the fused ranking gets noisy. Rationale for putting facets in the filter slot (not `post_filter`) is in §2.2.6.
 - The synthetic-keywords sub-query is omitted in both branches. Synthetic keywords were the previous workaround for missing semantic recall — the embedding replaces them.
@@ -820,9 +832,9 @@ Notes:
 
 TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — structural pre-filters and user-selected facet filters alike — is applied inside both retrievers' filter slots (`knn.filter` on the vector side, `bool.filter` on the lexical side). This is a deliberate divergence from the legacy design described in §1.3.1, and it changes facet count semantics. The reasoning:
 
-**The post-filter cliff is unacceptable under kNN.** With `num_candidates: 2000` and facets in `post_filter`, the kNN returns up to 2000 hits and `post_filter` then trims further. A narrow facet selection (e.g. a manufacturer with 50 articles) can collapse a page to single-digit hits while the retriever still thinks it ranked 2000. Pagination becomes unstable: the same query with the same facets can return different totals depending on how the candidate window happens to overlap the facet. For an embedding-driven search this is a frequent failure mode, not an edge case.
+**The post-filter cliff is unacceptable under kNN.** With `num_candidates: 5000` and facets in `post_filter`, the kNN returns up to 5000 hits and `post_filter` then trims further. A narrow facet selection (e.g. a manufacturer with 50 articles) can collapse a page to single-digit hits while the retriever still thinks it ranked 5000. Pagination becomes unstable: the same query with the same facets can return different totals depending on how the candidate window happens to overlap the facet. For an embedding-driven search this is a frequent failure mode, not an edge case.
 
-**The argument for keeping facets in `post_filter` doesn't survive kNN.** In a lexical world, `post_filter` exists so that aggregations see the full candidate set, which makes the standard "what-if" facet pattern work — each facet's count reflects "what would happen if you toggled X" rather than "how many of the currently-narrowed set are X." That pattern requires aggregations to operate on a set larger than the post-filtered hits. But under kNN, aggregations are already bounded by the retriever's `k`: at most 2000 documents, regardless of whether facets sit in pre- or post-filter. The "true global distribution" isn't recoverable from a single kNN request anyway, so preserving `post_filter` to defend it is a lexical-era reflex that no longer pays.
+**The argument for keeping facets in `post_filter` doesn't survive kNN.** In a lexical world, `post_filter` exists so that aggregations see the full candidate set, which makes the standard "what-if" facet pattern work — each facet's count reflects "what would happen if you toggled X" rather than "how many of the currently-narrowed set are X." That pattern requires aggregations to operate on a set larger than the post-filtered hits. But under kNN, aggregations are already bounded by the retriever's `k`: at most 5000 documents, regardless of whether facets sit in pre- or post-filter. The "true global distribution" isn't recoverable from a single kNN request anyway, so preserving `post_filter` to defend it is a lexical-era reflex that no longer pays.
 
 **TEST_PROFILE_18 facet count semantics: remaining, not what-if.** Each facet's bucket count reflects "how many of the currently-narrowed result set are X," not "how many would be X if you toggled X." Toggling a facet off requires reissuing the query rather than reading an inactive-facet hint. This matches what most modern marketplace UIs do (Amazon, eBay, etc.).
 

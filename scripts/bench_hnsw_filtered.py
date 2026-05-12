@@ -8,14 +8,17 @@ as filter selectivity tightens. Answers the operational question: what
 filters TEST_PROFILE_18 will always carry (ACL + facets)?
 
 Filter regimes (selectivities estimated from offers-doc cardinalities on
-local-article-index-v2; effective selectivity on our 200k-article sample is
-within a factor of 2 of these):
+local-article-index-v2; empirical selectivity on the 200k-article sample is
+printed at runtime):
 
-  unfiltered            ~100%    sanity baseline (matches bench_hnsw_precision)
-  acl-top                ~20%    single top catalogVersionId
-  acl-mid                ~12%    mid-ranked catalogVersionId
-  acl-top+mfr-mid       ~0.5%    + Weidmüller manufacturer
-  acl-top+mfr-small    ~0.05%    + ATORN manufacturer
+  unfiltered                     ~100%    sanity baseline
+  acl-top                         ~33%    single top catalogVersionId
+  acl-mid                         ~28%    mid-ranked catalogVersionId
+  acl-top+cat-top                  ~6%    + top categoryPath (offers-side AND)
+  acl-top+price-50-200             ~8%    + price € 50–200 range (prices-side, separate nested)
+  acl-top+mfr-mid                 ~1.6%   + Weidmüller (narrow facet)
+  acl-top+mfr-mid+price-50-200   ~0.5%    + three-way stack (production-realistic)
+  acl-top+mfr-small               ~0%     + ATORN (empty intersection — sanity check)
 
 All five regimes run against the same ES test index — one shard, fp32 `hnsw`,
 m=16, ef_construction=100, force-merged to one segment. Each doc carries its
@@ -62,6 +65,9 @@ TOP_CATALOG = "844224b4-e40b-4180-bf04-4f74d702627d"  # global #1
 MID_CATALOG = "fcf0f564-e4ea-4f93-b21b-9f690c687732"  # global #20
 MFR_MID = "Weidmüller"
 MFR_SMALL = "ATORN"
+CAT_TOP = "07 - Halbzeuge / Montagematerial¦Halbzeuge¦Schrauben / Muttern"  # global #1
+PRICE_GTE = 50.0
+PRICE_LTE = 200.0  # range between ES p50 (~€54) and ~p75 (~€220) — common UI selection
 
 # Index params — fp32 hnsw at production defaults (per FT_ELASTIC_IMPORT §2.1.1)
 INDEX_M = 16
@@ -74,60 +80,110 @@ NUM_CANDIDATES = [50, 100, 200, 500, 1000, 2000, 5000, 10000]
 # -------------------- regime definitions --------------------
 
 
-def _matches_acl(offers: list[dict], acl: str) -> bool:
-    return any(acl in (o.get("catalogVersionIds") or []) for o in offers)
+def _offers_match(offers: list[dict], spec: dict) -> bool:
+    """Same-offer semantics: at least one offer satisfies *all* offers-side constraints
+    in `spec` simultaneously. Spec keys: acl, mfr, cat."""
+
+    def offer_ok(o: dict) -> bool:
+        if "acl" in spec and spec["acl"] not in (o.get("catalogVersionIds") or []):
+            return False
+        if "mfr" in spec and o.get("manufacturerName") != spec["mfr"]:
+            return False
+        if "cat" in spec and spec["cat"] not in (o.get("categoryPath3") or []):
+            return False
+        return True
+
+    return any(offer_ok(o) for o in offers)
 
 
-def _matches_acl_and_mfr(offers: list[dict], acl: str, mfr: str) -> bool:
-    """Same-offer semantics: at least one offer must satisfy *both* constraints."""
-    return any(
-        acl in (o.get("catalogVersionIds") or []) and o.get("manufacturerName") == mfr
-        for o in offers
-    )
+def _prices_match(prices: list[float], spec: dict) -> bool:
+    """At least one price falls in [price_gte, price_lte]."""
+    if "price_gte" not in spec and "price_lte" not in spec:
+        return True
+    lo = spec.get("price_gte", float("-inf"))
+    hi = spec.get("price_lte", float("inf"))
+    return any(lo <= p <= hi for p in prices)
+
+
+def _matches(article: dict, spec: dict | None) -> bool:
+    """Combined predicate: offers-side AND prices-side must both pass."""
+    if spec is None:
+        return True
+    offers_side = {k: v for k, v in spec.items() if k in ("acl", "mfr", "cat")}
+    prices_side = {k: v for k, v in spec.items() if k in ("price_gte", "price_lte")}
+    if offers_side and not _offers_match(article["offers"], offers_side):
+        return False
+    if prices_side and not _prices_match(article["prices"], prices_side):
+        return False
+    return True
 
 
 REGIMES: dict[str, dict] = {
-    "unfiltered": {
-        "mask": lambda offers: True,
-        "filter_spec": None,
+    "unfiltered": {"filter_spec": None},
+    "acl-top": {"filter_spec": {"acl": TOP_CATALOG}},
+    "acl-mid": {"filter_spec": {"acl": MID_CATALOG}},
+    "acl-top+cat-top": {"filter_spec": {"acl": TOP_CATALOG, "cat": CAT_TOP}},
+    "acl-top+price-50-200": {
+        "filter_spec": {"acl": TOP_CATALOG, "price_gte": PRICE_GTE, "price_lte": PRICE_LTE}
     },
-    "acl-top": {
-        "mask": lambda offers: _matches_acl(offers, TOP_CATALOG),
-        "filter_spec": {"acl": TOP_CATALOG},
+    "acl-top+mfr-mid": {"filter_spec": {"acl": TOP_CATALOG, "mfr": MFR_MID}},
+    "acl-top+mfr-mid+price-50-200": {
+        "filter_spec": {
+            "acl": TOP_CATALOG,
+            "mfr": MFR_MID,
+            "price_gte": PRICE_GTE,
+            "price_lte": PRICE_LTE,
+        }
     },
-    "acl-mid": {
-        "mask": lambda offers: _matches_acl(offers, MID_CATALOG),
-        "filter_spec": {"acl": MID_CATALOG},
-    },
-    "acl-top+mfr-mid": {
-        "mask": lambda offers: _matches_acl_and_mfr(offers, TOP_CATALOG, MFR_MID),
-        "filter_spec": {"acl": TOP_CATALOG, "mfr": MFR_MID},
-    },
-    "acl-top+mfr-small": {
-        "mask": lambda offers: _matches_acl_and_mfr(offers, TOP_CATALOG, MFR_SMALL),
-        "filter_spec": {"acl": TOP_CATALOG, "mfr": MFR_SMALL},
-    },
+    "acl-top+mfr-small": {"filter_spec": {"acl": TOP_CATALOG, "mfr": MFR_SMALL}},
 }
 
 
 def build_es_filter(filter_spec: dict | None) -> list:
-    """Translate a regime's filter spec into a knn.filter clause list."""
+    """Translate a regime's filter spec into a knn.filter clause list, modeling
+    production: offers-side constraints inside one nested(offers), prices-side
+    in a separate nested(prices)."""
     if filter_spec is None:
         return []
-    inner: list[dict] = []
+    clauses: list[dict] = []
+
+    offers_inner: list[dict] = []
     if "acl" in filter_spec:
-        inner.append({"terms": {"offers.catalogVersionIds": [filter_spec["acl"]]}})
+        offers_inner.append({"terms": {"offers.catalogVersionIds": [filter_spec["acl"]]}})
     if "mfr" in filter_spec:
-        inner.append({"term": {"offers.manufacturerName": filter_spec["mfr"]}})
-    return [
-        {
-            "nested": {
-                "path": "offers",
-                "score_mode": "none",
-                "query": {"bool": {"filter": inner}},
+        offers_inner.append({"term": {"offers.manufacturerName": filter_spec["mfr"]}})
+    if "cat" in filter_spec:
+        offers_inner.append(
+            {"term": {"offers.categoryPaths.upToLevel3": filter_spec["cat"]}}
+        )
+    if offers_inner:
+        clauses.append(
+            {
+                "nested": {
+                    "path": "offers",
+                    "score_mode": "none",
+                    "query": {"bool": {"filter": offers_inner}},
+                }
             }
-        }
-    ]
+        )
+
+    if "price_gte" in filter_spec or "price_lte" in filter_spec:
+        rng: dict = {}
+        if "price_gte" in filter_spec:
+            rng["gte"] = filter_spec["price_gte"]
+        if "price_lte" in filter_spec:
+            rng["lte"] = filter_spec["price_lte"]
+        clauses.append(
+            {
+                "nested": {
+                    "path": "prices",
+                    "score_mode": "none",
+                    "query": {"range": {"prices.price": rng}},
+                }
+            }
+        )
+
+    return clauses
 
 
 # -------------------- article attrs fetch --------------------
@@ -135,13 +191,13 @@ def build_es_filter(filter_spec: dict | None) -> list:
 
 def fetch_article_attrs(
     client: httpx.Client, article_ids: list[str]
-) -> dict[str, list[dict]]:
-    """Pull per-article offers list (catalogVersionIds + manufacturerName only).
+) -> dict[str, dict]:
+    """Pull per-article filter attributes.
 
-    Returns {articleId: [{catalogVersionIds: [...], manufacturerName: ...}, ...]}.
-    Articles whose offers carry no manufacturerName get None there.
+    Returns {articleId: {"offers": [{catalogVersionIds: [...], manufacturerName, categoryPath3}, ...],
+                         "prices": [<float>, ...]}}.
     """
-    attrs: dict[str, list[dict]] = {}
+    attrs: dict[str, dict] = {}
     unique = sorted(set(article_ids))
     for i in range(0, len(unique), TERMS_BATCH):
         batch = unique[i : i + TERMS_BATCH]
@@ -154,6 +210,8 @@ def fetch_article_attrs(
                     "articleId",
                     "offers.catalogVersionIds",
                     "offers.manufacturerName",
+                    "offers.categoryPaths.upToLevel3",
+                    "prices.price",
                 ],
                 "query": {"terms": {"articleId": batch}},
             },
@@ -166,27 +224,40 @@ def fetch_article_attrs(
                 continue
             offers = []
             for o in src.get("offers") or []:
+                cat_raw = (o.get("categoryPaths") or {}).get("upToLevel3")
+                if cat_raw is None:
+                    cat_list = []
+                elif isinstance(cat_raw, list):
+                    cat_list = cat_raw
+                else:
+                    cat_list = [cat_raw]
                 offers.append(
                     {
                         "catalogVersionIds": o.get("catalogVersionIds") or [],
                         "manufacturerName": o.get("manufacturerName"),
+                        "categoryPath3": cat_list,
                     }
                 )
-            attrs[aid] = offers
+            prices = [
+                p["price"]
+                for p in src.get("prices") or []
+                if p.get("price") is not None
+            ]
+            attrs[aid] = {"offers": offers, "prices": prices}
     return attrs
 
 
-def cache_attrs(attrs: dict[str, list[dict]], path: Path) -> None:
+def cache_attrs(attrs: dict[str, dict], path: Path) -> None:
     aids = list(attrs.keys())
-    offers_json = [json.dumps(attrs[a]) for a in aids]
-    pq.write_table(pa.table({"article_id": aids, "offers": offers_json}), path)
+    blobs = [json.dumps(attrs[a]) for a in aids]
+    pq.write_table(pa.table({"article_id": aids, "attrs": blobs}), path)
 
 
-def load_attrs_cache(path: Path) -> dict[str, list[dict]]:
+def load_attrs_cache(path: Path) -> dict[str, dict]:
     t = pq.read_table(path)
     aids = t["article_id"].to_pylist()
-    offers_json = t["offers"].to_pylist()
-    return {a: json.loads(j) for a, j in zip(aids, offers_json)}
+    blobs = t["attrs"].to_pylist()
+    return {a: json.loads(b) for a, b in zip(aids, blobs)}
 
 
 # -------------------- masks + filtered ground truth --------------------
@@ -199,16 +270,16 @@ def normalize_rows(x: np.ndarray) -> np.ndarray:
 
 
 def compute_masks(
-    row_article_ids: list[str], attrs: dict[str, list[dict]]
+    row_article_ids: list[str], attrs: dict[str, dict]
 ) -> dict[str, np.ndarray]:
     """For each regime, build a boolean mask over corpus rows."""
+    empty = {"offers": [], "prices": []}
+    art_data = [attrs.get(aid, empty) for aid in row_article_ids]
     masks: dict[str, np.ndarray] = {}
-    # Resolve once per article to avoid repeated dict lookups.
-    art_offers = [attrs.get(aid, []) for aid in row_article_ids]
     for name, regime in REGIMES.items():
-        mask_fn = regime["mask"]
+        spec = regime["filter_spec"]
         masks[name] = np.fromiter(
-            (mask_fn(o) for o in art_offers), dtype=bool, count=len(art_offers)
+            (_matches(d, spec) for d in art_data), dtype=bool, count=len(art_data)
         )
     return masks
 
@@ -277,6 +348,17 @@ def create_index(client: httpx.Client, name: str, dim: int) -> None:
                     "properties": {
                         "catalogVersionIds": {"type": "keyword"},
                         "manufacturerName": {"type": "keyword"},
+                        "categoryPaths": {
+                            "properties": {
+                                "upToLevel3": {"type": "keyword"},
+                            }
+                        },
+                    },
+                },
+                "prices": {
+                    "type": "nested",
+                    "properties": {
+                        "price": {"type": "float"},
                     },
                 },
             }
@@ -291,17 +373,32 @@ def _bulk_batch(
     name: str,
     vectors: np.ndarray,
     row_article_ids: list[str],
-    attrs: dict[str, list[dict]],
+    attrs: dict[str, dict],
     start: int,
     end: int,
 ) -> int:
     lines: list[str] = []
+    empty = {"offers": [], "prices": []}
     for i in range(start, end):
         lines.append('{"index":{"_id":"' + str(i) + '"}}')
-        offers = attrs.get(row_article_ids[i], [])
+        data = attrs.get(row_article_ids[i], empty)
+        offers_doc = [
+            {
+                "catalogVersionIds": o.get("catalogVersionIds") or [],
+                "manufacturerName": o.get("manufacturerName"),
+                "categoryPaths": {"upToLevel3": o.get("categoryPath3") or []},
+            }
+            for o in data["offers"]
+        ]
+        prices_doc = [{"price": p} for p in data["prices"]]
         lines.append(
             json.dumps(
-                {"idx": i, "vector": vectors[i].tolist(), "offers": offers}
+                {
+                    "idx": i,
+                    "vector": vectors[i].tolist(),
+                    "offers": offers_doc,
+                    "prices": prices_doc,
+                }
             )
         )
     body = "\n".join(lines) + "\n"
@@ -325,7 +422,7 @@ def bulk_load(
     name: str,
     vectors: np.ndarray,
     row_article_ids: list[str],
-    attrs: dict[str, list[dict]],
+    attrs: dict[str, dict],
 ) -> int:
     n = vectors.shape[0]
     starts = list(range(0, n, BULK_BATCH))
@@ -452,7 +549,7 @@ def main() -> None:
     )
     print(f"manifest: {manifest}\n")
 
-    attrs_cache = args.in_dir / "article_filter_attrs.parquet"
+    attrs_cache = args.in_dir / "article_filter_attrs_v3.parquet"
     limits = httpx.Limits(
         max_connections=BULK_CONCURRENCY * 2,
         max_keepalive_connections=BULK_CONCURRENCY * 2,
