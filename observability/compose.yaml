@@ -56,6 +56,11 @@ services:
 
 volumes:
   prometheus_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /data/docker-volumes/prometheus_data
   grafana_data:
   caddy_data:
   caddy_config:
