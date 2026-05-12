@@ -357,11 +357,11 @@ Analyzer and boost are configurable via `SyntheticKeywordsProperties`. The field
 
 Everything in §1.2 and §2.2 only covers the `StringQueryProvider` — the per-profile text query factory. The surrounding behavior (filtering, pagination, sorting, aggregations, etc.) lives in `SearchArticleQueryBuilder` and applies to **all legacy profiles**. Source paths below are relative to `article/search/query/src/main/java/.../infrastructure/search/`.
 
-> **TEST_PROFILE_18 overrides §1.3.1, §1.3.4, and §1.3.6.** It collapses pre-filters and post-filters into a single filter list applied to both retrievers' filter slots (no `post_filter`); its aggregations produce remaining counts rather than what-if counts; and it drops `dfs_query_then_fetch` in favor of plain `query_then_fetch`. See §2.2.5 and §2.2.3 for the rationale and code consequences. The rest of §1.3 (sorting, pagination, source filtering, related-articles overlay, builder entry points) applies unchanged.
+> **TEST_PROFILE_18 overrides §1.3.1, §1.3.4, and §1.3.6.** It collapses pre-filters and post-filters into a single filter list applied to both retrievers' filter slots (no `post_filter`); its aggregations produce remaining counts rather than what-if counts; and it drops `dfs_query_then_fetch` in favor of plain `query_then_fetch`. See §2.2.6 and §2.2.3 for the rationale and code consequences. The rest of §1.3 (sorting, pagination, source filtering, related-articles overlay, builder entry points) applies unchanged.
 
 ### 1.3.1 Filtering — pre-filters vs. post-filters
 
-ES has two filter slots that look similar but behave very differently. The legacy builder uses both. **TEST_PROFILE_18 does not use `post_filter` at all** — see §2.2.5 for the divergence; everything below describes the legacy STANDARD / `TEST_PROFILE_*` behavior.
+ES has two filter slots that look similar but behave very differently. The legacy builder uses both. **TEST_PROFILE_18 does not use `post_filter` at all** — see §2.2.6 for the divergence; everything below describes the legacy STANDARD / `TEST_PROFILE_*` behavior.
 
 **Pre-filters** — added to the core query bool by `addPreFilters()` (line 201). These are folded into the **`bool.filter` of the main query**, so they constrain the candidate set *before* anything else runs. They're for filters that are structurally required and shouldn't appear as facets.
 
@@ -416,7 +416,7 @@ The legacy builder always issues plain `query` requests (no retrievers), so `sor
 
 ### 1.3.4 Aggregations / faceting
 
-Built only when `params.getSummaries()` is non-empty (`addAggregationParams()`, line 376). **TEST_PROFILE_18 does not use the filter-out-self pattern described here** — its aggregations run directly over the retriever's hits and produce remaining counts. See §2.2.5. The contract below applies to STANDARD / `TEST_PROFILE_*`:
+Built only when `params.getSummaries()` is non-empty (`addAggregationParams()`, line 376). **TEST_PROFILE_18 does not use the filter-out-self pattern described here** — its aggregations run directly over the retriever's hits and produce remaining counts. See §2.2.6. The contract below applies to STANDARD / `TEST_PROFILE_*`:
 
 - Each `SearchFilterProvider` declares a `getSummaryKind()`. A provider contributes aggregations only if `params.getSummaries()` contains its kind.
 - `filterProvider.buildAggregations(appliedFilters)` is invoked with the full map of post-filters that ended up applied. This lets each provider implement the standard facet-counting pattern: an aggregation for facet X excludes only its own post-filter so the counts reflect "what would happen if the user toggled X."
@@ -574,7 +574,7 @@ A new kNN retriever, built from scratch on top of the new `embeddings` nested gr
   **What this design trades:** the matched embedding has no recorded link to any specific offer, so `knn.filter` can only enforce *existence* of a passing offer — not that the matching offer is the one whose content informed the matched embedding. In practice this is acceptable because the displayed offer is chosen by independent rules (cheapest under the price-list filter, etc.) and the user's expectation is article-level relevance, not offer-level relevance.
 - Query vector: `teiEmbeddingClient.embed(queryString)` (the fine-tuned TEI model, output truncated/projected to 128 dims to match the index).
 - `k` and `num_candidates` both **10000**.
-- **All filter clauses pushed into `knn.filter`** — both the structural pre-filters (offers context, prices context, ACL, catalog-view core articles, blocked eClass) **and** the user-selected facet filters (vendor, article ID, manufacturer, price range, delivery time, features, eClass, categories, core sortiment). `post_filter` is **not used** by TEST_PROFILE_18. HNSW navigates only docs that pass the combined filter, so the post-filter cliff (§1.3.1) cannot occur and pagination is stable. Rationale and trade-offs in §2.2.5.
+- **All filter clauses pushed into `knn.filter`** — both the structural pre-filters (offers context, prices context, ACL, catalog-view core articles, blocked eClass) **and** the user-selected facet filters (vendor, article ID, manufacturer, price range, delivery time, features, eClass, categories, core sortiment). `post_filter` is **not used** by TEST_PROFILE_18. HNSW navigates only docs that pass the combined filter, so the post-filter cliff (§1.3.1) cannot occur and pagination is stable. Rationale and trade-offs in §2.2.6.
 - **Construction rule (same-offer semantics):** all per-offer constraints must live inside **one** `nested(path: "offers", ...)` clause, with each constraint as a `filter` inside its inner `bool`. Splitting them across multiple sibling nested clauses weakens the semantics from "exists an offer satisfying *all* filters" to "exists an offer satisfying A, AND exists *some* offer satisfying B" — different offers can satisfy each, and the same-offer guarantee is lost. The same applies to per-price constraints on `nested(path: "prices")`.
 
 ### 2.2.3 Query routing — choose lexical-only / vector-only / hybrid
@@ -587,7 +587,7 @@ The three paths:
 |---|---|---|
 | Multi-word (whitespace present) | **vector-only** (`knn` retriever, no RRF) | Identifier multi-fields on `offers.articleNumber.*` / `offers.manufacturerArticleNumber.*` / `offers.ean.raw` rarely fire on multi-token natural-language phrases. Including them via RRF contributes rank noise; the embedding already covers free-text. |
 | Single token, classifies as **strict identifier** | **lexical-only** (pruned offer bool, no RRF) at deep `size`; empty result ⇒ fall back to hybrid | Dense embeddings under-weight digit strings and over-cluster on lexical neighborhoods. Exact identifier matching at a large candidate window is the right primitive for queries that look like MPNs, EANs, or opaque SKUs. |
-| Single token, not a strict identifier | **hybrid** (RRF over lexical + vector — §2.2.4) | Ambiguous: could be a brand, a generic product term, a category. Fuse both signals; let RRF arbitrate. |
+| Single token, not a strict identifier | **hybrid** (RRF over lexical + vector — §2.2.5) | Ambiguous: could be a brand, a generic product term, a category. Fuse both signals; let RRF arbitrate. |
 
 **Strict-identifier classifier** — port `is_strict_identifier(q)` verbatim from `search-api/hybrid.py`:
 
@@ -599,24 +599,15 @@ The three paths:
   - `(?=.{7,}$)[a-z]+\d{4,}[a-z0-9]*` — alpha-then-digit, ≥7 chars total AND ≥4 consecutive digits after the letter prefix
 - Static `GENERIC_TOKENS` denylist for industry-generic tokens that pass shape checks but route incorrectly (`cr2032`, `cr2025`, `rj45`, `usb-c`, `cat6`, `ffp2`, `m8`, `ip67`, `wd-40`, …). Match is case- and whitespace-normalized. Extend as new offenders surface in query logs — see `GENERIC_TOKENS` in `hybrid.py` for the current list.
 
-**Strict-path fallback.** If the lexical-only request returns zero hits, reissue the query in the hybrid path. False positives in the classifier (e.g. `abc12345` looking like an MPN but actually a typo'd brand) get recovered at the cost of one extra roundtrip — paid only on the rare empty-strict case. Gate it behind a config flag (default on), mirroring `SearchParams.enable_fallback`.
+**No fallback on empty strict result.** When the classifier says "strict identifier" and the lexical-only search returns zero hits, return an empty result set. Don't reissue as hybrid. Rationale: a well-formed identifier with no matches means "this SKU/EAN/MPN is not in the catalog" — the correct answer is nothing. Falling back to hybrid would surface semantic neighbors of an opaque identifier (drills that vaguely resemble `8x12345678`), which is confusing rather than helpful. A user typing an identifier expects a binary outcome.
 
-**Asymmetric error handling.** False positives are caught by the empty-strict fallback above. False negatives — real identifiers the classifier missed — fall through to the hybrid path, where the lexical retriever's identifier matches still pick them up via RRF. This is why the classifier can afford to be conservative; a missed strict classification degrades to the hybrid result, not to nothing.
+**Asymmetric error handling.** False negatives — real identifiers the classifier missed — still fall through to the hybrid path, where the lexical retriever's identifier matches pick them up via RRF. False positives — strings that pass the classifier but aren't real identifiers — produce empty results that the user has to retry. To keep false positives rare, the classifier leans conservative: length floor 4 / ceiling 40, the `GENERIC_TOKENS` denylist for common shape-passing-but-generic tokens, and tight regex shapes (e.g. ≥3 digits anywhere for hyphenated forms). If query logs show appreciable empty-strict cases that should have surfaced results, tighten the classifier rather than re-introducing the fallback.
 
 **Three request shapes — the gating is a branch in the query builder, not a runtime parameter:**
 
 - **Lexical-only:** plain `query: { bool: ... }` containing §2.2.1's pruned offer bool plus the customer-artno sub-query, with `bool.filter` carrying the full filter set. No `retriever` block. `sort` / `from` / `size` / `aggs` attach directly to the request. Use a deeper `size` (e.g. 500, mirroring `strict_codes_limit`) since the strict path is a deep recall pass over a narrow candidate set.
-- **Vector-only:** `retriever: { knn: ... }` per §2.2.2, with `knn.filter` carrying the full filter set. Retriever-based — `sort` needs the workaround below.
-- **Hybrid:** `retriever: { rrf: ... }` wrapping both (§2.2.4). Retriever-based — `sort` needs the workaround below.
-
-**Sort on retriever-based paths.** ES 9.x doesn't allow a top-level `sort` clause on a request that uses a retriever. For the lexical-only path that's irrelevant — it's a plain `bool` query — but for vector-only and hybrid, requests like `sort=name` or `sort=price` need a two-phase split:
-
-1. **Phase 1:** the retriever query with no `sort`. Returns the top-N article IDs in retriever order (cosine distance for kNN, RRF rank for hybrid). Use a deep `size` (e.g. 1000) so phase 2 has enough headroom to sort over.
-2. **Phase 2:** plain `bool` query with `filter: { ids: { values: [<phase 1 IDs>] } }` plus the same filter set as phase 1 (cheap to re-apply, protects against between-phase index changes). User's `sort` slot is populated here, and aggregations run on the phase-2 hits.
-
-Two `_search` round-trips per sorted query, but only when the user actually selects a non-relevance sort. Relevance-sorted queries (the default and majority case) skip phase 2 — the retriever's order is what the user wants. The phase 2 cost is roughly one normal lexical query — no kNN work, no embedding involved.
-
-Cheaper alternative considered but rejected: drop the retriever entirely when the user sorts by name/price, fall back to a plain lexical query. That saves a round-trip but means the vector recall is lost — typing a natural-language query plus `sort=name` would only return lexically-matched items, no semantic broadening. The two-phase approach preserves recall at the cost of one extra request.
+- **Vector-only:** `retriever: { knn: ... }` per §2.2.2, with `knn.filter` carrying the full filter set. Retriever-based — see §2.2.4 for sort handling.
+- **Hybrid:** `retriever: { rrf: ... }` wrapping both (§2.2.5). Retriever-based — see §2.2.4 for sort handling.
 
 **Search type — drop DFS for all three paths.** Legacy uses `dfs_query_then_fetch` (§1.3.6) to stabilize BM25 IDF across shards. TEST_PROFILE_18 uses plain `query_then_fetch` everywhere:
 
@@ -624,7 +615,7 @@ Cheaper alternative considered but rejected: drop the retriever entirely when th
 - **Lexical-only:** strict-identifier matches produce tight result sets (often a handful of hits, sometimes one). Score variation within "matches the SKU" rarely flips ordering, so the IDF-stability win is marginal.
 - **Hybrid:** BM25 IDF skew can change the lexical leg's local ranks, but RRF fuses *ranks* not raw scores. Small rank flips at the leg level get absorbed by the fusion; the impact on the final fused order is small.
 
-The phase-2 lexical request (when sort is applied) inherits the same choice — no DFS. Re-evaluate if relevance evaluations on the hybrid path show measurable rank drift from shard-local IDF; until then, the savings (one cross-shard round-trip per query) are pocketed.
+Re-evaluate if relevance evaluations on the hybrid path show measurable rank drift from shard-local IDF; until then, the savings (one cross-shard round-trip per query) are pocketed.
 
 **Where this lives in code.** In the query-builder layer, before the request is composed. Pseudocode:
 
@@ -632,15 +623,23 @@ The phase-2 lexical request (when sort is applied) inherits the same choice — 
 if q has whitespace:
     return buildVectorOnlyRequest(q, filters)        # §2.2.2
 elif isStrictIdentifier(q):
-    hits = execute(buildLexicalOnlyRequest(q, filters, size=500))   # §2.2.1
-    if hits.isEmpty() and fallbackEnabled:
-        return execute(buildHybridRequest(q, filters))               # §2.2.4
-    return hits
+    return buildLexicalOnlyRequest(q, filters, size=500)   # §2.2.1
 else:
-    return buildHybridRequest(q, filters)             # §2.2.4
+    return buildHybridRequest(q, filters)             # §2.2.5
 ```
 
-### 2.2.4 Fusion — RRF retriever (hybrid path only)
+### 2.2.4 Sort on retriever-based paths
+
+ES 9.x doesn't allow a top-level `sort` clause on a request that uses a retriever. For the lexical-only path (§2.2.3) that's irrelevant — it's a plain `bool` query — but for vector-only and hybrid, requests like `sort=name` or `sort=price` need a two-phase split:
+
+1. **Phase 1:** the retriever query with no `sort`. Returns the top-N article IDs in retriever order (cosine distance for kNN, RRF rank for hybrid). Use a deep `size` (e.g. 1000) so phase 2 has enough headroom to sort over.
+2. **Phase 2:** plain `bool` query with `filter: { ids: { values: [<phase 1 IDs>] } }` plus the same filter set as phase 1 (cheap to re-apply, protects against between-phase index changes). User's `sort` slot is populated here, and aggregations run on the phase-2 hits.
+
+Two `_search` round-trips per sorted query, but only when the user actually selects a non-relevance sort. Relevance-sorted queries (the default and majority case) skip phase 2 — the retriever's order is what the user wants. The phase 2 cost is roughly one normal lexical query — no kNN work, no embedding involved.
+
+The phase-2 lexical request inherits TEST_PROFILE_18's no-DFS choice (§2.2.3) — `search_type=query_then_fetch`, no extra cross-shard round-trip for IDF gathering.
+
+### 2.2.5 Fusion — RRF retriever (hybrid path only)
 
 Used by the hybrid path of §2.2.3 — single-token queries that aren't strict identifiers. The lexical bool and the kNN retriever are combined via ES's `rrf` retriever (Reciprocal Rank Fusion). The lexical side enters as a `standard` retriever, the vector side as a `knn` retriever:
 
@@ -695,11 +694,10 @@ Notes:
 
 - `rank_window_size` should match the kNN `k` so both retrievers contribute their full result sets to the fusion. 10000 is the chosen candidate budget — see §2.2.2.
 - `rank_constant: 60` is the standard RRF default; tune only with offline evals.
-- **One single filter set is applied to both retrievers** — the standard retriever's `bool.filter` and the kNN's `filter`. The list includes structural pre-filters *and* user-selected facets; there is **no `post_filter`** on the request. Build the list once and pass the same reference to both branches. If they ever diverge, lexical hits can include docs the kNN excludes (or vice versa) and the fused ranking gets noisy. Rationale for putting facets in the filter slot (not `post_filter`) is in §2.2.5.
+- **One single filter set is applied to both retrievers** — the standard retriever's `bool.filter` and the kNN's `filter`. The list includes structural pre-filters *and* user-selected facets; there is **no `post_filter`** on the request. Build the list once and pass the same reference to both branches. If they ever diverge, lexical hits can include docs the kNN excludes (or vice versa) and the fused ranking gets noisy. Rationale for putting facets in the filter slot (not `post_filter`) is in §2.2.6.
 - The synthetic-keywords sub-query is omitted in both branches. Synthetic keywords were the previous workaround for missing semantic recall — the embedding replaces them.
-- The cross-fields offer-text clause is omitted from the lexical branch. If precision regresses on rare identifier-like-but-not-quite queries, the cheapest mitigation is reinstating clause (a) at a reduced boost (e.g. `30`) in the lexical retriever; don't add it to the kNN branch.
 
-### 2.2.5 Filtering and aggregation policy
+### 2.2.6 Filtering and aggregation policy
 
 TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — structural pre-filters and user-selected facet filters alike — is applied inside both retrievers' filter slots (`knn.filter` on the vector side, `bool.filter` on the lexical side). This is a deliberate divergence from the legacy design described in §1.3.1, and it changes facet count semantics. The reasoning:
 
@@ -717,7 +715,7 @@ TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — struc
 
 **Escape hatch if what-if counts ever become a requirement:** issue a separate sidecar `buildAggregationsOnly()` request per facet (or one bundled with a top-level `filters` aggregation), each with that facet excluded from the filter list. The main hits query stays clean; the aggregation path pays the extra round-trip only when the UI needs the hint.
 
-### 2.2.6 Wiring summary vs. STANDARD
+### 2.2.7 Wiring summary vs. STANDARD
 
 | Aspect | STANDARD | TEST_PROFILE_18 |
 |---|---|---|
