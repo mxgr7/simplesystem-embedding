@@ -70,7 +70,7 @@
             "similarity": "cosine",
             "index": true,
             "index_options": {
-              "type": "int8_hnsw",
+              "type": "hnsw",
               "m": 16,
               "ef_construction": 100
             }
@@ -332,6 +332,11 @@
       "vendorId": {
         "type": "keyword"
       }
+    },
+    "_source": {
+      "excludes": [
+        "embeddings.vector"
+      ]
     }
   }
 }
