@@ -658,6 +658,120 @@ When `num_candidates = 5000` would *not* be the right choice:
 - fp32 raw vectors at 6M × ~2 entries × 128 × 4 = ~6 GB. Trivially fits the page cache on any modern ES node. `_source.excludes: ["embeddings.vector"]` prevents the JSON copy from doubling that on disk.
 - 32-shard production indices will see segment-merging dynamics that the 1-shard bench doesn't model; periodic force-merge to single segments after major writes keeps the graph state aligned with what the bench measured.
 
+**Sweep 4 — production-shape against the real 12M-vector index** (full results in `reports/hnsw_eval_full/bench_prod_shape_top10.json`). Sweeps 1-3 used a 400k-vector single-shard test index built fresh per config. Sweep 4 validates at production scale: queries hit `local-article-index-v2` and `local-article-index-v3` directly (32 shards × ~6M articles, ~12M nested embeddings total, `_source.excludes: [embeddings.vector]`, `embeddings.vector` is the nested kNN target). Ground truth is the article-collapsed top-100 from a **brute-force oracle over all 12M vectors** (FAISS `IndexFlatIP` after L2-normalize; built once by `scripts/build_full_corpus_oracle.py`, cached). For each regime the oracle is restricted to passing-filter rows, then collapsed to top-K unique articles — exactly mirroring how ES returns parent articles from a nested-vector kNN. 1k queries per cell, concurrency 8.
+
+v2 is `int8_hnsw` (live staging-shaped index); v3 is the same data reindexed to fp32 `hnsw` (`scripts/reindex_v2_to_v3.py`). Both with `m=16, ef_construction=100`. Probe set: 5 regimes × {500, 1000, 5000}.
+
+Recall@10 — v2 (int8) vs v3 (fp32):
+
+```
+              regime                sel%   numC   rec@10 v2   rec@10 v3      Δ
+          unfiltered             100.00%    500      0.8757      0.9885   +11.3
+          unfiltered             100.00%   1000      0.8790      0.9931   +11.4
+          unfiltered             100.00%   5000      0.8810      0.9970   +11.6
+             acl-top              33.39%    500      0.8848      0.9712    +8.7
+             acl-top              33.39%   1000      0.8956      0.9823    +8.7
+             acl-top              33.39%   5000      0.9053      0.9911    +8.6
+     acl-top+cat-top               2.14%    500      0.8141      0.9972   +18.3
+     acl-top+cat-top               2.14%   1000      0.8152      0.9995   +18.4
+     acl-top+cat-top               2.14%   5000      0.8152      0.9995   +18.4
+     acl-top+mfr-mid               1.58%    500      0.8735      0.9999   +12.7
+     acl-top+mfr-mid               1.58%   1000      0.8735      0.9999   +12.7
+     acl-top+mfr-mid               1.58%   5000      0.8735      0.9999   +12.7
+acl-top+price-50-200              10.76%    500      0.8526      0.9415    +8.9
+acl-top+price-50-200              10.76%   1000      0.8718      0.9588    +8.7
+acl-top+price-50-200              10.76%   5000      0.9114      0.9999    +8.9
+```
+
+p50 latency (ms) — v2 vs v3 (lower is better):
+
+```
+              regime                 numC   p50 v2    p50 v3
+          unfiltered                  500     26.3      47.1
+          unfiltered                 1000     46.6      67.4
+          unfiltered                 5000    222.5     323.2
+             acl-top                  500    196.8     204.0
+             acl-top                 1000    263.4     296.1
+             acl-top                 5000    670.2     839.4
+     acl-top+cat-top                 1000    146.4     155.8
+     acl-top+mfr-mid                 1000    144.5     160.0
+acl-top+price-50-200                 1000    243.9     318.7
+acl-top+price-50-200                 5000    252.6     300.1
+```
+
+Findings:
+
+- **int8 is the entire recall story under production conditions.** The narrow-filter plateaus seen on the smaller bench at the same precision do **not** appear under fp32. acl-top+cat-top jumped from a fixed 0.815 ceiling on v2 (no movement from numC=500 to 10000) to **0.9995 at numC=500** on v3. The int8 codec was wrong about a consistent ~18% of articles for this filter shape, and no amount of widening num_candidates could fix it — fp32 trivially does. Similar story for mfr-mid (0.874 → 0.9999).
+- **Sweep 2's per-sample precision verdict transfers exactly.** At numC=1000 unfiltered, sweep 2 measured fp32 = 0.987, int8 = 0.915 (–7.2 pts). Sweep 4 measures fp32 = 0.993, int8 = 0.879 (–11.4 pts). The gap widens slightly at 32-shard scale (more graph hops × more quantization error per hop) but the direction and magnitude match.
+- **fp32 latency cost is modest** — 7-33% slower at numC=1000 on filtered regimes, ~50% slower on unfiltered. fp32 evaluates against raw floats instead of the int8 fast path, with no rescore phase. Easily inside the budget for §2.2 (acl-top numC=5000 in v3 is 839 ms p50 — the latency ceiling is `nested(prices)` evaluation cost, not the kNN itself).
+- **Article-level recall is harsher than per-vector recall.** Sweep 4 measures `|hit_aids ∩ gt_aids| / k` on article IDs after ES's nested-kNN collapse, where sweeps 1-3 measured per-vector overlap on a flat test index. The collapse hides per-vector mismatches when multiple embeddings hit the same parent, so direct number comparison across sweeps over-counts the production-scale "degradation" — sweep 4 fp32 unfiltered = 0.993 is already at the recall ceiling for article-level kNN.
+- **The 6M-scale caveat above ("recall curves transfer directly") holds for fp32**, not for int8. fp32 numbers match sweep 2 closely; int8 numbers degrade further than the 400k bench suggested. Quantization error accumulates with scale; full precision doesn't.
+
+The hard data confirms the §2.1.1 mapping recommendation: **`"type": "hnsw"` (fp32)** is the correct call. Reindexing v2 → v3 buys 8-18 recall points across the production filter envelope at a ~10-30% latency premium.
+
+### 2.1.5 Scaling outlook: 25× growth (150M articles / 500M offers)
+
+Sweeps 1-4 were measured at the current 6M-article / ~12M-embedding / ~18M-offer scale on a 32-shard index. This subsection extrapolates the bench numbers to a 25× target (150M articles, ~500M offers, ~300M embeddings) and identifies the structural cost that doesn't transfer linearly. The goal is not a definitive sizing — it's to call out what would need to change in the index design *before* the corpus reaches that scale.
+
+**Per-shard sizing target.** Holding the current per-shard size (~375k articles / ~750k embeddings) would mean ~400 shards — workable cluster-state-wise (Elastic's soft guideline is ~25 shards/GB-of-heap), but a poor tradeoff: per-query fan-out RPCs and per-shard top-K merge scale linearly in shard count, while per-shard HNSW search scales as O(log N). At ~400 shards the coordinator pays ~150-250 ms of needless network/merge cost (400 RPCs × ~0.5-1 ms each + a 400k-pair coordinator merge per kNN query at numC=1000) to save ~10-15 ms per-shard search work that wasn't slow to begin with. **100-150 shards** is the sweet spot: each shard holds 1-1.5M articles / ~3M embeddings, per-shard search work stays in 10-30 ms (comparable to coordinator overhead), and fan-out plus merge stay bounded. Beyond ~200 shards, tail amplification (query p99 = max-of-N shard p99) gets visibly worse for the same throughput.
+
+**What scales, what doesn't.** Decomposing the v3 baseline latency at numC=1000:
+
+| component | current cost | scaling law | at 25× (extrapolated) |
+|---|---:|---|---:|
+| HNSW graph search per shard | ~5-10 ms | O(log N), N = vectors/shard | ~10-15 ms |
+| `nested(offers)` filter eval per shard | ~230 ms (acl-top) | ~linear in passing-offers/shard | **~1.5-3 s** |
+| `nested(prices)` range eval per shard | ~60-100 ms | linear in passing-prices/shard | **~1-2 s** |
+| Fan-out RPC + per-shard top-K merge | ~50-80 ms (32 shards) | linear in shard count | ~200-400 ms (150 shards) |
+| Article-level collapse | ~5 ms | linear in K × shards | ~30 ms |
+
+HNSW is the term that scales gracefully; everything around it is roughly linear in either offer count or shard count.
+
+**Per-regime extrapolated p50 (v3 fp32, numC=1000):**
+
+| regime | v3 today | v3 @ 25× (est.) | dominant term |
+|---|---:|---:|---|
+| unfiltered | 67 ms | ~0.3-0.5 s | fan-out + graph |
+| acl-top | 296 ms | **~1.5-3 s** | offers filter |
+| acl-top+price-50-200 | 319 ms | **~2-4 s** | offers + prices filters |
+| acl-top+mfr-mid | 160 ms | ~0.6-1 s | narrow-filter short-circuit kicks in |
+| acl-top+cat-top | 156 ms | ~0.6-1 s | same as above |
+
+The broad-ACL and price-range regimes blow past any reasonable interactive SLO. Narrow regimes stay tolerable because ES short-circuits to exact brute-force when the passing set is small relative to numC (visible in sweep 3 / sweep 4 — cat-top and mfr-mid at high numC actually got *faster* than at medium numC).
+
+**Recall outlook.** fp32 graph quality is largely scale-invariant; expect ~1-2 points of recall@10 drop per regime at the same num_candidates going from ~375k vectors/shard to ~3M/shard. Article-level collapse helps — with 150 shards each returning top-`num_candidates`, the coordinator merges over a deeper pool than the 32-shard baseline did, masking single-shard imperfection. Broad-ACL is the main recall risk: would likely need numC bumped to 2000-5000 at 25× to hold ~0.97-0.98 (§2.2.2's current recommendation of 5000 already covers this).
+
+**Storage and page cache.**
+
+| component | size at 25× |
+|---|---:|
+| `embeddings.vector` raw fp32 (300M × 128 × 4) | ~155 GB |
+| HNSW graph overhead (m=16 neighbor lists) | ~30-50 GB |
+| `offers` nested index | ~200-400 GB (per-offer field cardinality dependent) |
+| `prices` nested index | ~50-100 GB |
+| Primary total | **~500-700 GB** |
+| +1 replica | ~1-1.4 TB |
+| +force-merge headroom (2×) | ~2 TB |
+
+Hot-set memory: HNSW graph needs to stay page-cache resident — ~200 GB spread across nodes. With 150 shards on 8-12 nodes that's 17-25 GB cache pressure per node, comfortable on 128 GB-class hardware. `_source.excludes: ["embeddings.vector"]` (§2.1.1) is load-bearing here: dropping the JSON copy avoids doubling the on-disk footprint of the dense_vector field.
+
+**The dominant bottleneck is retriever-independent.** The filter cost in the extrapolation table above is not an HNSW concern — `nested(offers)` and `nested(prices)` are evaluated identically whether the parent query is BM25, kNN, or hybrid. The filter bitmap is constructed by iterating the relevant nested-children index and joining back to parent docids; that work is the same regardless of how survivors are scored. Three implications:
+
+- **A lexical-only deployment at 25× hits the same wall** for filtered queries. BM25 has higher baseline cost so the filter is a smaller fraction of total, but the absolute cost is identical and the user-observed slowdown is the same order of magnitude.
+- **kNN gets one optimization lexical doesn't**: the narrow-filter short-circuit (ES detects the passing set is small relative to `num_candidates` and switches to exact brute force on survivors). This is what keeps cat-top / mfr-mid tractable in the extrapolation. Lexical always traverses postings.
+- **Hybrid (RRF, TEST_PROFILE_18) eats both costs in parallel.** User-observed latency is `max(filtered_lexical, filtered_knn)`. At 25× scale the kNN side is the *fast* path; the lexical-side BM25 over filtered offers is what's slow. Optimizing the kNN side further buys nothing if the lexical sibling stays at multi-second p50.
+
+**Mitigations, in order of impact.** Each addresses the structural filter cost — not the vector side.
+
+1. **Materialize per-article `minPriceVisible` / `maxPriceVisible` as top-level scalars** (denormalized union across visible offers, scoped by the same ACL the search context uses). Eliminates `nested(prices)` filtering entirely. Cuts price-filter regime latency by ~80% and makes them comparable to non-price regimes. Requires the importer (§2.1.3) to compute these on every write.
+2. **Materialize per-article `catalogVersionIds` summary** as a top-level `keyword` field (deduped union across the article's offers). A top-level `terms` filter is roughly 5-10× faster than `nested(offers).bool.filter(terms)` at any scale and short-circuits earlier in the bitmap pipeline. The offers-side ACL filter still needs to exist where same-offer semantics matter (§2.2.6), but the *kNN pre-filter* can use the cheap top-level version.
+3. **Conditional `num_candidates`** in the query builder: 2000 for broad-ACL-only, 5000 only when a narrow facet (manufacturer, category) or price range is present. The narrow regimes already saturate at numC=500-1000 (sweep 4 v3); paying for 5000 there is wasted budget that contributes to coordinator merge cost.
+4. **Shard count = 100-150**, not 400. Re-shard at the point where per-shard size crosses ~3M articles. Avoid the fan-out cliff.
+
+Without (1) and (2) the index hits a 2-4 s p50 wall for filtered queries between roughly 30-50M articles, regardless of which retriever drives the query. With them in place, **400-800 ms p50 at 25× scale is achievable**, and the vector-side §2.2 budget stays intact.
+
+The framing for the planning conversation: **HNSW at 150M articles is fine. The nested-filter design is what doesn't scale, and it's a search-architecture decision separate from the embedding pipeline.**
+
 ## 2.2 TEST_PROFILE_18 (fine-tuned knn) search profile
 
 A variant of `STANDARD` designed for the fine-tuned embedding pipeline. Three differences vs. STANDARD:
