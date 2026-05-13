@@ -940,7 +940,7 @@ The phase-2 lexical request inherits TEST_PROFILE_18's no-DFS choice (§2.2.3) �
 
 Used by the hybrid path of §2.2.3 — single-token queries that aren't strict identifiers. The lexical bool and the kNN retriever are fused via Reciprocal Rank Fusion **implemented in application code, not in Elasticsearch**.
 
-**Why app-side instead of `retriever: { rrf: ... }`.** Despite Elastic's [subscriptions matrix](https://www.elastic.co/subscriptions) listing "Reciprocal Rank Fusion (RRF) for hybrid search" with no tier restriction, the actual runtime check in `elastic/elasticsearch` (branch 9.3, file `x-pack/plugin/rank-rrf/.../RRFRankPlugin.java`) gates the `rrf` retriever at **`License.OperationMode.ENTERPRISE`** — the top tier. A basic-license cluster issuing the request gets `current license is non-compliant for [Reciprocal Rank Fusion (RRF)]`. The docs and the code disagree; until Elastic reconciles them, the safe assumption is the code. We don't want to gate TEST_PROFILE_18 on an ENTERPRISE subscription, so RRF lives in the application.
+**Why app-side instead of `retriever: { rrf: ... }`.** The native ES `rrf` retriever is **ENTERPRISE-tier**, gated both in the [subscriptions matrix](https://www.elastic.co/subscriptions) (row: "Reciprocal Rank Fusion (RRF) for hybrid search", under Search & Analysis → Full-text search) and at runtime — `elastic/elasticsearch` (branch 9.3, file `x-pack/plugin/rank-rrf/.../RRFRankPlugin.java`) checks `License.OperationMode.ENTERPRISE` before serving the retriever, and a basic-license cluster gets `current license is non-compliant for [Reciprocal Rank Fusion (RRF)]`. We don't want to gate TEST_PROFILE_18 on an ENTERPRISE subscription, so RRF lives in the application.
 
 **Flow — three ES round trips.**
 
