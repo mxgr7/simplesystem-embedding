@@ -712,6 +712,25 @@ A new kNN retriever, built from scratch on top of the new `embeddings` nested gr
 
 Direct port of `search-api/hybrid.py`'s `HYBRID_CLASSIFIED` mode. **Don't always fuse.** For most query shapes, one leg is strictly better than the fused result; routing to it directly saves work and improves precision. RRF is reserved for genuinely ambiguous single-token queries.
 
+```mermaid
+flowchart TD
+    Q["Query q"] --> WS{"Contains<br/>whitespace?"}
+    WS -- yes --> VEC["<b>Vector-only</b><br/>retriever: knn<br/>(§2.2.2)"]
+    WS -- no --> SI{"is_strict_identifier(q)?<br/>len 4–40 · 4 regex shapes<br/>· not in GENERIC_TOKENS"}
+    SI -- yes --> LEX["<b>Lexical-only</b><br/>pruned offer bool<br/>size=500 (§2.2.1)"]
+    SI -- no --> HYB["<b>Hybrid</b><br/>retriever: rrf<br/>(§2.2.5)"]
+    LEX --> R{"hits empty?"}
+    R -- yes --> EMPTY["Return empty<br/>(no fallback)"]
+    R -- no --> HITS(["Return hits"])
+    VEC --> HITS
+    HYB --> HITS
+
+    classDef path fill:#eef,stroke:#557
+    classDef terminal fill:#efe,stroke:#575
+    class VEC,LEX,HYB path
+    class HITS,EMPTY terminal
+```
+
 The three paths:
 
 | Query shape | Path | Why |
@@ -766,6 +785,30 @@ ES 9.x doesn't allow a top-level `sort` clause on a request that uses a retrieve
 1. **Phase 1:** the retriever query with no `sort`. Returns the top-N article IDs in retriever order (cosine distance for kNN, RRF rank for hybrid). Use a deep `size` (e.g. 1000) so phase 2 has enough headroom to sort over.
 2. **Phase 2:** plain `bool` query with `filter: { ids: { values: [<phase 1 IDs>] } }` plus the same filter set as phase 1 (cheap to re-apply, protects against between-phase index changes). User's `sort` slot is populated here, and aggregations run on the phase-2 hits.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant Q as QueryBuilder
+    participant ES as Elasticsearch
+
+    C->>Q: search(q, filters, sort)
+
+    alt sort = relevance (default & majority)
+        Q->>ES: retriever query (knn or rrf)<br/>filters · size=N · from=offset
+        ES-->>Q: hits in retriever order + aggs
+        Q-->>C: response
+    else sort = name | price | …
+        Note over Q,ES: Phase 1 — candidate IDs
+        Q->>ES: retriever query (knn or rrf)<br/>filters · size=1000 · no sort
+        ES-->>Q: top-1000 IDs<br/>(retriever order, then discarded)
+        Note over Q,ES: Phase 2 — sort + aggregate
+        Q->>ES: bool query<br/>filter: {ids: [phase-1 IDs]} + filters<br/>sort=name · aggs<br/>search_type=query_then_fetch
+        ES-->>Q: sorted hits + aggs
+        Q-->>C: response
+    end
+```
+
 Two `_search` round-trips per sorted query, but only when the user actually selects a non-relevance sort. Relevance-sorted queries (the default and majority case) skip phase 2 — the retriever's order is what the user wants. The phase 2 cost is roughly one normal lexical query — no kNN work, no embedding involved.
 
 The phase-2 lexical request inherits TEST_PROFILE_18's no-DFS choice (§2.2.3) — `search_type=query_then_fetch`, no extra cross-shard round-trip for IDF gathering.
@@ -819,6 +862,29 @@ Used by the hybrid path of §2.2.3 — single-token queries that aren't strict i
     }
   }
 }
+```
+
+```mermaid
+flowchart LR
+    STD["<b>standard</b> retriever<br/>pruned offer bool (§2.2.1)<br/>+ customerArticleNumberQuery (§1.2.2)"]
+    KNN["<b>knn</b> retriever<br/>field: embeddings.vector<br/>k = 5000 · num_candidates = 5000<br/>query_vector: [128 floats from TEI]"]
+
+    RRF["<b>retriever: rrf</b><br/>rank_constant = 60"]
+
+    FILTER[("Shared filter set<br/>structural pre-filters<br/>+ user-selected facets (§2.2.6)")]
+
+    STD -- "rank_window_size = 5000" --> RRF
+    KNN -- "rank_window_size = 5000" --> RRF
+
+    FILTER -.->|"bool.filter"| STD
+    FILTER -.->|"knn.filter"| KNN
+
+    classDef rrf fill:#eef,stroke:#557,stroke-width:2px
+    classDef leg fill:#dfe,stroke:#575
+    classDef shared fill:#ffe,stroke:#aa7
+    class RRF rrf
+    class STD,KNN leg
+    class FILTER shared
 ```
 
 Notes:
