@@ -930,11 +930,11 @@ sequenceDiagram
     end
 ```
 
-Two `_search` round-trips per sorted vector-only query (phase 1 + phase 2); **four** per sorted hybrid query (phase 1 = legs ∥ + hybrid's own phase 2, then sort-splitter phase 2). All only when the user selects a non-relevance sort. Relevance-sorted queries — the default and majority case — skip the sort splitter entirely.
+Two `_search` round-trips per sorted vector-only query (phase 1 + phase 2); **five** per sorted hybrid query (phase 1 = legs ∥ + hybrid's own phase-2 pair ∥, then sort-splitter phase 2). All only when the user selects a non-relevance sort. Relevance-sorted queries — the default and majority case — skip the sort splitter entirely.
 
 The phase-2 lexical request inherits TEST_PROFILE_18's no-DFS choice (§2.2.3) — `search_type=query_then_fetch`, no extra cross-shard round-trip for IDF gathering.
 
-**Open optimization:** on a sorted hybrid query, the hybrid executor's own page-fetch round trip is wasted (its source + aggs get discarded by the sort splitter). A `skipSourceAndAggs` mode on the hybrid executor would drop the cost back to three round trips. Deferred — the sort+hybrid combination is the rarest of rare cases.
+**Open optimization:** on a sorted hybrid query, the hybrid executor's own phase-2 pair is wasted (its hits get discarded by the sort splitter, and the aggs get rebuilt by phase-2). A `skipPhase2` mode on the hybrid executor would drop the cost back to three round trips. Deferred — the sort+hybrid combination is the rarest of rare cases.
 
 ### 2.2.5 Fusion — application-side RRF (hybrid path only)
 
@@ -942,7 +942,7 @@ Used by the hybrid path of §2.2.3 — single-token queries that aren't strict i
 
 **Why app-side instead of `retriever: { rrf: ... }`.** The native ES `rrf` retriever is **ENTERPRISE-tier**, gated both in the [subscriptions matrix](https://www.elastic.co/subscriptions) (row: "Reciprocal Rank Fusion (RRF) for hybrid search", under Search & Analysis → Full-text search) and at runtime — `elastic/elasticsearch` (branch 9.3, file `x-pack/plugin/rank-rrf/.../RRFRankPlugin.java`) checks `License.OperationMode.ENTERPRISE` before serving the retriever, and a basic-license cluster gets `current license is non-compliant for [Reciprocal Rank Fusion (RRF)]`. We don't want to gate TEST_PROFILE_18 on an ENTERPRISE subscription, so RRF lives in the application.
 
-**Flow — three ES round trips.**
+**Flow — four ES round trips in two parallel pairs.**
 
 ```mermaid
 sequenceDiagram
@@ -960,10 +960,16 @@ sequenceDiagram
     end
 
     Note over Q: Java: fuse ranks (score = Σ 1/(60+rank))<br/>tiebreaker on docId · slice to user's page
-    Note over Q,ES: Phase 2 — page fetch + aggregations
-    Q->>ES: bool · filter: ids=<pageIds> + <filters><br/>aggs · _source: true · size=pageSize
-    ES-->>Q: page hits (arbitrary order) + aggs
-    Note over Q: Java: reorder hits by fused rank
+
+    Note over Q,ES: Phase 2 — page fetch and aggs in parallel<br/>(different filter scopes ⇒ must be 2 requests)
+    par
+        Q->>ES: bool · filter: ids=<pageIds> + <filters><br/>size=pageSize · _source: true · no aggs
+        ES-->>Q: page hits (arbitrary order)
+    and
+        Q->>ES: bool · filter: ids=<allFusedIds> + <filters><br/>size=0 · _source: false · aggs attached
+        ES-->>Q: aggregations only (scoped to full fused pool)
+    end
+    Note over Q: Java: reorder hits by fused rank · stamp scores · merge with aggs
 ```
 
 **Per-leg request shape (both fired concurrently):**
@@ -982,19 +988,25 @@ tiebreaker     = docId asc   # stable under pagination
 
 A doc that appears in both legs contributes both terms (e.g. rank 1 in both: `2 / 61 ≈ 0.0328`); a doc only in one leg contributes one term (`1 / 61 ≈ 0.0164`). The candidate pool is the **union** of both legs after dedupe — typically a few thousand docs. Total hits returned to the caller is `union.size()`.
 
-**Phase 2 — page fetch + aggregations:**
+**Phase 2 — split into two parallel calls so hits and aggs can scope independently:**
 
-After fusion, the user's page is `fused.subList(from, from + size)`. The third ES call is a plain bool whose `filter` list is `ids: <pageIds>` followed by the same filter set passed to the legs. Aggregations attach to this request; `_source: true` so the caller gets `SearchArticleReference` populated. ES returns the page docs in arbitrary order; the executor reorders them client-side by fused rank and stamps each `SearchHit.score` with the doc's fused score.
+After fusion, the user's page is `fused.subList(from, from + size)` and the full candidate pool is `fused` itself. The two calls share structure but differ in their `ids` filter scope:
+
+- **Phase 2a — page fetch:** plain bool, `filter: [ ids: <pageIds>, ...filters ]`, `size = pageSize`, `_source: true`, no aggregations. Returns the page's source docs in arbitrary ES order; the executor reorders client-side by fused rank and stamps each `SearchHit.score` with the doc's fused score.
+
+- **Phase 2b — aggregations:** plain bool, `filter: [ ids: <allFusedIds>, ...filters ]`, `size = 0`, `_source: false`, aggregations attached. ES skips source materialization entirely; only bucket counts come back. Scope = full fused candidate pool, matching §2.2.6's "remaining-count" intent.
+
+Both phase-2 calls fire on the common ForkJoinPool via `CompletableFuture.thenCombine`. Wall-clock cost = `max(phase2a, phase2b)`, since they're independent. The split is necessary because **in a single ES request, aggregations share the same filter as hits** — and we want different scopes for the two.
 
 **Notes:**
 
-- **Same filter set on every leg + phase 2.** Build once, pass three times. Diverging would let lexical hits or kNN hits drift out of the filtered space and the fused ranking gets noisy. Re-applying in phase 2 is cheap and protects against between-phase index changes.
+- **Same filter set on every leg + every phase-2 call.** Build once, pass four times. Diverging would let lexical hits or kNN hits drift out of the filtered space and the fused ranking gets noisy. Re-applying in phase 2 also protects against between-phase index changes.
 - **`rank_window_size`-equivalent = 5000** for each leg. Validated in §2.1.4 sweep 3. Below 5000, the kNN leg leaves measurable recall on the table under tight filter regimes (notably price ranges).
 - **Synthetic-keywords sub-query is omitted on the lexical leg** — same as §2.2.1. The embedding replaces it.
-- **Latency profile.** Two sequential round trips in time: `max(lexical, knn)` then phase 2. On prod-sized indices, ~50ms parallel-pair + ~20ms phase 2 ≈ 70ms p50 per hybrid query. ~30% better than sequential legs.
-- **Trade-off vs. native rrf retriever:** +1 round trip per hybrid query, +5000 ids of network traffic per leg (each leg fetches `_source: false`, so just the id list — ~50–100 KB). For aggregation scope trade-off see §2.2.6.
+- **Latency profile.** Two sequential round trips in time: `max(lexical, knn)` then `max(phase2a, phase2b)`. On prod-sized indices, ~50 ms legs + ~30 ms phase-2 pair ≈ **80 ms p50 per hybrid query**.
+- **Trade-off vs. native rrf retriever:** +1 round trip in wall-clock time per hybrid query (~30 ms p50 extra) and +5000 ids of network traffic per leg (each leg fetches `_source: false`, so just the id list — ~50–100 KB). The phase-2b request carries the full fused-pool id list (~10K entries, ~250 KB) but returns only bucket data.
 
-**Why the legs run in parallel but phase 2 doesn't:** phase 2 needs both legs' results to compute the fused id list, so it has a data dependency. The legs have no dependency on each other (the kNN leg needs the query vector, but that's computed sync before either leg fires).
+**Why every pair runs in parallel but the pairs are sequential:** phase 2 needs both legs' fused id list, so it has a hard data dependency on phase 1. Within each pair the two requests have no dependency on each other.
 
 **Where this lives:** `Test18HybridExecutor.java` in `article/search/query/.../infrastructure/search/test18/`. Fusion logic is `static List<FusedHit> rrfFuse(List<String>, List<String>)` — package-private for direct unit testing.
 
@@ -1008,27 +1020,55 @@ TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — struc
 
 **TEST_PROFILE_18 facet count semantics: remaining, not what-if.** Each facet's bucket count reflects "how many of the currently-narrowed result set are X," not "how many would be X if you toggled X." Toggling a facet off requires reissuing the query rather than reading an inactive-facet hint. This matches what most modern marketplace UIs do (Amazon, eBay, etc.).
 
+**Worked example.** A keyword query matches 10 articles. The user has clicked the `brand=Acme` facet. Brand breakdown across the 10 matches: 5 Acme, 3 Bosch, 2 Festool. Both modes show the same 5 hits — they differ only in what the facet counts mean.
+
+```mermaid
+%%{init: {'flowchart': {'subGraphTitleMargin': {'top': 20, 'bottom': 20}, 'padding': 25, 'nodeSpacing': 30, 'rankSpacing': 40}}}%%
+flowchart TB
+    Q["Keyword query matches <b>10 articles</b><br/><i>5 Acme · 3 Bosch · 2 Festool</i><br/>User clicks <b>brand = Acme</b> → 5 hits shown"]
+
+    Q --> WI
+    Q --> RM
+
+    subgraph WI["<b>what-if</b> — legacy <code>post_filter</code>"]
+        direction TB
+        WIA["Aggregation input:<br/><b>all 10 matches</b><br/><i>post_filter excluded from aggs</i>"]
+        WIP["Brand facet panel<br/>──────────<br/>☑ Acme — <b>5</b> &nbsp;<i>active</i><br/>☐ Bosch — <b>3</b> &nbsp;<i>toggle → 3 hits</i><br/>☐ Festool — <b>2</b> &nbsp;<i>toggle → 2 hits</i>"]
+        WIA --> WIP
+    end
+
+    subgraph RM["<b>remaining</b> — TEST_PROFILE_18 <code>bool.filter</code>"]
+        direction TB
+        RMA["Aggregation input:<br/><b>only the 5 Acme hits</b><br/><i>same set the user sees</i>"]
+        RMP["Brand facet panel<br/>──────────<br/>☑ Acme — <b>5</b> &nbsp;<i>active</i><br/>☐ Bosch — <b>0</b><br/>☐ Festool — <b>0</b>"]
+        RMA --> RMP
+    end
+
+    classDef q fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    classDef wif fill:#fff3e0,stroke:#e65100,color:#000
+    classDef rem fill:#e8f5e9,stroke:#2e7d32,color:#000
+    class Q q
+    class WIA,WIP wif
+    class RMA,RMP rem
+```
+
+The lexical-era `post_filter` trick excludes `brand=Acme` from the aggregation's input so Bosch and Festool counts reflect "what you'd get if you toggled instead." TEST_PROFILE_18 aggregates over the same hits the user sees: Bosch and Festool show `0` because none of those hits qualify. Re-asking the inactive-bucket question requires reissuing the search without the Acme filter.
+
 **Code consequences:**
 
 - One filter list, constructed once, fed to every leg / phase. `Test18FilterConsolidator` collects every `SearchFilterProvider.buildPreFilterQuery()` and `buildPostFilterQuery()` plus the catalog-view pre-filters into a single flat clause list — no split between pre/post slots, just one filter set.
 - The `EnumMap<SearchFilterKind, Query> appliedFilters` plumbing and the per-facet `filter`-aggregation wrappers (the filter-out-self pattern) are not needed. Aggregations run directly over the request's hits.
 - No code path calls `queryBuilder.withFilter(...)` for TEST_PROFILE_18 — that slot stays empty.
 
-**Aggregation scope by path:**
+**Aggregation scope by path** — all match §2.2.6 "remaining-count" intent:
 
 | Path | Aggregations computed over |
 |---|---|
-| Lexical-only | Full matched set (bounded by ES's internal limits) — matches §2.2.6 intent verbatim. |
-| Vector-only | Top `num_candidates = 5000` hits from the kNN retriever — matches §2.2.6 intent (the kNN candidate window IS the result set). |
-| Hybrid (app-side RRF) | The user's page only — currently a **divergence from §2.2.6 intent**. See note below. |
+| Lexical-only | Full matched set (bounded by ES's internal limits). The bool query carries no `ids` filter, so aggs see every doc passing the filter list. |
+| Vector-only | Top-`k = num_candidates = 5000` hits from the kNN. The kNN block sets `k` explicitly so ES's "aggregations are calculated on the top `k` nearest documents" rule scopes aggs to the candidate window. Without explicit `k`, ES would default `k = pageable.size` (typically ~10) and aggs would collapse to the page. |
+| Hybrid (app-side RRF) | Full fused candidate pool. The phase-2b call sets `filter: { ids: <allFusedIds> }` with `size = 0`, so aggregations scope to every doc in the fused pool — independent of how many appear on the user's page (see §2.2.5). |
 
-**Hybrid aggregation scope — current limitation.** The phase-2 ES call uses `filter: { ids: <pageIds> }` to scope hits to the user's page, and aggregations attach to the same request. So `facet.bucket.count` for a hybrid query reflects "how many of THIS PAGE are X", not "how many of the fused candidate pool are X". For page sizes around 10 this is a meaningful regression — bucket counts are tiny and uninformative.
-
-**Two paths to fix it (deferred):**
-- *Option A — 4-round-trip hybrid:* split phase 2 into a parallel pair — an aggs-only call with `filter: { ids: <allFusedIds> }`, size=0, and a page-fetch call with `filter: { ids: <pageIds> }`, full source. Adds one round trip in parallel, so the wall-clock cost is ~max(aggs, pageFetch). Correct semantics. Likely the right move once UI surfaces hybrid-path facets.
-- *Option B — push aggs onto the legs:* attach the same aggregation block to both leg requests, merge the bucket counts client-side. Cheaper (no extra round trip) but harder to get right with per-facet de-duplication.
-
-For now the implementation ships with the page-scoped aggregations and a TODO in `Test18HybridExecutor.fetchPageWithAggregations(...)`.
+**Why the hybrid split.** A single ES request couples aggregations to the same filter as hits — you can't say "aggs over the fused pool, hits over the page" without two requests. The hybrid path issues both, in parallel (§2.2.5).
 
 **Escape hatch if what-if counts ever become a requirement:** issue a separate sidecar `buildAggregationsOnly()` request per facet (or one bundled with a top-level `filters` aggregation), each with that facet excluded from the filter list. The main hits query stays clean; the aggregation path pays the extra round-trip only when the UI needs the hint.
 
@@ -1045,7 +1085,7 @@ For now the implementation ships with the page-scoped aggregations and a TODO in
 | Fusion strategy (hybrid path) | n/a | **app-side RRF over parallel leg queries** (ES `rrf` retriever is ENTERPRISE-gated) |
 | Structural filters | `bool.filter` | **`bool.filter` + `knn.filter`** |
 | User-selected facet filters | `post_filter` | **`bool.filter` + `knn.filter`** (no `post_filter`) |
-| Facet count semantics | what-if (filter-out-self) | **remaining (post-narrow)** — see §2.2.6 for hybrid-path scope caveat |
+| Facet count semantics | what-if (filter-out-self) | **remaining (post-narrow)** — uniform across all three paths |
 | Post-filter cliff under kNN | n/a | **eliminated** |
 | Search type | `dfs_query_then_fetch` | **`query_then_fetch`** (no DFS, see §2.2.3) |
 | Sort handling | top-level `sort` slot | **`sort` on lexical-only; two-phase split on vector-only / hybrid** (§2.2.4) |
