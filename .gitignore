@@ -32,3 +32,5 @@ tests/fixtures/mongo_sample/sample_10k.json
 # HNSW benchmark artifacts — large generated parquet/npy + per-run bench JSON.
 # Rebuild via scripts/build_hnsw_eval_dataset.py + scripts/build_full_corpus_oracle.py.
 reports/hnsw_eval*/
+
+.obsidian/
