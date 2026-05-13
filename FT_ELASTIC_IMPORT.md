@@ -830,10 +830,10 @@ Direct port of `search-api/hybrid.py`'s `HYBRID_CLASSIFIED` mode. **Don't always
 ```mermaid
 flowchart TD
     Q["Query q"] --> WS{"Contains<br/>whitespace?"}
-    WS -- yes --> VEC["<b>Vector-only</b><br/>retriever: knn<br/>(§2.2.2)"]
+    WS -- yes --> VEC["<b>Vector-only</b><br/>top-level knn block<br/>(§2.2.2)"]
     WS -- no --> SI{"is_strict_identifier(q)?<br/>len 4–40 · 4 regex shapes<br/>· not in GENERIC_TOKENS"}
-    SI -- yes --> LEX["<b>Lexical-only</b><br/>pruned offer bool<br/>size=500 (§2.2.1)"]
-    SI -- no --> HYB["<b>Hybrid</b><br/>retriever: rrf<br/>(§2.2.5)"]
+    SI -- yes --> LEX["<b>Lexical-only</b><br/>pruned offer bool<br/>(§2.2.1)"]
+    SI -- no --> HYB["<b>Hybrid</b><br/>app-side RRF<br/>(§2.2.5)"]
     LEX --> R{"hits empty?"}
     R -- yes --> EMPTY["Return empty<br/>(no fallback)"]
     R -- no --> HITS(["Return hits"])
@@ -850,9 +850,9 @@ The three paths:
 
 | Query shape | Path | Why |
 |---|---|---|
-| Multi-word (whitespace present) | **vector-only** (`knn` retriever, no RRF) | Identifier multi-fields on `offers.articleNumber.*` / `offers.manufacturerArticleNumber.*` / `offers.ean.raw` rarely fire on multi-token natural-language phrases. Including them via RRF contributes rank noise; the embedding already covers free-text. |
-| Single token, classifies as **strict identifier** | **lexical-only** (pruned offer bool, no RRF) at deep `size`; empty result ⇒ fall back to hybrid | Dense embeddings under-weight digit strings and over-cluster on lexical neighborhoods. Exact identifier matching at a large candidate window is the right primitive for queries that look like MPNs, EANs, or opaque SKUs. |
-| Single token, not a strict identifier | **hybrid** (RRF over lexical + vector — §2.2.5) | Ambiguous: could be a brand, a generic product term, a category. Fuse both signals; let RRF arbitrate. |
+| Multi-word (whitespace present) | **vector-only** (top-level `knn` block, no fusion) | Identifier multi-fields on `offers.articleNumber.*` / `offers.manufacturerArticleNumber.*` / `offers.ean.raw` rarely fire on multi-token natural-language phrases. Including them via RRF contributes rank noise; the embedding already covers free-text. |
+| Single token, classifies as **strict identifier** | **lexical-only** (pruned offer bool, no fusion); empty result ⇒ return empty (no fallback) | Dense embeddings under-weight digit strings and over-cluster on lexical neighborhoods. Exact identifier matching is the right primitive for queries that look like MPNs, EANs, or opaque SKUs. |
+| Single token, not a strict identifier | **hybrid** (app-side RRF over a lexical-leg call + a kNN-leg call — §2.2.5) | Ambiguous: could be a brand, a generic product term, a category. Fuse both signals; let RRF arbitrate. |
 
 **Strict-identifier classifier** — port `is_strict_identifier(q)` verbatim from `search-api/hybrid.py`:
 
@@ -870,9 +870,9 @@ The three paths:
 
 **Three request shapes — the gating is a branch in the query builder, not a runtime parameter:**
 
-- **Lexical-only:** plain `query: { bool: ... }` containing §2.2.1's pruned offer bool plus the customer-artno sub-query, with `bool.filter` carrying the full filter set. No `retriever` block. `sort` / `from` / `size` / `aggs` attach directly to the request. Use a deeper `size` (e.g. 500, mirroring `strict_codes_limit`) since the strict path is a deep recall pass over a narrow candidate set.
-- **Vector-only:** `retriever: { knn: ... }` per §2.2.2, with `knn.filter` carrying the full filter set. Retriever-based — see §2.2.4 for sort handling.
-- **Hybrid:** `retriever: { rrf: ... }` wrapping both (§2.2.5). Retriever-based — see §2.2.4 for sort handling.
+- **Lexical-only:** plain `query: { bool: ... }` containing §2.2.1's pruned offer bool plus the customer-artno sub-query, with `bool.filter` carrying the full filter set. No retriever block, no kNN. `sort` / `from` / `size` / `aggs` attach directly to the request — pageable is honored verbatim, no two-phase split needed.
+- **Vector-only:** top-level legacy `knn` block per §2.2.2, with `knn.filter` carrying the full filter set. No retriever wrapper (so we stay on basic license). Non-relevance sort triggers the two-phase split — see §2.2.4.
+- **Hybrid:** application-side RRF over a parallel pair of leg queries — see §2.2.5. The legs are retriever-equivalent for sort-handling purposes — non-relevance sort triggers the two-phase split per §2.2.4.
 
 **Search type — drop DFS for all three paths.** Legacy uses `dfs_query_then_fetch` (§1.3.6) to stabilize BM25 IDF across shards. TEST_PROFILE_18 uses plain `query_then_fetch` everywhere:
 
@@ -882,22 +882,28 @@ The three paths:
 
 Re-evaluate if relevance evaluations on the hybrid path show measurable rank drift from shard-local IDF; until then, the savings (one cross-shard round-trip per query) are pocketed.
 
-**Where this lives in code.** In the query-builder layer, before the request is composed. Pseudocode:
+**Where this lives in code.** `Test18SearchQueryExecutor` dispatches on `Test18QueryClassifier.classify(queryString)`:
 
 ```
-if q has whitespace:
-    return buildVectorOnlyRequest(q, filters)        # §2.2.2
-elif isStrictIdentifier(q):
-    return buildLexicalOnlyRequest(q, filters, size=500)   # §2.2.1
-else:
-    return buildHybridRequest(q, filters)             # §2.2.5
+mode = classifier.classify(q)
+filters = filterConsolidator.consolidate(params)
+
+switch (mode):
+    VECTOR_ONLY  -> retrieverPath(vectorOnlyExecutor, params, filters)    # §2.2.2
+    LEXICAL_ONLY -> lexicalExecutor.execute(params, filters)              # §2.2.1
+    HYBRID_RRF   -> retrieverPath(hybridExecutor, params, filters)        # §2.2.5
+
+retrieverPath(executor, params, filters):
+    if pageable.sort is non-relevance:
+        return sortPhaseSplitter.executeWithSort(params, filters, executor)   # §2.2.4
+    return executor.execute(params, filters)
 ```
 
 ### 2.2.4 Sort on retriever-based paths
 
-ES 9.x doesn't allow a top-level `sort` clause on a request that uses a retriever. For the lexical-only path (§2.2.3) that's irrelevant — it's a plain `bool` query — but for vector-only and hybrid, requests like `sort=name` or `sort=price` need a two-phase split:
+ES 9.x doesn't let a top-level `sort` clause coexist with the legacy `knn` block, and the app-side RRF path produces an order that ES wouldn't know about anyway. For the lexical-only path (§2.2.3) the two-phase split is irrelevant — it's a plain `bool` query that supports `sort` natively — but vector-only and hybrid need it:
 
-1. **Phase 1:** the retriever query with no `sort`. Returns the top-N article IDs in retriever order (cosine distance for kNN, RRF rank for hybrid). Use a deep `size` (e.g. 1000) so phase 2 has enough headroom to sort over.
+1. **Phase 1:** the path-specific executor with no `sort`, called at depth 1000 (deeper than `pageable.size`). For vector-only this is the `knn` block; for hybrid it's the full §2.2.5 three-call pipeline (legs + page fetch). Returns the top-1000 article IDs in retriever-equivalent order (cosine for vector-only, fused RRF rank for hybrid). Phase 1's source / aggregations are discarded.
 2. **Phase 2:** plain `bool` query with `filter: { ids: { values: [<phase 1 IDs>] } }` plus the same filter set as phase 1 (cheap to re-apply, protects against between-phase index changes). User's `sort` slot is populated here, and aggregations run on the phase-2 hits.
 
 ```mermaid
@@ -924,94 +930,77 @@ sequenceDiagram
     end
 ```
 
-Two `_search` round-trips per sorted query, but only when the user actually selects a non-relevance sort. Relevance-sorted queries (the default and majority case) skip phase 2 — the retriever's order is what the user wants. The phase 2 cost is roughly one normal lexical query — no kNN work, no embedding involved.
+Two `_search` round-trips per sorted vector-only query (phase 1 + phase 2); **four** per sorted hybrid query (phase 1 = legs ∥ + hybrid's own phase 2, then sort-splitter phase 2). All only when the user selects a non-relevance sort. Relevance-sorted queries — the default and majority case — skip the sort splitter entirely.
 
 The phase-2 lexical request inherits TEST_PROFILE_18's no-DFS choice (§2.2.3) — `search_type=query_then_fetch`, no extra cross-shard round-trip for IDF gathering.
 
-### 2.2.5 Fusion — RRF retriever (hybrid path only)
+**Open optimization:** on a sorted hybrid query, the hybrid executor's own page-fetch round trip is wasted (its source + aggs get discarded by the sort splitter). A `skipSourceAndAggs` mode on the hybrid executor would drop the cost back to three round trips. Deferred — the sort+hybrid combination is the rarest of rare cases.
 
-Used by the hybrid path of §2.2.3 — single-token queries that aren't strict identifiers. The lexical bool and the kNN retriever are combined via ES's `rrf` retriever (Reciprocal Rank Fusion). The lexical side enters as a `standard` retriever, the vector side as a `knn` retriever:
+### 2.2.5 Fusion — application-side RRF (hybrid path only)
 
-```json
-{
-  "retriever": {
-    "rrf": {
-      "retrievers": [
-        {
-          "standard": {
-            "query": {
-              "bool": {
-                "must": [
-                  {
-                    "bool": {
-                      "should": [
-                        {
-                          "nested": {
-                            "path": "offers",
-                            "score_mode": "max",
-                            "query": <pruned offer bool from §2.2.1>
-                          }
-                        },
-                        <customerArticleNumberQuery() — unchanged from §1.2.2>
-                      ]
-                    }
-                  }
-                ],
-                "filter": [ <full filter set — identical to the knn.filter list below> ]
-              }
-            }
-          }
-        },
-        {
-          "knn": {
-            "field": "embeddings.vector",
-            "query_vector": [<128 floats from TEI>],
-            "k": 5000,
-            "num_candidates": 5000,
-            "filter": [ <full filter set — identical to the bool.filter list above> ]
-          }
-        }
-      ],
-      "rank_window_size": 5000,
-      "rank_constant": 60
-    }
-  }
-}
-```
+Used by the hybrid path of §2.2.3 — single-token queries that aren't strict identifiers. The lexical bool and the kNN retriever are fused via Reciprocal Rank Fusion **implemented in application code, not in Elasticsearch**.
+
+**Why app-side instead of `retriever: { rrf: ... }`.** Despite Elastic's [subscriptions matrix](https://www.elastic.co/subscriptions) listing "Reciprocal Rank Fusion (RRF) for hybrid search" with no tier restriction, the actual runtime check in `elastic/elasticsearch` (branch 9.3, file `x-pack/plugin/rank-rrf/.../RRFRankPlugin.java`) gates the `rrf` retriever at **`License.OperationMode.ENTERPRISE`** — the top tier. A basic-license cluster issuing the request gets `current license is non-compliant for [Reciprocal Rank Fusion (RRF)]`. The docs and the code disagree; until Elastic reconciles them, the safe assumption is the code. We don't want to gate TEST_PROFILE_18 on an ENTERPRISE subscription, so RRF lives in the application.
+
+**Flow — three ES round trips.**
 
 ```mermaid
-flowchart LR
-    STD["<b>standard</b> retriever<br/>pruned offer bool (§2.2.1)<br/>+ customerArticleNumberQuery (§1.2.2)"]
-    KNN["<b>knn</b> retriever<br/>field: embeddings.vector<br/>k = 5000 · num_candidates = 5000<br/>query_vector: [128 floats from TEI]"]
+sequenceDiagram
+    autonumber
+    participant Q as QueryBuilder
+    participant ES as Elasticsearch
 
-    RRF["<b>retriever: rrf</b><br/>rank_constant = 60"]
+    Note over Q,ES: Phase 1 — legs run in parallel on the common ForkJoinPool
+    par
+        Q->>ES: lexical bool · bool.filter=<filters><br/>size=5000 · _source: false
+        ES-->>Q: up to 5000 ids in lexical-relevance order
+    and
+        Q->>ES: knn block · knn.filter=<filters><br/>num_candidates=5000 · _source: false
+        ES-->>Q: up to 5000 ids in cosine order
+    end
 
-    FILTER[("Shared filter set<br/>structural pre-filters<br/>+ user-selected facets (§2.2.6)")]
-
-    STD -- "rank_window_size = 5000" --> RRF
-    KNN -- "rank_window_size = 5000" --> RRF
-
-    FILTER -.->|"bool.filter"| STD
-    FILTER -.->|"knn.filter"| KNN
-
-    classDef rrf fill:#eef,stroke:#557,stroke-width:2px
-    classDef leg fill:#dfe,stroke:#575
-    classDef shared fill:#ffe,stroke:#aa7
-    class RRF rrf
-    class STD,KNN leg
-    class FILTER shared
+    Note over Q: Java: fuse ranks (score = Σ 1/(60+rank))<br/>tiebreaker on docId · slice to user's page
+    Note over Q,ES: Phase 2 — page fetch + aggregations
+    Q->>ES: bool · filter: ids=<pageIds> + <filters><br/>aggs · _source: true · size=pageSize
+    ES-->>Q: page hits (arbitrary order) + aggs
+    Note over Q: Java: reorder hits by fused rank
 ```
 
-Notes:
+**Per-leg request shape (both fired concurrently):**
 
-- `rank_window_size` should match the kNN `k` so both retrievers contribute their full result sets to the fusion. 5000 is the candidate budget validated in §2.1.4 (sweep 3).
-- `rank_constant: 60` is the standard RRF default; tune only with offline evals.
-- **One single filter set is applied to both retrievers** — the standard retriever's `bool.filter` and the kNN's `filter`. The list includes structural pre-filters *and* user-selected facets; there is **no `post_filter`** on the request. Build the list once and pass the same reference to both branches. If they ever diverge, lexical hits can include docs the kNN excludes (or vice versa) and the fused ranking gets noisy. Rationale for putting facets in the filter slot (not `post_filter`) is in §2.2.6.
-- The synthetic-keywords sub-query is omitted in both branches. Synthetic keywords were the previous workaround for missing semantic recall — the embedding replaces them.
+- **Lexical leg** — a `bool` query: `must` = the pruned offer + customer-artno bool from §2.2.1 (wrapped in `nested(offers, score_mode=max)` plus the unchanged `customerArticleNumberQuery()`), `filter` = the shared filter list. `size = 5000`, `_source: false`, `track_total_hits: false`. Returns up to 5000 ids in lexical-relevance order.
+
+- **kNN leg** — the legacy top-level `knn` block (free in basic), no retriever wrapper: `field: embeddings.vector`, `query_vector: [128 floats from TEI]`, `num_candidates: 5000`, `filter` = the shared filter list. `size = 5000`, `_source: false`, `track_total_hits: false`. Returns up to 5000 ids in cosine order.
+
+**Fusion (Java):**
+
+```
+score(id) = Σ_legs  1 / (RANK_CONSTANT + rank_in_leg_1based)
+RANK_CONSTANT = 60     # same default as the ES retriever
+tiebreaker     = docId asc   # stable under pagination
+```
+
+A doc that appears in both legs contributes both terms (e.g. rank 1 in both: `2 / 61 ≈ 0.0328`); a doc only in one leg contributes one term (`1 / 61 ≈ 0.0164`). The candidate pool is the **union** of both legs after dedupe — typically a few thousand docs. Total hits returned to the caller is `union.size()`.
+
+**Phase 2 — page fetch + aggregations:**
+
+After fusion, the user's page is `fused.subList(from, from + size)`. The third ES call is a plain bool whose `filter` list is `ids: <pageIds>` followed by the same filter set passed to the legs. Aggregations attach to this request; `_source: true` so the caller gets `SearchArticleReference` populated. ES returns the page docs in arbitrary order; the executor reorders them client-side by fused rank and stamps each `SearchHit.score` with the doc's fused score.
+
+**Notes:**
+
+- **Same filter set on every leg + phase 2.** Build once, pass three times. Diverging would let lexical hits or kNN hits drift out of the filtered space and the fused ranking gets noisy. Re-applying in phase 2 is cheap and protects against between-phase index changes.
+- **`rank_window_size`-equivalent = 5000** for each leg. Validated in §2.1.4 sweep 3. Below 5000, the kNN leg leaves measurable recall on the table under tight filter regimes (notably price ranges).
+- **Synthetic-keywords sub-query is omitted on the lexical leg** — same as §2.2.1. The embedding replaces it.
+- **Latency profile.** Two sequential round trips in time: `max(lexical, knn)` then phase 2. On prod-sized indices, ~50ms parallel-pair + ~20ms phase 2 ≈ 70ms p50 per hybrid query. ~30% better than sequential legs.
+- **Trade-off vs. native rrf retriever:** +1 round trip per hybrid query, +5000 ids of network traffic per leg (each leg fetches `_source: false`, so just the id list — ~50–100 KB). For aggregation scope trade-off see §2.2.6.
+
+**Why the legs run in parallel but phase 2 doesn't:** phase 2 needs both legs' results to compute the fused id list, so it has a data dependency. The legs have no dependency on each other (the kNN leg needs the query vector, but that's computed sync before either leg fires).
+
+**Where this lives:** `Test18HybridExecutor.java` in `article/search/query/.../infrastructure/search/test18/`. Fusion logic is `static List<FusedHit> rrfFuse(List<String>, List<String>)` — package-private for direct unit testing.
 
 ### 2.2.6 Filtering and aggregation policy
 
-TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — structural pre-filters and user-selected facet filters alike — is applied inside both retrievers' filter slots (`knn.filter` on the vector side, `bool.filter` on the lexical side). This is a deliberate divergence from the legacy design described in §1.3.1, and it changes facet count semantics. The reasoning:
+TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — structural pre-filters and user-selected facet filters alike — is applied inside the request's `bool.filter` (lexical-only path, lexical leg of hybrid, every phase-2 page fetch) or `knn.filter` (vector-only path, kNN leg of hybrid). The exact same filter list is passed to every call within a single search. This is a deliberate divergence from the legacy design described in §1.3.1, and it changes facet count semantics. The reasoning:
 
 **The post-filter cliff is unacceptable under kNN.** With `num_candidates: 5000` and facets in `post_filter`, the kNN returns up to 5000 hits and `post_filter` then trims further. A narrow facet selection (e.g. a manufacturer with 50 articles) can collapse a page to single-digit hits while the retriever still thinks it ranked 5000. Pagination becomes unstable: the same query with the same facets can return different totals depending on how the candidate window happens to overlap the facet. For an embedding-driven search this is a frequent failure mode, not an edge case.
 
@@ -1021,9 +1010,25 @@ TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — struc
 
 **Code consequences:**
 
-- One filter list, constructed once, fed to both retrievers. The new builder collects every `SearchPreFilterProvider.buildPreFilterQuery()` (legacy `addPreFilters()` source) and every `SearchFilterProvider.buildPostFilterQuery()` (legacy `postFilters()` source) into a single flat clause list — no split between pre/post slots, just one filter set.
-- The `EnumMap<SearchFilterKind, Query> appliedFilters` plumbing and the per-facet `filter`-aggregation wrappers (the filter-out-self pattern) are not needed. Aggregations run directly over the retriever's hits.
+- One filter list, constructed once, fed to every leg / phase. `Test18FilterConsolidator` collects every `SearchFilterProvider.buildPreFilterQuery()` and `buildPostFilterQuery()` plus the catalog-view pre-filters into a single flat clause list — no split between pre/post slots, just one filter set.
+- The `EnumMap<SearchFilterKind, Query> appliedFilters` plumbing and the per-facet `filter`-aggregation wrappers (the filter-out-self pattern) are not needed. Aggregations run directly over the request's hits.
 - No code path calls `queryBuilder.withFilter(...)` for TEST_PROFILE_18 — that slot stays empty.
+
+**Aggregation scope by path:**
+
+| Path | Aggregations computed over |
+|---|---|
+| Lexical-only | Full matched set (bounded by ES's internal limits) — matches §2.2.6 intent verbatim. |
+| Vector-only | Top `num_candidates = 5000` hits from the kNN retriever — matches §2.2.6 intent (the kNN candidate window IS the result set). |
+| Hybrid (app-side RRF) | The user's page only — currently a **divergence from §2.2.6 intent**. See note below. |
+
+**Hybrid aggregation scope — current limitation.** The phase-2 ES call uses `filter: { ids: <pageIds> }` to scope hits to the user's page, and aggregations attach to the same request. So `facet.bucket.count` for a hybrid query reflects "how many of THIS PAGE are X", not "how many of the fused candidate pool are X". For page sizes around 10 this is a meaningful regression — bucket counts are tiny and uninformative.
+
+**Two paths to fix it (deferred):**
+- *Option A — 4-round-trip hybrid:* split phase 2 into a parallel pair — an aggs-only call with `filter: { ids: <allFusedIds> }`, size=0, and a page-fetch call with `filter: { ids: <pageIds> }`, full source. Adds one round trip in parallel, so the wall-clock cost is ~max(aggs, pageFetch). Correct semantics. Likely the right move once UI surfaces hybrid-path facets.
+- *Option B — push aggs onto the legs:* attach the same aggregation block to both leg requests, merge the bucket counts client-side. Cheaper (no extra round trip) but harder to get right with per-facet de-duplication.
+
+For now the implementation ships with the page-scoped aggregations and a TODO in `Test18HybridExecutor.fetchPageWithAggregations(...)`.
 
 **Escape hatch if what-if counts ever become a requirement:** issue a separate sidecar `buildAggregationsOnly()` request per facet (or one bundled with a top-level `filters` aggregation), each with that facet excluded from the filter list. The main hits query stays clean; the aggregation path pays the extra round-trip only when the UI needs the hint.
 
@@ -1035,10 +1040,14 @@ TEST_PROFILE_18 **does not use ES's `post_filter` slot**. Every filter — struc
 | Identifier matches (article#, manuf#, EAN) | yes | **yes** |
 | Customer article number sub-query | yes | **yes** |
 | Synthetic keywords sub-query | yes | **no** |
-| kNN on `embeddings.vector` | no | **yes** |
-| Fusion strategy | single bool | **RRF (standard + knn)** |
+| kNN on `embeddings.vector` | no | **yes** (top-level legacy `knn` block) |
+| Query routing | single mode | **classifier-driven 3-way split** (lexical-only / vector-only / hybrid) |
+| Fusion strategy (hybrid path) | n/a | **app-side RRF over parallel leg queries** (ES `rrf` retriever is ENTERPRISE-gated) |
 | Structural filters | `bool.filter` | **`bool.filter` + `knn.filter`** |
 | User-selected facet filters | `post_filter` | **`bool.filter` + `knn.filter`** (no `post_filter`) |
-| Facet count semantics | what-if (filter-out-self) | **remaining (post-narrow)** |
+| Facet count semantics | what-if (filter-out-self) | **remaining (post-narrow)** — see §2.2.6 for hybrid-path scope caveat |
 | Post-filter cliff under kNN | n/a | **eliminated** |
+| Search type | `dfs_query_then_fetch` | **`query_then_fetch`** (no DFS, see §2.2.3) |
+| Sort handling | top-level `sort` slot | **`sort` on lexical-only; two-phase split on vector-only / hybrid** (§2.2.4) |
+| Required ES license | basic | **basic** (avoids the `rrf` retriever's ENTERPRISE gate) |
 
