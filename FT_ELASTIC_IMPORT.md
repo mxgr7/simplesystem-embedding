@@ -1072,6 +1072,119 @@ The lexical-era `post_filter` trick excludes `brand=Acme` from the aggregation's
 
 **Escape hatch if what-if counts ever become a requirement:** issue a separate sidecar `buildAggregationsOnly()` request per facet (or one bundled with a top-level `filters` aggregation), each with that facet excluded from the filter list. The main hits query stays clean; the aggregation path pays the extra round-trip only when the UI needs the hint.
 
+### 2.2.6.1 Why vector counts are bounded
+
+The "remaining, not what-if" choice in §2.2.6 isn't only about `post_filter` — it follows from a structural trait of kNN that lexical retrieval doesn't share.
+
+**Lexical retrieval can return a true total.** A `bool` query walks the matching postings and `track_total_hits` reports an exact count. `index.max_result_window` only caps hit materialization, not the count itself.
+
+**kNN retrieval cannot.** HNSW's API contract is "return the top-`num_candidates` nearest" — there is no "everyone closer than X" mode in the production query path. So `total.value` is capped at `num_candidates` (5,000 in our config), regardless of how many docs in the corpus would actually satisfy the query, and facet aggregations scoped to the same candidate window inherit the cap. A query that conceptually matches 50,000 articles reports `5,000`. The cap is invisible at the API surface — ES does not signal "this is a truncated count" vs. "this is the real count".
+
+**The escape valve is filter selectivity.** When the filter list narrows the passing population below `num_candidates`, ES short-circuits to a brute-force scan on the survivors (§2.1.4 sweep 3 line 620). Total hits and facet counts become exact again because the candidate window now covers the entire matching set. Whether a query lands in "bounded" or "exact" regime is a property of the filter, not the query.
+
+```mermaid
+%%{init: {'flowchart': {'subGraphTitleMargin': {'top': 20, 'bottom': 20}, 'padding': 25, 'nodeSpacing': 30, 'rankSpacing': 40}}}%%
+flowchart TB
+    Q["Query for which <b>50,000 articles</b> would semantically match<br/><i>kNN has no cosine threshold — no <b>near enough</b> cutoff</i>"]
+
+    Q --> L
+    Q --> VB
+    Q --> VN
+
+    subgraph L["lexical-only — count = lexical matches"]
+        direction TB
+        LA["bool walks every matching posting"]
+        LB["<code>total.value = 50,000</code> ✓<br/>= docs whose text matched the query<br/>facet sums = true totals"]
+        LA --> LB
+    end
+
+    subgraph VB["vector + broad filter — count = candidate cap"]
+        direction TB
+        VBA["≈30,000 docs pass non-semantic filters<br/>HNSW returns top-<code>num_candidates</code> = 5,000 by cosine"]
+        VBB["<code>total.value = 5,000</code><br/>= <b>num_candidates</b>, not relevance<br/>true total (30,000) invisible<br/>facet aggs scoped to the 5,000 window"]
+        VBA --> VBB
+    end
+
+    subgraph VN["vector + narrow filter — count = filter survivors"]
+        direction TB
+        VNA["≈200 docs pass non-semantic filters<br/><i>passing set &lt; num_candidates</i><br/>ES short-circuits to brute force"]
+        VNB["<code>total.value = 200</code><br/>= survivors of non-semantic filters,<br/><b>not 200 relevant matches</b><br/>200th-best vector may be unrelated"]
+        VNA --> VNB
+    end
+
+    classDef q fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000
+    classDef exact fill:#e8f5e9,stroke:#2e7d32,color:#000
+    classDef capped fill:#ffebee,stroke:#c62828,color:#000
+    classDef misleading fill:#fff8e1,stroke:#f57c00,color:#000
+    class Q q
+    class LA,LB exact
+    class VBA,VBB capped
+    class VNA,VNB misleading
+```
+
+**Even "exact" doesn't mean "relevant".** kNN has no cosine threshold in the production query path — it returns the top-N nearest, where N is either `num_candidates` (broad-filter regime) or the full survivor count (short-circuit regime). There is no "near enough" cutoff. The 200 hits in the narrow-filter case are *every* doc that passed the non-semantic filters, ordered by cosine — including the 200th-best, whose vector similarity to the query may be poor. So under kNN, `total.value` never counts "semantic matches": it counts either how many candidates the retriever was asked to consider (the cap, broad regime) or how many docs passed the user's non-semantic filters (the survivor set, narrow regime). Filter selectivity and the candidate bound determine the number — semantic relevance does not.
+
+**Implication for facet semantics.** Even if we wanted what-if counts under kNN, the aggregation input is itself bounded or filter-shaped, never a "true population of relevant matches". "3 of 5,000 hits are Bosch" can't be honestly extrapolated, and neither can "0 of 200 Acme-survivors are Bosch". Remaining-count semantics is the only count whose denominator the user can reason about. The §2.2.7 aggregation-scope table records the same bound from the implementation angle: vector-only aggs span 5,000 hits, hybrid aggs span the fused pool — both are the widest honest scope available.
+
+### 2.2.6.2 Partial fix — reranker + calibrated threshold
+
+The shortcoming in §2.2.6.1 has a known mitigation: insert a second-stage reranker that emits calibrated match probabilities and cut off below a threshold τ. This gives kNN what it structurally lacks — a *semantic* "near enough" criterion — and recovers meaningful counts for the typical query envelope. It does **not** remove the upstream candidate bound; it relocates it.
+
+**Shape of the fix.** HNSW still returns top-`num_candidates = 5,000` by cosine. On top of that:
+
+1. **Cross-encoder reranker** scores `(query, doc)` pairs over the top-`K' ≤ num_candidates` HNSW hits. Cross-encoders attend over query and document jointly; an order of magnitude more accurate than the bi-encoder embedding, at the cost of being per-pair instead of per-doc.
+2. **Calibrated threshold τ** — Platt or isotonic, trained on labeled `(query, doc, relevant?)` data. A doc is kept only when `P(relevant | q, d) > τ`.
+
+The reranker-passing set is the result set the user sees. `total.value` then counts *semantically relevant matches*, not pool size; facet aggregations inherit the same scope.
+
+```mermaid
+%%{init: {'flowchart': {'subGraphTitleMargin': {'top': 20, 'bottom': 20}, 'padding': 25, 'nodeSpacing': 30, 'rankSpacing': 40}}}%%
+flowchart TB
+
+    subgraph A["typical query — true relevant fits in rerank pool"]
+        direction TB
+        QA["≈30,000 docs pass non-semantic filters<br/>≈12 are semantically relevant"]
+        QA --> HA["HNSW: top-5,000 by cosine"]
+        HA --> RA["Cross-encoder scores top-<code>K'</code> = 500"]
+        RA --> TA["Keep <code>P(relevant | q, d) > τ</code>"]
+        TA --> OA["<code>total.value = 12</code> ✓<br/>= semantically relevant matches<br/>facet aggs span the 12 relevant docs"]
+    end
+
+    subgraph B["pathological query — bound migrates to K'"]
+        direction TB
+        QB["≈30,000 docs pass non-semantic filters<br/>≈3,000 are semantically relevant<br/><i>(broad / generic query intent)</i>"]
+        QB --> HB["HNSW: top-5,000 by cosine"]
+        HB --> RB["Cross-encoder scores top-<code>K'</code> = 500<br/><i>only 500 of 3,000 relevant docs visible</i>"]
+        RB --> TB["Keep <code>P(relevant | q, d) > τ</code>"]
+        TB --> OB["<code>total.value ≤ 500</code><br/>= rerank pool, not true relevant<br/>cap relocated from 5,000 → K' = 500"]
+    end
+
+    classDef good fill:#e8f5e9,stroke:#2e7d32,color:#000
+    classDef caveat fill:#fff8e1,stroke:#f57c00,color:#000
+    class QA,HA,RA,TA,OA good
+    class QB,HB,RB,TB,OB caveat
+```
+
+**What it fixes:**
+
+- `total.value` gains meaning. "12 results" is a real claim about relevance, not a pool size.
+- Facet counts become interpretable. "5 Acme of 12 relevant" vs. today's "427 Acme of 5,000 candidates".
+- Pagination stabilizes. The rerank-pass set is what you paginate over — no more post-filter cliff (§2.2.6).
+- The filter-selectivity dependency weakens. Today's exact-count regime requires the non-semantic filter to narrow the passing set below `num_candidates` (§2.2.6.1). With a reranker, the requirement shifts to "true semantically relevant population fits inside `K'`" — typically true for e-commerce queries (relevant pop ~hundreds, not tens of thousands).
+
+**What it doesn't fix:**
+
+- **The HNSW cap is still upstream.** The reranker only sees what HNSW returned. If true relevant > `num_candidates`, the missing docs stay invisible — exactly as today.
+- **`K'` is a new, tighter cap.** Cross-encoders are too slow at `K' = 5,000` (latency budget: 5–20 ms per pair → 25–100 s per query). Practical `K' ≈ 200–500`. So the cap migrates from 5,000 to ~500 — better because the survivors are semantically vetted, still bounded.
+- **Latency.** ~50–200 ms added per query depending on `K'` and model size. Roughly doubles kNN-only p50.
+- **Calibration drift.** τ is trained on a snapshot of (query mix, corpus, embedding model, reranker). All four drift. Recurring re-calibration work.
+- **Probability calibration is genuinely hard.** Cross-encoders rank well but calibrate poorly out of the box; Platt/isotonic recovers calibration on a labeled set but doesn't generalize uniformly across query types (short identifier-like queries vs. long natural-language often need stratified τ).
+- **Hybrid path needs a fresh decision.** Rerank-after-RRF is conceptually clean, but the §2.2.5 phase 2b aggregation scope (rerank-pass set vs. full fused pool) is a new design question.
+
+**Engineering footprint.** Reranker model (off-the-shelf cross-encoder like `BAAI/bge-reranker-v2-m3` or `cross-encoder/ms-marco-MiniLM-L-*`, optionally fine-tuned on clickstream relevance signal), inference serving (TEI has reranker endpoints), a labeled-set + calibration pipeline with drift monitoring, query-path integration (ES `text_similarity_reranker` retriever in 8.14+ with ML inference, or app-side rerank between phases), and aggregation re-scoping. Non-trivial; not a sprint.
+
+**Status.** Not in scope for TEST_PROFILE_18. Recorded here because §2.2.6's remaining-count choice is the honest default *given the current retrieval stack* — once a calibrated relevance signal exists, the count-semantics question is worth revisiting (a real "N relevant matches found" total becomes meaningful alongside the page hits).
+
 ### 2.2.7 Wiring summary vs. STANDARD
 
 | Aspect | STANDARD | TEST_PROFILE_18 |
