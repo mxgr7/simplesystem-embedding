@@ -22,7 +22,7 @@ Speedups (vs the per-sample build_hnsw_eval_dataset.py):
   - Parallel Redis MGET across 8 worker threads.
   - Single FAISS IndexFlatIP search for all queries (auto-chunks internally).
 
-Output artifacts to `--out-dir` (default `reports/hnsw_eval_full/`):
+Output artifacts to `--out-dir` (default `/data/datasets/hnsw_eval_full/`):
   manifest.json                  — config + corpus stats
   corpus_attrs.parquet           — (article_id, input_hash) per corpus row, 12M rows
   corpus_vectors.npy             — float32[N_corpus, 128], ~6 GB (kept for re-runs)
@@ -55,7 +55,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from indexer.projection import HASH_VERSION  # noqa: E402
 
 DEFAULT_QUERIES_DIR = REPO_ROOT / "reports" / "hnsw_eval"
-DEFAULT_OUT_DIR = REPO_ROOT / "reports" / "hnsw_eval_full"
+# Big regeneratable caches go to /data so / doesn't fill up.
+DEFAULT_OUT_DIR = Path("/data/datasets/hnsw_eval_full")
 
 ES_URL = "http://localhost:9200"
 ES_INDEX = "local-article-index-v2"

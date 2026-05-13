@@ -4,7 +4,7 @@ Differs from scripts/bench_hnsw*.py (which bulk-load a small flat test index):
   - Queries the REAL prod-shape ES index (32 shards × ~375k articles per shard,
     nested embeddings.vector, int8_hnsw m=16 efc=100 on v2).
   - Recall is measured against the **full-corpus oracle** (12M vectors,
-    brute-force article-level top-100) at reports/hnsw_eval_full/.
+    brute-force article-level top-100) at /data/datasets/hnsw_eval_full/.
   - 8 filter regimes mirror the sweep 3 production-realistic envelope.
   - Configurable query --concurrency.
 
@@ -38,7 +38,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 DEFAULT_QUERIES_DIR = REPO_ROOT / "reports" / "hnsw_eval"
-DEFAULT_ORACLE_DIR = REPO_ROOT / "reports" / "hnsw_eval_full"
+# Big regeneratable caches (corpus vectors, attrs, GT, manifest) live on the
+# /data NVMe to keep / from filling up. Small bench JSONs stay in reports/.
+DEFAULT_DATASET_DIR = Path("/data/datasets/hnsw_eval_full")
+DEFAULT_REPORT_DIR = REPO_ROOT / "reports" / "hnsw_eval_full"
 
 ES_URL = "http://localhost:9200"
 ES_INDEX = "local-article-index-v2"
@@ -583,7 +586,20 @@ def run_cell(
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--queries-dir", type=Path, default=DEFAULT_QUERIES_DIR)
-    p.add_argument("--oracle-dir", type=Path, default=DEFAULT_ORACLE_DIR)
+    p.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=DEFAULT_DATASET_DIR,
+        help="Where the big regeneratable caches live (corpus_vectors.npy, "
+        "corpus_attrs.parquet, article_filter_attrs.parquet, manifest.json, "
+        "filtered_gt_top*.parquet).",
+    )
+    p.add_argument(
+        "--report-dir",
+        type=Path,
+        default=DEFAULT_REPORT_DIR,
+        help="Where bench JSON output is written (small artifact).",
+    )
     p.add_argument("--es-url", default=ES_URL)
     p.add_argument("--es-index", default=ES_INDEX)
     p.add_argument("--k", type=int, default=10)
@@ -645,15 +661,15 @@ def main() -> None:
     qvecs = np.load(args.queries_dir / "query_vectors.npy").astype(np.float32)
     n_q = qvecs.shape[0]
     print(f"      {n_q} query vectors loaded (dim={qvecs.shape[1]})")
-    corpus_attrs = pq.read_table(args.oracle_dir / "corpus_attrs.parquet")
+    corpus_attrs = pq.read_table(args.dataset_dir / "corpus_attrs.parquet")
     row_article_ids = np.array(corpus_attrs["article_id"].to_pylist())
     n_corpus = len(row_article_ids)
     print(f"      {n_corpus:,} corpus rows from oracle (corpus_attrs.parquet)")
-    oracle_manifest = json.loads((args.oracle_dir / "manifest.json").read_text())
+    oracle_manifest = json.loads((args.dataset_dir / "manifest.json").read_text())
     print(f"      oracle manifest: {oracle_manifest}")
 
     # ---------- phase 1: per-article filter attrs ----------
-    attrs_cache = args.oracle_dir / "article_filter_attrs.parquet"
+    attrs_cache = args.dataset_dir / "article_filter_attrs.parquet"
     print(f"\n[1/4] Per-article filter attrs (cache: {attrs_cache.name}) ...")
     if attrs_cache.exists() and not args.refresh_attrs:
         t0 = time.time()
@@ -682,7 +698,7 @@ def main() -> None:
     masks = compute_masks(row_article_ids, attrs)
     print(f"      masks done in {time.time() - t0:.1f}s")
 
-    gt_cache = args.oracle_dir / f"filtered_gt_top{args.k}.parquet"
+    gt_cache = args.dataset_dir / f"filtered_gt_top{args.k}.parquet"
     if gt_cache.exists() and not args.refresh_gt:
         print(f"      loading cached filtered GT from {gt_cache.name} ...")
         all_gt = load_filtered_gt(gt_cache)
@@ -700,7 +716,7 @@ def main() -> None:
               f"(overfetch={args.gt_overfetch}, chunk={args.gt_chunk}) ...")
         t0 = time.time()
         print(f"      loading corpus_vectors.npy ...")
-        cvecs = np.load(args.oracle_dir / "corpus_vectors.npy")
+        cvecs = np.load(args.dataset_dir / "corpus_vectors.npy")
         print(f"      loaded {cvecs.shape} fp32 ({cvecs.nbytes / 1e9:.2f} GB) "
               f"in {time.time() - t0:.1f}s")
         t0 = time.time()
@@ -825,7 +841,7 @@ def main() -> None:
                 f"elapsed={elapsed:.0f}s  ETA={eta:.0f}s"
             )
 
-    out_path = args.oracle_dir / f"bench_prod_shape_top{args.k}.json"
+    out_path = args.report_dir / f"bench_prod_shape_top{args.k}.json"
     out_path.write_text(
         json.dumps(
             {
