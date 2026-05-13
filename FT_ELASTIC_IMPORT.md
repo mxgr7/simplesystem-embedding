@@ -540,10 +540,27 @@ The mapping recommendations in §2.1.1 and the `num_candidates` budget in §2.2.
 For each config: single-shard ES test index with the desired `index_options` (refresh disabled, replicas 0, async translog), bulk-load all 399k vectors as flat top-level docs (`{idx: int, vector: dense_vector}`), refresh, force-merge to one segment, sweep `num_candidates`, run all 1k queries with `perf_counter` timing, intersect returned `idx` lists with ground truth → recall@10 + p50/p95 latency + store size. Sweep 3 attaches a production-shape `nested(offers)` filter clause to every query and recomputes ground truth per regime as the exact top-k among *passing* corpus vectors.
 
 Scripts:
-- `scripts/build_hnsw_eval_dataset.py` — dataset construction
+- `scripts/build_hnsw_eval_dataset.py` — eval set construction (1k queries + 399k-vector test corpus)
 - `scripts/bench_hnsw.py` — sweep 1, (m, ef_construction) at fixed `int8_hnsw`
 - `scripts/bench_hnsw_precision.py` — sweep 2, precision at fixed (m=16, ef_construction=100)
 - `scripts/bench_hnsw_filtered.py` — sweep 3, filter selectivity × `num_candidates` at fixed fp32 `hnsw`, m=16, ef_construction=100
+- `scripts/build_full_corpus_oracle.py` — full 12M-vector brute-force oracle for sweep 4 (FAISS `IndexFlatIP`)
+- `scripts/bench_hnsw_prod_shape.py` — sweep 4, production-shape kNN against live v2/v3 indices
+- `scripts/bench_profiles_latency.py` — sweep 5, STANDARD vs TP18 head-to-head latency
+- `scripts/render_profiles_latency_table.py` — per-regime comparison tables from sweep 5 JSON
+- `scripts/reindex_v2_to_v3.py` — reindex `local-article-index-v2` (int8) → `local-article-index-v3` (fp32 hnsw) when refreshing the fp32 baseline
+
+**Artifact layout.** Big regeneratable caches (~7 GB total) live on `/data/datasets/hnsw_eval_full/`: `corpus_vectors.npy` (5.8 GB, fp32 [12M, 128]), `corpus_attrs.parquet` (430 MB, row → articleId + inputHash), `article_filter_attrs.parquet` (596 MB, per-article filter attrs cached from a sliced-PIT pull), `filtered_gt_top10.parquet` (per-regime filtered top-10 article ids), `ground_truth_*` (vector-level + article-level top-100), `manifest.json`. Small canonical bench JSONs stay in `reports/hnsw_eval_full/`: `bench_prod_shape_top10.json` (sweep 4), `bench_profiles_latency.json` + `bench_profiles_latency_c4.json` (sweep 5). The 1k-query inputs are in `reports/hnsw_eval/`: `queries.parquet` (text + frequency) + `query_vectors.npy` (TEI embeddings). The 200k-article sweep-1-3 numbers live in `reports/hnsw_eval/bench_recall_at_10*.json`.
+
+**Build sequence to rebuild from scratch.**
+1. `scripts/build_hnsw_eval_dataset.py` — produces `reports/hnsw_eval/queries.parquet` + `query_vectors.npy` + the 200k-article test corpus + ground truth. Requires a running ES with `local-article-index-v2` populated and the Redis TEI vector cache warm.
+2. `scripts/bench_hnsw.py` / `bench_hnsw_precision.py` / `bench_hnsw_filtered.py` — sweeps 1-3 against the test corpus.
+3. `scripts/build_full_corpus_oracle.py` — produces the full 12M-vector oracle artifacts in `/data/datasets/hnsw_eval_full/`. Takes ~hour from Redis (sliced PIT + parallel MGET + FAISS). Run once.
+4. Optional: `scripts/reindex_v2_to_v3.py` to (re)create the fp32 v3 baseline if it doesn't exist.
+5. `scripts/bench_hnsw_prod_shape.py` — sweep 4 against v2 and v3. Auto-builds `article_filter_attrs.parquet` on first run if missing (~5 min PIT pull). Writes the cell-by-cell JSON to `reports/hnsw_eval_full/`.
+6. `scripts/bench_profiles_latency.py` — sweep 5. Reads only the queries (from `reports/hnsw_eval/`) — no dependency on the oracle artifacts. Writes JSON to `reports/hnsw_eval_full/`.
+
+**Concurrency caveat for single-node bench boxes** (also in §2.1.4.5): the local ES is one node × 32 shards. At concurrency ≥ 8, `(c × 32) ≥ 256` in-flight shard kNN ops saturate the search thread pool (default `int(cores * 3/2) + 1`, ~25-30 here) and tail latency balloons. `--concurrency 4` is the right operating point for this hardware; multi-node prod clusters can absorb much higher c.
 
 #### 2.1.4.1 Sweep 1 — graph params × `num_candidates`, fixed `int8_hnsw`
 
