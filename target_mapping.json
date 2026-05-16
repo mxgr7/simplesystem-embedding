@@ -84,6 +84,12 @@
       "enabledCoreArticleMarkerSources": {
         "type": "keyword"
       },
+      "catalogVersionIds": {
+        "type": "keyword"
+      },
+      "priceKeys": {
+        "type": "keyword"
+      },
       "offers": {
         "type": "nested",
         "properties": {
