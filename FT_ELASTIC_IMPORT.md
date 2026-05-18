@@ -836,6 +836,30 @@ Without (1) and (2) the index hits a 2-4 s p50 wall for filtered queries between
 
 The framing for the planning conversation: **HNSW at 150M articles is fine. The nested-filter design is what doesn't scale, and it's a search-architecture decision separate from the embedding pipeline.**
 
+### 2.1.6 Pre-warming and index cutover
+
+§2.1.5 establishes that the HNSW graph must stay page-cache resident at steady state. This subsection covers the *transient* that precedes steady state — and why it is a hard operational gate, not a tuning nicety.
+
+**The cold-start penalty is non-linear and large.** Elasticsearch does not hold the index in JVM heap; Lucene memory-maps the index files and relies on the OS page cache. On a freshly opened index whose vector pages are not yet resident, the first kNN queries fault the HNSW graph + vector data off disk on demand. Measured on a never-queried index (sweep harness, `tools/test18-latency-sweep.sh`): the first hybrid query's kNN phase ran **~196 s**, the second ~3 s, and by the fourth ~0.4 s — converging to the steady-state numbers in §2.1.4/§2.1.5. That is a ~1000× cold/warm spread, far worse than a cold lexical query, because HNSW traversal is *random access* across the whole vector space: at `num_candidates`=1000-5000 over hundreds of millions of vectors, nearly every graph hop on a cold cache is a disk seek. A term filter warms roughly linearly; a vector graph walk warms pathologically.
+
+**Production triggers — cold is not a once-ever event:**
+
+| trigger | why it goes cold | exposure |
+|---|---|---|
+| Reindex cutover (the v2→v3→v4→v5 pattern) | brand-new segment files, 0% resident | **highest** — alias flip points live traffic at a fully cold index |
+| Node restart / rolling deploy / pod reschedule | page cache is per-node, wiped on restart | every deploy; replicas too (they serve searches) |
+| Segment merge / force-merge | new merged files are cold until touched | post-merge |
+| Memory pressure (large aggs, competing indices) | clean vector pages are first to be reclaimed | silent drift back toward cold |
+
+**Mitigations, in order of impact:**
+
+1. **Mandatory warm-before-cutover.** After a reindex, run a representative query pass against the new index *before* flipping the alias. This is the single load-bearing step for the cutover path; without it the alias flip is a self-inflicted ~O(100 s)-p99 outage with retry-storm amplification. Gate the alias swap on a warmup completing, not on the reindex completing.
+2. **`index.store.preload` for the vector file extensions** (`["vec","vex","vem"]`, plus quantized variants if used — codec-version dependent; not `["*"]`). Loads vector files into page cache at shard-open instead of lazily on first query. **Only safe if the preloaded extensions fit in page cache** — preloading more than fits thrashes and is strictly worse than lazy warming, so size it against the per-node footprint of all primary+replica shards on that node (and against the container/cgroup memory limit, not host RAM, in containerized deployments). It also moves the cost to shard-open, lengthening every node restart/recovery — predictable-before-traffic, but paid on every restart.
+3. **Provision RAM with no swap** so the hot vector working set is never reclaimed (de-facto pin). Note `bootstrap.memory_lock`/`mlockall` locks only the JVM heap — it does *not* protect mmap'd vector files; only adequate free memory (or an OS-level `mlock` on the files) keeps them resident under pressure.
+4. **Canary/gradual cutover** — ramp traffic onto the new index so warming is incremental, not a thundering herd onto a cold cache. Warm replicas, not just primaries.
+
+The framing for the cutover runbook: **a reindex is not "done" when the new index finishes building — it is done when the new index is warm. The alias flip must be gated on warmth, and at scale (§2.1.5: ~200 GB hot HNSW set) that warm-up is minutes of deliberate query load, not an afterthought.**
+
 ## 2.2 TEST_PROFILE_18 (fine-tuned knn) search profile
 
 A variant of `STANDARD` designed for the fine-tuned embedding pipeline. Three differences vs. STANDARD:
