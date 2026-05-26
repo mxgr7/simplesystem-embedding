@@ -1,0 +1,13 @@
+venv/
+.venv/
+.pulumi-state/
+bench-key
+bench-key.pub
+*.pyc
+__pycache__/
+
+# Ephemeral run artifacts (regenerated on every bench/compile)
+sweep*.log
+compile.log
+last_*_failed.log
+parallel/

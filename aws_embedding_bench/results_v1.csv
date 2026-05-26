@@ -1,0 +1,6 @@
+instance_type,concurrency,batch,target_tokens,emb_per_sec,req_per_sec,p50_ms,p99_ms,errors,duration_s,warmup_s,timestamp
+c7i.4xlarge,8,32,256,0.4,0.0,54608.2,58706.5,14,120.0,30.0,1779341419
+g4dn.xlarge,4,32,256,242.2,7.6,526.3,544.9,0,120.0,30.0,1779342511
+g6.xlarge,4,32,256,773.7,24.2,164.9,174.4,0,120.0,30.0,1779344411
+inf2.xlarge,0,0,256,0.0,0.0,nan,nan,1,0,0,1779345723
+g5.xlarge,8,32,256,926.4,29.0,275.7,280.4,0,120.0,30.0,1779345814

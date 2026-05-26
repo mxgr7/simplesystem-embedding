@@ -1,0 +1,8 @@
+name: aws-embedding-bench
+runtime:
+  name: python
+  options:
+    # uv manages the venv and installs requirements.txt on first `pulumi up`.
+    # Requires Pulumi >= 3.130.
+    toolchain: uv
+description: Benchmark TEI throughput across AWS GPU/CPU/Inferentia instance types
