@@ -1,0 +1,109 @@
+openapi: 3.0.3
+info:
+  title: Embedding Service
+  description: |
+    Thin FastAPI wrapper over a TEI (HuggingFace Text Embeddings Inference)
+    backend with a KVRocks-backed embedding cache in front. Speaks TEI's
+    native `/embed` shape so any existing TEI client targets it by
+    swapping `EMBED_URL`.
+
+    Each input string must be exactly **8 NUL-separated field values** in
+    this order:
+
+    1. `name`
+    2. `manufacturerName`
+    3. `description`
+    4. `categoryPaths`
+    5. `ean`
+    6. `article_number`
+    7. `manufacturerArticleNumber`
+    8. `manufacturerArticleType`
+
+    Inputs are SHA-256-hashed (first 16 bytes → 32-char hex), looked up
+    in the cache under key `tei:v2:{hash}`, and on miss are rendered
+    through the same Jinja template the indexer uses, then embedded by
+    TEI. The cache is written asynchronously after the response is sent.
+  version: "1.0.0"
+
+paths:
+  /embed:
+    post:
+      summary: Embed one or more NUL-separated 8-field article texts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmbedRequest"
+      responses:
+        "200":
+          description: One fp16-precision vector per input, in input order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: array
+                  items: { type: number, format: float }
+                  minItems: 128
+                  maxItems: 128
+        "400":
+          description: Malformed request (e.g. wrong field count, empty inputs).
+        "401":
+          description: Missing or invalid bearer token (when `API_KEY` is set).
+        "413":
+          description: Too many inputs in one request.
+        "429":
+          description: Service at concurrency limit. Includes `Retry-After`.
+        "503":
+          description: Connection-level overload (uvicorn `--limit-concurrency`).
+        "504":
+          description: Per-request budget (5s default) exhausted.
+
+  /healthz:
+    get:
+      summary: Liveness probe.
+      responses:
+        "200":
+          description: Always returns a small JSON body when the process is up.
+
+  /metrics:
+    get:
+      summary: Prometheus metrics scrape endpoint.
+      responses:
+        "200":
+          description: Prometheus exposition format.
+
+components:
+  schemas:
+    EmbedRequest:
+      type: object
+      required: [inputs]
+      properties:
+        inputs:
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: string }
+          description: |
+            Single string or list of strings, each containing exactly
+            8 NUL-separated field values in the documented order.
+        truncate:
+          type: boolean
+          default: true
+          description: |
+            Forwarded to TEI on cache misses. Causes TEI to right-truncate
+            inputs longer than the model's max_input_length (256 tokens)
+            instead of returning 413. Belt-and-braces — the model already
+            caps at 256.
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Required only when `API_KEY` is set. Unset → endpoint is open.
+        Format: `Authorization: Bearer <key>`.
+
+security:
+  - bearerAuth: []
+  - {}

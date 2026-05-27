@@ -1,0 +1,72 @@
+services:
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    # Tuned per the embedding-service plan: max sequence length 256 comes
+    # from the model's `sentence_bert_config.json`; the two flags below
+    # are the user-stated batch/concurrency caps. `--max-batch-tokens`
+    # sized as 8×256 so a full max-length client batch fits one forward
+    # pass without server-side splitting.
+    command: [
+      "--model-id", "/model",
+      "--port", "80",
+      "--pooling", "mean",
+      "--max-client-batch-size", "8",
+      "--max-concurrent-requests", "16",
+      "--max-batch-tokens", "2048",
+    ]
+    ports:
+      - "8080:80"
+    volumes:
+      - ${TEI_MODEL_DIR:-/data/tei-models/useful-cub-58-st}:/model:ro
+    restart: unless-stopped
+
+  kvrocks:
+    image: apache/kvrocks:latest
+    # Disk-backed Redis-protocol cache. Same `tei:v2:` keyspace as
+    # `indexer/tei_cache.py` so prewarmed indexer entries are served
+    # by this path too. The volume already contains `db/` + `kvrocks.conf`.
+    #
+    # `user:` runs as the UID/GID that owns the host data files
+    # (the image defaults to UID 999, which can't write to files
+    # owned by anyone else). Adjust both halves if redeploying with
+    # different file ownership.
+    #
+    # `entrypoint:` overrides the image default to move the pidfile
+    # into the bind-mounted volume — the image's default
+    # `--pidfile /var/run/kvrocks/kvrocks.pid` points to a dir that's
+    # only writable by the in-image kvrocks user (999), not our UID.
+    user: "1001:1001"
+    entrypoint: [
+      "kvrocks",
+      "-c", "/var/lib/kvrocks/kvrocks.conf",
+      "--dir", "/var/lib/kvrocks",
+      "--pidfile", "/var/lib/kvrocks/kvrocks.pid",
+      "--bind", "0.0.0.0",
+    ]
+    ports:
+      - "6666:6666"
+    volumes:
+      - /mnt/nvme/kvrocks-data:/var/lib/kvrocks
+    restart: unless-stopped
+
+  embedding-service:
+    build:
+      context: ..
+      dockerfile: embedding-service/Dockerfile
+    environment:
+      TEI_URL: http://localhost:8080
+      KVROCKS_URL: redis://localhost:6666/0
+      API_KEY: ${EMBEDDING_API_KEY:-}
+      TEI_MAX_CLIENT_BATCH: "8"
+      TEI_MAX_CONCURRENCY: "16"
+      KVROCKS_READ_TIMEOUT_MS: "50"
+      # Backpressure thresholds — keep in sync with the plan defaults.
+      MAX_INFLIGHT: "128"
+      MAX_INPUTS_PER_REQUEST: "256"
+      REQUEST_BUDGET_S: "5.0"
+      RETRY_AFTER_S: "0.3"
+    network_mode: host
+    depends_on:
+      - tei
+      - kvrocks
+    restart: unless-stopped
