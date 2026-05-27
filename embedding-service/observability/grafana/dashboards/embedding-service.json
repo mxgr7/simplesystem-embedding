@@ -66,7 +66,7 @@
       "targets": [
         {"expr": "sum by (status) (rate(embedding_service_requests_total[1m]))", "legendFormat": "{{status}}", "refId": "A"}
       ],
-      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "stacking": {"mode": "normal"}}}, "overrides": []}
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 25, "stacking": {"mode": "normal"}}}, "overrides": []}
     },
     {
       "type": "timeseries",
@@ -216,7 +216,7 @@
         {"expr": "DCGM_FI_DEV_FB_USED * 1024 * 1024", "legendFormat": "used (GPU {{gpu}})", "refId": "A"},
         {"expr": "DCGM_FI_DEV_FB_FREE * 1024 * 1024", "legendFormat": "free (GPU {{gpu}})", "refId": "B"}
       ],
-      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"stacking": {"mode": "normal"}}}, "overrides": []}
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"fillOpacity": 25, "stacking": {"mode": "normal"}}}, "overrides": []}
     },
     {
       "type": "timeseries",
@@ -266,7 +266,7 @@
       "targets": [
         {"expr": "sum by (mode) (rate(node_cpu_seconds_total{mode!=\"idle\"}[1m])) / scalar(count(count by (cpu) (node_cpu_seconds_total)))", "legendFormat": "{{mode}}", "refId": "A"}
       ],
-      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"stacking": {"mode": "normal"}}}, "overrides": []}
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"fillOpacity": 25, "stacking": {"mode": "normal"}}}, "overrides": []}
     },
     {
       "type": "timeseries",
@@ -281,7 +281,7 @@
         {"expr": "node_memory_Cached_bytes", "legendFormat": "cached", "refId": "C"},
         {"expr": "node_memory_MemFree_bytes", "legendFormat": "free", "refId": "D"}
       ],
-      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"stacking": {"mode": "normal"}}}, "overrides": []}
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"fillOpacity": 25, "stacking": {"mode": "normal"}}}, "overrides": []}
     },
     {
       "type": "timeseries",
