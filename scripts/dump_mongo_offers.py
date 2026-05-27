@@ -72,7 +72,7 @@ def list_all_vendor_ids(coll):
     return out
 
 
-def dump_vendor(coll, vendor_id, out_path):
+def dump_vendor(coll, vendor_id, out_path, batch_size=5000):
     if out_path.exists():
         print(f"  {vendor_id}: final file exists, skipping", flush=True)
         return 0
@@ -86,7 +86,7 @@ def dump_vendor(coll, vendor_id, out_path):
     n = 0
     last_log = t0
     with gzip.open(tmp, "wb") as f:
-        cursor = coll.find(query, projection=PROJECTION).batch_size(500)
+        cursor = coll.find(query, projection=PROJECTION).batch_size(batch_size)
         for doc in cursor:
             f.write(orjson.dumps(doc))
             f.write(_NL)
@@ -116,6 +116,9 @@ def main():
                     help="Env var holding the Mongo connection URI.")
     ap.add_argument("--concurrency", type=int, default=16,
                     help="Vendors dumped in parallel (thread pool).")
+    ap.add_argument("--batch-size", type=int, default=5000,
+                    help="Mongo cursor batch_size; bigger = fewer RTTs per "
+                         "doc on the wire.")
     args = ap.parse_args()
 
     uri = os.environ.get(args.uri_env)
@@ -151,7 +154,7 @@ def main():
 
         def _run(v):
             out = out_dir / f"vendor_{v}.json.gz"
-            return dump_vendor(coll, v, out)
+            return dump_vendor(coll, v, out, batch_size=args.batch_size)
 
         with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
             futures = {pool.submit(_run, v): v for v in vendor_ids}
