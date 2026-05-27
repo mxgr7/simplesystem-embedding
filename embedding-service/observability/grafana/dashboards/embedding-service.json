@@ -150,19 +150,20 @@
       "type": "timeseries",
       "id": 30,
       "title": "Command rate",
-      "description": "Per-second Redis-protocol command rate against KVRocks, broken out by command.",
+      "description": "Per-second Redis-protocol command rate against KVRocks. Aggregate only — KVRocks's cmdstat_* lines omit trailing fields (rejected_calls / failed_calls) that redis_exporter expects for per-command breakdown, so we use redis_commands_processed_total.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
-      "targets": [{"expr": "sum by (cmd) (rate(redis_commands_total[1m]))", "legendFormat": "{{cmd}}", "refId": "A"}],
+      "targets": [{"expr": "rate(redis_commands_processed_total[1m])", "legendFormat": "commands/s", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps"}, "overrides": []}
     },
     {
       "type": "timeseries",
       "id": 31,
-      "title": "Memory used",
+      "title": "Process memory (RSS)",
+      "description": "KVRocks process RSS — the in-memory working set serving SST reads. The 49 GB disk-backed cache is *not* this number; it's used_db_size in INFO keyspace.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
-      "targets": [{"expr": "redis_memory_used_bytes", "refId": "A"}],
+      "targets": [{"expr": "redis_memory_used_rss_bytes", "legendFormat": "RSS", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
     },
     {
