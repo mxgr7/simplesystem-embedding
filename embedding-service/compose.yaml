@@ -1,6 +1,10 @@
 services:
   tei:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    # GPU build tuned for the Turing architecture (T4 / RTX 20xx).
+    # On a different GPU bump the tag: ampere-86 (A10/A40/A100),
+    # ampere-89 (L4/L40), hopper (H100), or cuda-<ver> for a generic
+    # fallback. CPU tag is `cpu-1.8`.
+    image: ghcr.io/huggingface/text-embeddings-inference:turing-1.8
     # Tuned per the embedding-service plan: max sequence length 256 comes
     # from the model's `sentence_bert_config.json`; the two flags below
     # are the user-stated batch/concurrency caps. `--max-batch-tokens`
@@ -18,6 +22,15 @@ services:
       - "8080:80"
     volumes:
       - ${TEI_MODEL_DIR:-/data/tei-models/useful-cub-58-st}:/model:ro
+    # Modern compose GPU access via nvidia-container-toolkit. Requires
+    # `nvidia-ctk runtime configure --runtime=docker` on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
 
   kvrocks:
@@ -87,6 +100,25 @@ services:
       - kvrocks
     restart: unless-stopped
 
+  dcgm_exporter:
+    # NVIDIA's DCGM exporter — GPU utilization, memory, temp, power,
+    # clocks, SM occupancy. Scraped by Prometheus on :9400/metrics.
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.1-ubuntu22.04
+    # cap_add NET_ADMIN is in dcgm-exporter's docs as needed for some
+    # nvlink/PCIe probes — harmless on a single-GPU box.
+    cap_add:
+      - SYS_ADMIN
+    ports:
+      - "9400:9400"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility]
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v2.55.1
     command:
@@ -107,6 +139,7 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - redis_exporter
+      - dcgm_exporter
     restart: unless-stopped
 
   grafana:

@@ -31,3 +31,12 @@ scrape_configs:
       - targets: ["redis_exporter:9121"]
         labels:
           stack: embedding-service
+
+  # NVIDIA DCGM exporter — utilization, memory, temp, power, clocks
+  # per GPU. Same bridge network → service-name addressing.
+  - job_name: gpu
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["dcgm_exporter:9400"]
+        labels:
+          stack: embedding-service

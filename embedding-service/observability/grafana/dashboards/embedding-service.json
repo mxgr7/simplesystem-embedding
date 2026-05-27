@@ -184,6 +184,67 @@
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
       "targets": [{"expr": "rate(te_request_count[1m])", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+
+    {
+      "type": "row",
+      "id": 500,
+      "title": "GPU (via DCGM exporter)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 48},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 40,
+      "title": "GPU utilization",
+      "description": "Percent of time the GPU was doing useful work during the last sample window.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 49},
+      "targets": [{"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "GPU {{gpu}} ({{modelName}})", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 41,
+      "title": "GPU memory used",
+      "description": "VRAM in use. T4 has 15 GB total.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 49},
+      "targets": [
+        {"expr": "DCGM_FI_DEV_FB_USED * 1024 * 1024", "legendFormat": "used (GPU {{gpu}})", "refId": "A"},
+        {"expr": "(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 1024 * 1024", "legendFormat": "total (GPU {{gpu}})", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 42,
+      "title": "GPU temperature",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 57},
+      "targets": [{"expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "celsius"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 43,
+      "title": "GPU power",
+      "description": "Instantaneous power draw. T4 TDP is 70 W.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 57},
+      "targets": [{"expr": "DCGM_FI_DEV_POWER_USAGE", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "watt"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 44,
+      "title": "GPU SM clock",
+      "description": "Streaming Multiprocessor clock frequency. Drops indicate thermal/power throttling.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 57},
+      "targets": [{"expr": "DCGM_FI_DEV_SM_CLOCK", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "rotmhz"}, "overrides": []}
     }
   ]
 }
