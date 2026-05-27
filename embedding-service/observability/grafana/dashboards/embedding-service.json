@@ -208,15 +208,15 @@
     {
       "type": "timeseries",
       "id": 41,
-      "title": "GPU memory used",
-      "description": "VRAM in use. T4 has 15 GB total.",
+      "title": "GPU memory (stacked = total VRAM)",
+      "description": "Stacked used + free = total VRAM. Stack height shows board capacity; the lower band is what's actively held by TEI + driver.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 49},
       "targets": [
         {"expr": "DCGM_FI_DEV_FB_USED * 1024 * 1024", "legendFormat": "used (GPU {{gpu}})", "refId": "A"},
-        {"expr": "(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 1024 * 1024", "legendFormat": "total (GPU {{gpu}})", "refId": "B"}
+        {"expr": "DCGM_FI_DEV_FB_FREE * 1024 * 1024", "legendFormat": "free (GPU {{gpu}})", "refId": "B"}
       ],
-      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"stacking": {"mode": "normal"}}}, "overrides": []}
     },
     {
       "type": "timeseries",
@@ -271,29 +271,28 @@
     {
       "type": "timeseries",
       "id": 51,
-      "title": "Memory",
-      "description": "Used = total - free - buffers - cached. Cached and buffers are reclaimable.",
+      "title": "Memory (stacked = total RAM)",
+      "description": "Stacked used + buffers + cached + free = MemTotal. Stack height shows host RAM; the bottom band is non-reclaimable in-use memory. Cached/buffers are reclaimable on pressure.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 66},
       "targets": [
         {"expr": "node_memory_MemTotal_bytes - node_memory_MemFree_bytes - node_memory_Buffers_bytes - node_memory_Cached_bytes", "legendFormat": "used", "refId": "A"},
-        {"expr": "node_memory_Cached_bytes", "legendFormat": "cached", "refId": "B"},
-        {"expr": "node_memory_Buffers_bytes", "legendFormat": "buffers", "refId": "C"},
-        {"expr": "node_memory_MemFree_bytes", "legendFormat": "free", "refId": "D"},
-        {"expr": "node_memory_MemTotal_bytes", "legendFormat": "total", "refId": "E"}
+        {"expr": "node_memory_Buffers_bytes", "legendFormat": "buffers", "refId": "B"},
+        {"expr": "node_memory_Cached_bytes", "legendFormat": "cached", "refId": "C"},
+        {"expr": "node_memory_MemFree_bytes", "legendFormat": "free", "refId": "D"}
       ],
-      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"stacking": {"mode": "none"}}}, "overrides": []}
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"stacking": {"mode": "normal"}}}, "overrides": []}
     },
     {
       "type": "timeseries",
       "id": 52,
-      "title": "Disk I/O bytes/s",
-      "description": "Per-device read/write throughput. KVRocks's compaction shows up here on the /mnt/nvme device.",
+      "title": "Disk I/O bytes/s (reads ↑, writes ↓)",
+      "description": "Per-device read/write throughput on a mirrored axis: reads positive, writes negative. KVRocks compaction shows up on /mnt/nvme.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 74},
       "targets": [
         {"expr": "rate(node_disk_read_bytes_total[1m])", "legendFormat": "{{device}} read", "refId": "A"},
-        {"expr": "rate(node_disk_written_bytes_total[1m])", "legendFormat": "{{device}} write", "refId": "B"}
+        {"expr": "-rate(node_disk_written_bytes_total[1m])", "legendFormat": "{{device}} write", "refId": "B"}
       ],
       "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}
     },
@@ -312,13 +311,13 @@
     {
       "type": "timeseries",
       "id": 54,
-      "title": "Network throughput",
-      "description": "Per-interface RX/TX bytes/s. Loopback (lo) excluded.",
+      "title": "Network throughput (rx ↑, tx ↓)",
+      "description": "Per-interface throughput on a mirrored axis: receive positive, transmit negative. Loopback / docker / veth interfaces excluded.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 82},
       "targets": [
         {"expr": "rate(node_network_receive_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m])", "legendFormat": "{{device}} rx", "refId": "A"},
-        {"expr": "rate(node_network_transmit_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m])", "legendFormat": "{{device}} tx", "refId": "B"}
+        {"expr": "-rate(node_network_transmit_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m])", "legendFormat": "{{device}} tx", "refId": "B"}
       ],
       "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}
     },
