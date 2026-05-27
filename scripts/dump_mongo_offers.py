@@ -131,8 +131,13 @@ def main():
 
     out_dir = Path(args.out_dir)
     # maxPoolSize >= --concurrency so threads don't queue on the conn pool.
+    # readPreference=nearest spreads cursors across every replica-set member
+    # within the latency window (default 15 ms) instead of pinning to the
+    # primary — turns N-thread parallelism into actual ~N-node aggregate
+    # throughput on a multi-replica cluster.
     client = MongoClient(uri, uuidRepresentation="standard",
-                         maxPoolSize=max(args.concurrency * 2, 32))
+                         maxPoolSize=max(args.concurrency * 2, 32),
+                         readPreference="nearest")
     try:
         coll = client[args.db][args.collection]
         if args.vendor_ids:
