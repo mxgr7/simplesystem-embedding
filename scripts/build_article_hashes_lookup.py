@@ -83,6 +83,12 @@ def build(input_glob, out_dir, buckets):
     con.execute(f"SET threads = {os.cpu_count() or 8}")
     con.execute("SET enable_progress_bar = false")
     con.execute("SET preserve_insertion_order = false")
+    # The GROUP BY hash table for 455M rows -> ~150-250M (vendor,artno) groups
+    # would not fit in RAM on this 7GB box; cap memory and spill to disk.
+    con.execute("SET memory_limit = '4GB'")
+    tmp_dir = out_dir.parent / "duckdb_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    con.execute(f"SET temp_directory = '{tmp_dir}'")
     con.execute(_DUCKDB_MACROS)
 
     sql = f"""

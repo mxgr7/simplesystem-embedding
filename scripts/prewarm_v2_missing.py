@@ -130,7 +130,9 @@ def build_render_inputs(input_glob: str, out_path: Path) -> None:
     con = duckdb.connect()
     con.execute(f"SET threads = {os.cpu_count() or 8}")
     con.execute("SET enable_progress_bar = false")
-    con.execute("SET memory_limit = '200GB'")
+    # GROUP BY hash table for 455M rows won't fit in RAM on this 7GB box;
+    # cap memory and spill to disk via temp_directory.
+    con.execute("SET memory_limit = '4GB'")
     con.execute("SET preserve_insertion_order = false")
     con.execute(f"SET temp_directory = '{EXPORT_DIR}/duckdb_tmp'")
     con.execute(_DUCKDB_MACROS)
