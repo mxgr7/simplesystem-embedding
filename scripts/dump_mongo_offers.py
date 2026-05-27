@@ -29,7 +29,9 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 from uuid import UUID
 
 from dotenv import load_dotenv
@@ -119,6 +121,8 @@ def main():
     ap.add_argument("--collection", default="offers")
     ap.add_argument("--uri-env", default="MONGODB_PROD_URI",
                     help="Env var holding the Mongo connection URI.")
+    ap.add_argument("--concurrency", type=int, default=16,
+                    help="Vendors dumped in parallel (thread pool).")
     args = ap.parse_args()
 
     uri = os.environ.get(args.uri_env)
@@ -126,7 +130,9 @@ def main():
         sys.exit(f"{args.uri_env} not set in env / .env")
 
     out_dir = Path(args.out_dir)
-    client = MongoClient(uri, uuidRepresentation="standard")
+    # maxPoolSize >= --concurrency so threads don't queue on the conn pool.
+    client = MongoClient(uri, uuidRepresentation="standard",
+                         maxPoolSize=max(args.concurrency * 2, 32))
     try:
         coll = client[args.db][args.collection]
         if args.vendor_ids:
@@ -137,17 +143,32 @@ def main():
             sys.exit("no vendorIds to dump")
 
         print(f"dumping {len(vendor_ids):,} vendor(s) from "
-              f"{args.db}.{args.collection} -> {out_dir}", flush=True)
+              f"{args.db}.{args.collection} -> {out_dir} "
+              f"(concurrency={args.concurrency})", flush=True)
+
         total = 0
+        done = 0
+        lock = Lock()
         t_start = time.time()
-        for i, v in enumerate(vendor_ids, 1):
+
+        def _run(v):
             out = out_dir / f"vendor_{v}.json.gz"
-            total += dump_vendor(coll, v, out)
-            if i % 25 == 0 or i == len(vendor_ids):
-                el = time.time() - t_start
-                print(f"  [progress] {i:,}/{len(vendor_ids):,} vendors  "
-                      f"{total:,} offers  {el:.0f}s elapsed  "
-                      f"({total/max(el,1e-3):,.0f} offers/s)", flush=True)
+            return dump_vendor(coll, v, out)
+
+        with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            futures = {pool.submit(_run, v): v for v in vendor_ids}
+            for f in as_completed(futures):
+                n = f.result()  # propagates exceptions
+                with lock:
+                    total += n
+                    done += 1
+                    if done % 25 == 0 or done == len(vendor_ids):
+                        el = time.time() - t_start
+                        print(f"  [progress] {done:,}/{len(vendor_ids):,} "
+                              f"vendors  {total:,} offers  {el:.0f}s elapsed "
+                              f"({total/max(el,1e-3):,.0f} offers/s)",
+                              flush=True)
+
         print(f"\nDONE: {total:,} offers across {len(vendor_ids):,} vendor(s)",
               flush=True)
     finally:
