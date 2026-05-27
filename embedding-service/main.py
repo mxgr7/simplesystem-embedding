@@ -79,6 +79,11 @@ _TEI_SEM_WAIT = Histogram(
     "Time spent waiting for a TEI concurrency slot (per chunk).",
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
+_INPUTS_PER_REQUEST = Histogram(
+    "embedding_service_inputs_per_request",
+    "Number of inputs in each /embed request.",
+    buckets=(1, 2, 4, 8, 16, 32, 64, 128, 256),
+)
 _CACHE_HIT_RATIO = Gauge(
     "embedding_service_cache_hit_ratio",
     "EWMA of cache hit ratio across recent requests.",
@@ -229,6 +234,7 @@ async def _embed_handler(
                 f"too many inputs in one request ({n} > {cfg.max_inputs_per_request})"
             ),
         )
+    _INPUTS_PER_REQUEST.observe(n)
 
     # 2. Cheap NUL-field-count validation up front. Rendering only on miss.
     for i, text in enumerate(inputs):

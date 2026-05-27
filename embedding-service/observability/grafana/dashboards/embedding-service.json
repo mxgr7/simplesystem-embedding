@@ -1,0 +1,189 @@
+{
+  "title": "Embedding Service",
+  "uid": "embedding-service",
+  "schemaVersion": 38,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "tags": ["embedding-service", "tei", "kvrocks"],
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Service health",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "embedding-service",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 1},
+      "targets": [{"expr": "up{job=\"embedding-service\"}", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "TEI",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 8, "y": 1},
+      "targets": [{"expr": "up{job=\"tei\"}", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "KVRocks (via redis_exporter)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 1},
+      "targets": [{"expr": "up{job=\"kvrocks\"}", "refId": "A"}],
+      "options": {"colorMode": "background", "textMode": "auto"},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]}, "overrides": []}
+    },
+
+    {
+      "type": "row",
+      "id": 200,
+      "title": "/embed traffic + latency",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Request rate by status",
+      "description": "Per-second request rate from the app-level counter, broken out by HTTP status.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "targets": [
+        {"expr": "sum by (status) (rate(embedding_service_requests_total[1m]))", "legendFormat": "{{status}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "stacking": {"mode": "normal"}}}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "/embed latency (p50 / p95 / p99)",
+      "description": "End-to-end latency on the /embed handler, derived from the FastAPI instrumentator's request-duration histogram.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{handler=\"/embed\"}[5m])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{handler=\"/embed\"}[5m])))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{handler=\"/embed\"}[5m])))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+
+    {
+      "type": "row",
+      "id": 300,
+      "title": "Backpressure + batch shape",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Inflight requests",
+      "description": "Concurrent /embed requests after the MGET gate. Approaches MAX_INFLIGHT (default 128) → 429 path activates.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "targets": [{"expr": "embedding_service_inflight", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "type": "heatmap",
+      "id": 21,
+      "title": "Batch size (inputs per request)",
+      "description": "Distribution of N = len(inputs) per request. Buckets aligned with the TEI client batch (8) and the request cap (256).",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+      "targets": [
+        {"expr": "sum by (le) (rate(embedding_service_inputs_per_request_bucket[1m]))", "refId": "A", "format": "heatmap", "legendFormat": "{{le}}"}
+      ],
+      "options": {"calculate": false, "yAxis": {"unit": "short"}, "color": {"mode": "scheme", "scheme": "Spectral"}},
+      "fieldConfig": {"defaults": {}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Cache hit ratio (EWMA)",
+      "description": "Service-side EWMA of (hits / total) per request.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 23},
+      "targets": [{"expr": "embedding_service_cache_hit_ratio", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []}
+    },
+    {
+      "type": "heatmap",
+      "id": 23,
+      "title": "TEI semaphore wait (per chunk)",
+      "description": "Time chunks spend waiting for a TEI concurrency slot. Rising = TEI saturating.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 23},
+      "targets": [
+        {"expr": "sum by (le) (rate(embedding_service_tei_semaphore_wait_seconds_bucket[1m]))", "refId": "A", "format": "heatmap", "legendFormat": "{{le}}"}
+      ],
+      "options": {"calculate": false, "yAxis": {"unit": "s"}, "color": {"mode": "scheme", "scheme": "Spectral"}},
+      "fieldConfig": {"defaults": {}, "overrides": []}
+    },
+
+    {
+      "type": "row",
+      "id": 400,
+      "title": "KVRocks (via redis_exporter)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 31},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "Command rate",
+      "description": "Per-second Redis-protocol command rate against KVRocks, broken out by command.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "targets": [{"expr": "sum by (cmd) (rate(redis_commands_total[1m]))", "legendFormat": "{{cmd}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "Memory used",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "targets": [{"expr": "redis_memory_used_bytes", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 32,
+      "title": "Keyspace size",
+      "description": "Number of keys in db0 — total cached embeddings.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "targets": [{"expr": "redis_db_keys", "legendFormat": "{{db}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 33,
+      "title": "TEI request count",
+      "description": "Per-second TEI request rate from TEI's own /metrics. Should be << embedding-service request rate when cache hits dominate.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "targets": [{"expr": "rate(te_request_count[1m])", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    }
+  ]
+}

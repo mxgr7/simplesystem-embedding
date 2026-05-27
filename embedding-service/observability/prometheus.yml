@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # embedding-service runs network_mode:host — reach it via the host gateway
+  # that compose injects into this Prometheus container's /etc/hosts.
+  - job_name: embedding-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8082"]
+        labels:
+          stack: embedding-service
+
+  # TEI 1.8 exposes /metrics on its container port. We scrape via the host
+  # gateway too so the same Prometheus config works regardless of whether
+  # TEI is on bridge (current — port-published) or host-net.
+  - job_name: tei
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          stack: embedding-service
+
+  # redis_exporter is on the same bridge network as Prometheus — addressable
+  # by service name. It pulls KVRocks's INFO/keyspace/command stats over
+  # the Redis protocol on port 6666.
+  - job_name: kvrocks
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["redis_exporter:9121"]
+        labels:
+          stack: embedding-service

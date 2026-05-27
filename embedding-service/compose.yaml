@@ -70,3 +70,66 @@ services:
       - tei
       - kvrocks
     restart: unless-stopped
+
+  # --- Observability ------------------------------------------------------
+  # Self-contained Prom + Grafana + redis_exporter for the embedding-service
+  # stack. Versions pinned to match the repo-level observability/ stack so
+  # we don't fork the deployment surface; the two stacks are not designed
+  # to run concurrently (they both bind 9090 / 3000 by default).
+
+  redis_exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    # KVRocks speaks the Redis protocol — same exporter works.
+    command: ["--redis.addr=redis://kvrocks:6666"]
+    ports:
+      - "9121:9121"
+    depends_on:
+      - kvrocks
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    # The embedding-service runs network_mode:host, so we can't address it
+    # by service name from this bridge-net Prometheus. `host-gateway` makes
+    # `host.docker.internal` resolve to the host's bridge IP so the scrape
+    # config can reach the host-net process.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - redis_exporter
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Anon viewer matches the repo-level observability stack — lets devs
+      # land on the dashboard without a login while admin/admin still works
+      # for editing.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
