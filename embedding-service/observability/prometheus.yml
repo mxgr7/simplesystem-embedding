@@ -40,3 +40,12 @@ scrape_configs:
       - targets: ["dcgm_exporter:9400"]
         labels:
           stack: embedding-service
+
+  # node_exporter runs on host net for accurate net/pid stats — reach
+  # via the same host-gateway trick as the embedding-service.
+  - job_name: node
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels:
+          stack: embedding-service

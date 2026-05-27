@@ -246,6 +246,96 @@
       "gridPos": {"h": 8, "w": 8, "x": 16, "y": 57},
       "targets": [{"expr": "DCGM_FI_DEV_SM_CLOCK", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "rotmhz"}, "overrides": []}
+    },
+
+    {
+      "type": "row",
+      "id": 600,
+      "title": "Host system (via node_exporter)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 65},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 50,
+      "title": "CPU usage by mode",
+      "description": "Fraction of total CPU time per mode (user, system, iowait, idle, etc.). Sum across all cores.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 66},
+      "targets": [
+        {"expr": "sum by (mode) (rate(node_cpu_seconds_total{mode!=\"idle\"}[1m])) / scalar(count(count by (cpu) (node_cpu_seconds_total)))", "legendFormat": "{{mode}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"stacking": {"mode": "normal"}}}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 51,
+      "title": "Memory",
+      "description": "Used = total - free - buffers - cached. Cached and buffers are reclaimable.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 66},
+      "targets": [
+        {"expr": "node_memory_MemTotal_bytes - node_memory_MemFree_bytes - node_memory_Buffers_bytes - node_memory_Cached_bytes", "legendFormat": "used", "refId": "A"},
+        {"expr": "node_memory_Cached_bytes", "legendFormat": "cached", "refId": "B"},
+        {"expr": "node_memory_Buffers_bytes", "legendFormat": "buffers", "refId": "C"},
+        {"expr": "node_memory_MemFree_bytes", "legendFormat": "free", "refId": "D"},
+        {"expr": "node_memory_MemTotal_bytes", "legendFormat": "total", "refId": "E"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"stacking": {"mode": "none"}}}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 52,
+      "title": "Disk I/O bytes/s",
+      "description": "Per-device read/write throughput. KVRocks's compaction shows up here on the /mnt/nvme device.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 74},
+      "targets": [
+        {"expr": "rate(node_disk_read_bytes_total[1m])", "legendFormat": "{{device}} read", "refId": "A"},
+        {"expr": "rate(node_disk_written_bytes_total[1m])", "legendFormat": "{{device}} write", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 53,
+      "title": "Filesystem usage",
+      "description": "Per-mount used / total bytes. KVRocks lives on /mnt/nvme (see fstype label).",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 74},
+      "targets": [
+        {"expr": "node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\"} - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\"}", "legendFormat": "{{mountpoint}} used", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 54,
+      "title": "Network throughput",
+      "description": "Per-interface RX/TX bytes/s. Loopback (lo) excluded.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 82},
+      "targets": [
+        {"expr": "rate(node_network_receive_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m])", "legendFormat": "{{device}} rx", "refId": "A"},
+        {"expr": "rate(node_network_transmit_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m])", "legendFormat": "{{device}} tx", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 55,
+      "title": "Load average",
+      "description": "1 / 5 / 15-minute load averages. Plotted against the CPU-core count (a healthy box stays well below 1.0 × cores).",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 82},
+      "targets": [
+        {"expr": "node_load1", "legendFormat": "1m", "refId": "A"},
+        {"expr": "node_load5", "legendFormat": "5m", "refId": "B"},
+        {"expr": "node_load15", "legendFormat": "15m", "refId": "C"},
+        {"expr": "count(count by (cpu) (node_cpu_seconds_total))", "legendFormat": "cores", "refId": "D"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
     }
   ]
 }

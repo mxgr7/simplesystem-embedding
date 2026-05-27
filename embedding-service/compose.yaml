@@ -119,6 +119,24 @@ services:
               capabilities: [gpu, utility]
     restart: unless-stopped
 
+  node_exporter:
+    # Host CPU / memory / disk / filesystem / network metrics. Runs in
+    # host net + host pid so node_network_* and node_load* reflect the
+    # actual host rather than the container.
+    image: prom/node-exporter:v1.8.2
+    pid: host
+    network_mode: host
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|var/lib/docker|run)($$|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host:ro,rslave
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v2.55.1
     command:
@@ -140,6 +158,7 @@ services:
     depends_on:
       - redis_exporter
       - dcgm_exporter
+      - node_exporter
     restart: unless-stopped
 
   grafana:
