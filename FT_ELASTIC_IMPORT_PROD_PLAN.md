@@ -123,7 +123,7 @@ The serving alias is whatever the consumer reads; confirm with the consumer befo
 
 | Path | Purpose | Reuses |
 |---|---|---|
-| `scripts/dump_mongo_offers.py` | Phase 1 — PyMongo → vendor-sharded JSON.gz | `.env` MONGODB_URI |
+| `scripts/dump_mongo_offers.py` | Phase 1 — PyMongo → vendor-sharded JSON.gz | `.env` MONGODB_PROD_URI |
 | `scripts/build_article_hashes_lookup.py` | Phase 2.2 — DuckDB → article_hashes_v2 parquet | `prewarm_v2_missing.py:build_render_inputs` SQL |
 
 ## Files to reuse unchanged
@@ -164,7 +164,80 @@ End-of-Phase-3:
 
 1. **Target index name:** `prod-article-index-v1-semantic-<YYYYMMDDhhmmss>` (UTC at create time).
 2. **ES source:** live alias `prod-article-index-v1` via sliced PIT. No clone, no on-disk dump.
-3. **Mongo source:** prod (`MONGODB_URI` from `.env`).
+3. **Mongo source:** prod (`MONGODB_PROD_URI` from `.env`, db `prod`, collection `offers`).
 4. **Mongo dump shape:** per-vendor `vendor_<vendorId>.json.gz`, newline-delimited.
 5. **`article_hashes_v2` parquet bucketing:** 16 buckets.
 6. **Cache backend:** KVRocks on `localhost:6666`, keyspace `tei:v2:<hash>` (fp16, 256 B per 128-d vector).
+
+---
+
+## Smoke run (two-vendor end-to-end)
+
+Before launching the full prod run, do an e2e dry-run restricted to two pre-selected small vendors. The point is to exercise *the same code paths* as the full run end to end; the only differences are scope filters and a distinct target index name. Both `dump_mongo_offers.py` and `index_embeddings_to_es_v5_mp.py` take `--vendor-ids` for this; the prewarm + lookup builder are naturally constrained by the input glob and need no change.
+
+**Vendors:**
+- `f508ac53-86b2-4b97-bd26-4789a3a40a1b`
+- `0928e639-fc5a-4138-8c29-9201e8eba09c`
+
+**Runbook:**
+
+```bash
+TS=$(date -u +%Y%m%d%H%M%S)
+DST="prod-article-index-v1-semantic-${TS}-smoke"
+VENDORS="f508ac53-86b2-4b97-bd26-4789a3a40a1b,0928e639-fc5a-4138-8c29-9201e8eba09c"
+EXPORT_DIR="/data/datasets/mongo_offers_export_${TS%??????}"
+
+# Phase 1 — vendor-restricted Mongo dump
+uv run python scripts/dump_mongo_offers.py --vendor-ids "$VENDORS" --out-dir "$EXPORT_DIR"
+
+# Phase 2.1 — KVRocks
+docker compose -f dev/kvrocks/compose.yaml up -d
+
+# Phase 2.2 — article_hashes_v2 lookup
+uv run python scripts/build_article_hashes_lookup.py \
+    --input-glob "$EXPORT_DIR/vendor_*.json.gz" \
+    --out-dir   "$EXPORT_DIR/article_hashes_v2"
+
+# Phase 2.3 — prewarm (naturally restricted to the two vendors)
+uv run python scripts/prewarm_v2_missing.py \
+    --input-glob "$EXPORT_DIR/vendor_*.json.gz" \
+    --render-inputs-parquet "$EXPORT_DIR/render_inputs.parquet" \
+    --redis-host localhost --redis-port 6666 \
+    --tei-url <local TEI URL>
+
+# Phase 3.1 — smoke target (note -smoke suffix to keep it distinct)
+uv run python scripts/setup_es_v5.py --dst "$DST" --settings-src prod-article-index-v1
+
+# Phase 3.2 — importer restricted to same two vendors
+uv run python scripts/index_embeddings_to_es_v5_mp.py \
+    --src prod-article-index-v1 --dst "$DST" \
+    --redis redis://localhost:6666/0 \
+    --parquet "$EXPORT_DIR/article_hashes_v2/**/*.parquet" \
+    --vendor-ids "$VENDORS"
+
+# Phase 3.3 — finalize (skip replicas restore for smoke)
+curl -XPOST "$ES/$DST/_refresh"
+curl -XPOST "$ES/$DST/_forcemerge?max_num_segments=1"
+
+# Spot-check: per-vendor count parity
+for V in ${VENDORS//,/ }; do
+  EXPECTED=$(curl -s "$ES/prod-article-index-v1/_count" -H 'Content-Type: application/json' \
+               -d "{\"query\":{\"term\":{\"vendorId\":\"$V\"}}}" | jq .count)
+  ACTUAL=$(curl -s "$ES/$DST/_count" -H 'Content-Type: application/json' \
+               -d "{\"query\":{\"term\":{\"vendorId\":\"$V\"}}}" | jq .count)
+  echo "$V  prod=$EXPECTED  smoke=$ACTUAL"
+done
+
+# Field-derivation spot check (~3 articles per vendor): _source must have
+# embeddings[] with vector + inputHash, embeddingModelVersion,
+# catalogVersionIds == sorted unique union over offers[].catalogVersionIds,
+# priceKeys == sorted unique set of "{priceListId}|{currency}" over prices[].
+
+# Smoke runs skip Phase 3.4 (warmup) and Phase 3.5 (alias swap).
+
+# Cleanup once smoke passes:
+curl -XDELETE "$ES/$DST"
+# Keep $EXPORT_DIR if you want to rerun the smoke; the full run will produce a
+# fresh dated EXPORT_DIR for all 2.6k vendors.
+```
+

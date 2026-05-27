@@ -352,6 +352,11 @@ def worker(slice_id: int, args, pit_id: str, q: mp.Queue) -> None:
         s["by"] += len(body)
         chunk, chunk_bytes = [], 0
 
+    vendor_ids = [v.strip() for v in (args.vendor_ids or "").split(",") if v.strip()]
+    src_query = (
+        {"terms": {"vendorId": vendor_ids}} if vendor_ids else {"match_all": {}}
+    )
+
     while True:
         body_q = {
             "size": args.page_size,
@@ -359,7 +364,7 @@ def worker(slice_id: int, args, pit_id: str, q: mp.Queue) -> None:
             "pit": {"id": pit_id, "keep_alive": "12h"},
             "_source": True,
             "sort": [{"_shard_doc": "asc"}],
-            "query": {"match_all": {}},
+            "query": src_query,
             "slice": {"id": slice_id, "max": args.procs},
         }
         if search_after is not None:
@@ -442,6 +447,9 @@ def main() -> None:
     ap.add_argument("--target-body-bytes", type=int, default=4 * 1024 * 1024)
     ap.add_argument("--limit", type=int, default=0,
                     help="approx total article cap (probe); 0 = all")
+    ap.add_argument("--vendor-ids", default="",
+                    help="Comma-separated vendorId values; restricts the PIT "
+                         "scan to those vendors via a terms filter. Empty = all.")
     args = ap.parse_args()
 
     build_lookup(args.parquet)  # populates the _G_* numpy buffers
