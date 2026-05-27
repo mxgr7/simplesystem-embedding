@@ -62,6 +62,22 @@ def _coerce(obj):
     return obj
 
 
+def list_all_vendor_ids(coll):
+    """Distinct vendorIds via $group (no 16 MB distinct() cap)."""
+    t0 = time.time()
+    print("listing distinct vendorIds (allowDiskUse) ...", flush=True)
+    pipeline = [{"$group": {"_id": "$vendorId"}}, {"$sort": {"_id": 1}}]
+    out = []
+    for doc in coll.aggregate(pipeline, allowDiskUse=True):
+        v = doc["_id"]
+        if v is None:
+            continue
+        out.append(str(v))
+    print(f"  found {len(out):,} distinct vendor(s) in {time.time()-t0:.1f}s",
+          flush=True)
+    return out
+
+
 def dump_vendor(coll, vendor_id, out_path):
     if out_path.exists():
         print(f"  {vendor_id}: final file exists, skipping", flush=True)
@@ -94,8 +110,9 @@ def dump_vendor(coll, vendor_id, out_path):
 def main():
     load_dotenv()
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--vendor-ids", required=True,
-                    help="Comma-separated vendorId UUIDs.")
+    ap.add_argument("--vendor-ids", default="",
+                    help="Comma-separated vendorId UUIDs. Omit to dump every "
+                         "distinct vendorId in the collection.")
     ap.add_argument("--out-dir", required=True,
                     help="Output directory; created if missing.")
     ap.add_argument("--db", default="prod")
@@ -108,22 +125,30 @@ def main():
     if not uri:
         sys.exit(f"{args.uri_env} not set in env / .env")
 
-    vendor_ids = [v.strip() for v in args.vendor_ids.split(",") if v.strip()]
-    if not vendor_ids:
-        sys.exit("--vendor-ids parsed to an empty list")
-
     out_dir = Path(args.out_dir)
-    print(f"dumping {len(vendor_ids)} vendor(s) from {args.db}.{args.collection} "
-          f"-> {out_dir}", flush=True)
-
     client = MongoClient(uri, uuidRepresentation="standard")
     try:
         coll = client[args.db][args.collection]
+        if args.vendor_ids:
+            vendor_ids = [v.strip() for v in args.vendor_ids.split(",") if v.strip()]
+        else:
+            vendor_ids = list_all_vendor_ids(coll)
+        if not vendor_ids:
+            sys.exit("no vendorIds to dump")
+
+        print(f"dumping {len(vendor_ids):,} vendor(s) from "
+              f"{args.db}.{args.collection} -> {out_dir}", flush=True)
         total = 0
-        for v in vendor_ids:
+        t_start = time.time()
+        for i, v in enumerate(vendor_ids, 1):
             out = out_dir / f"vendor_{v}.json.gz"
             total += dump_vendor(coll, v, out)
-        print(f"\nDONE: {total:,} offers across {len(vendor_ids)} vendor(s)",
+            if i % 25 == 0 or i == len(vendor_ids):
+                el = time.time() - t_start
+                print(f"  [progress] {i:,}/{len(vendor_ids):,} vendors  "
+                      f"{total:,} offers  {el:.0f}s elapsed  "
+                      f"({total/max(el,1e-3):,.0f} offers/s)", flush=True)
+        print(f"\nDONE: {total:,} offers across {len(vendor_ids):,} vendor(s)",
               flush=True)
     finally:
         client.close()
