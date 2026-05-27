@@ -25,17 +25,21 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import json
 import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
-from uuid import UUID
 
+import orjson
 from dotenv import load_dotenv
 from pymongo import MongoClient
+
+# orjson serializes uuid.UUID natively (to its str representation) and
+# releases the GIL on the C path — both reasons we use it here over stdlib
+# json. The OPT_NON_STR_KEYS guard is unused; we keep options at 0.
+_NL = b"\n"
 
 
 PROJECTION = {
@@ -50,18 +54,6 @@ PROJECTION = {
     "offer.offerParams.manufacturerArticleNumber": 1,
     "offer.offerParams.manufacturerArticleType": 1,
 }
-
-
-def _coerce(obj):
-    """Recursively coerce BSON-specific instances to JSON-safe values.
-    UUIDs -> str; everything else passes through."""
-    if isinstance(obj, UUID):
-        return str(obj)
-    if isinstance(obj, dict):
-        return {k: _coerce(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_coerce(x) for x in obj]
-    return obj
 
 
 def list_all_vendor_ids(coll):
@@ -87,16 +79,17 @@ def dump_vendor(coll, vendor_id, out_path):
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     tmp.parent.mkdir(parents=True, exist_ok=True)
 
+    # Mongo stores vendorId as either a BSON UUID or a string; cover both.
+    from uuid import UUID
     query = {"vendorId": {"$in": [UUID(vendor_id), vendor_id]}}
     t0 = time.time()
     n = 0
     last_log = t0
-    with gzip.open(tmp, "wt", encoding="utf-8") as f:
+    with gzip.open(tmp, "wb") as f:
         cursor = coll.find(query, projection=PROJECTION).batch_size(500)
         for doc in cursor:
-            doc = _coerce(doc)
-            f.write(json.dumps(doc, ensure_ascii=False, separators=(",", ":")))
-            f.write("\n")
+            f.write(orjson.dumps(doc))
+            f.write(_NL)
             n += 1
             now = time.time()
             if now - last_log >= 10.0:
