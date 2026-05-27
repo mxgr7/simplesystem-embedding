@@ -45,6 +45,7 @@ train = [
   "pyyaml>=6.0",
   "redis>=5.0.0",
   "sentencepiece>=0.2.0",
+  "zstandard>=0.22.0",
 ]
 serve = [
     "flash-attn",

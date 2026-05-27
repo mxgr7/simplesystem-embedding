@@ -131,9 +131,14 @@ def main():
     # within the latency window (default 15 ms) instead of pinning to the
     # primary — turns N-thread parallelism into actual ~N-node aggregate
     # throughput on a multi-replica cluster.
+    # compressors=zstd: wire compression negotiated with Atlas — cuts the
+    # bytes-on-wire by ~3-5x (verbose offer JSON compresses well). Necessary
+    # because the dump plateaus at ~440 Mbit/s sustained on this VPS — a
+    # network-side cap, not CPU.
     client = MongoClient(uri, uuidRepresentation="standard",
                          maxPoolSize=max(args.concurrency * 2, 32),
-                         readPreference="nearest")
+                         readPreference="nearest",
+                         compressors="zstd")
     try:
         coll = client[args.db][args.collection]
         if args.vendor_ids:
