@@ -133,7 +133,7 @@ curl -s -XPOST "$ELASTIC_URL/_aliases" \
 
 ## Reference numbers from the prior conversation
 
-- Mongo offers exported: **455,318,596** in 753 vendor files (11 GB compressed)
+- Mongo offers exported: **528,790,167** in 753 vendor files (11 GB compressed). (The Phase 1 script's `DONE: 455,318,596` was the last-restart's incremental — `dump_vendor` returns 0 on skip-existing; see `feedback_dump_done_total_under_counts`. True count is `zcat | wc -l`.)
 - (vendor, articleNumber) pairs: **122,254,997** in `article_hashes_v2/`
 - Total hash references: **181,148,463**
 - KVRocks entries at Phase-2 start: 159,228,299 (carried over from prior pipeline machine; verified consistent vs current TEI by spot-check)
