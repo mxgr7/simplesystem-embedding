@@ -6,17 +6,18 @@ services:
     # fallback. CPU tag is `cpu-1.8`.
     image: ghcr.io/huggingface/text-embeddings-inference:turing-1.8
     # Tuned per the embedding-service plan: max sequence length 256 comes
-    # from the model's `sentence_bert_config.json`; the two flags below
-    # are the user-stated batch/concurrency caps. `--max-batch-tokens`
-    # sized as 8×256 so a full max-length client batch fits one forward
-    # pass without server-side splitting.
+    # from the model's `sentence_bert_config.json`; batch sizing below
+    # bumped 8 -> 32 to lift GPU utilization for the prewarm — bigger
+    # batches keep the GPU fed instead of paying TEI overhead per small
+    # batch. `--max-batch-tokens` sized as 32×256 so a full max-length
+    # client batch fits one forward pass without server-side splitting.
     command: [
       "--model-id", "/model",
       "--port", "80",
       "--pooling", "mean",
-      "--max-client-batch-size", "8",
+      "--max-client-batch-size", "32",
       "--max-concurrent-requests", "16",
-      "--max-batch-tokens", "2048",
+      "--max-batch-tokens", "8192",
     ]
     ports:
       - "8080:80"
@@ -58,6 +59,10 @@ services:
     ]
     ports:
       - "6666:6666"
+      # Extra host port for cross-box batch reindex clients (milvus): the SG
+      # blocks 6666 but allows 8000. Kernel-NAT'd to the container (no socat
+      # relay). 6666 stays the in-cluster/online port.
+      - "8000:6666"
     volumes:
       - /mnt/nvme/kvrocks-data:/var/lib/kvrocks
     restart: unless-stopped
@@ -70,6 +75,9 @@ services:
       TEI_URL: http://localhost:8080
       KVROCKS_URL: redis://localhost:6666/0
       API_KEY: ${EMBEDDING_API_KEY:-}
+      # Operator key for /admin/backends (runtime TEI pool mgmt). Falls back
+      # to API_KEY when unset; if both are empty the admin API is open.
+      ADMIN_API_KEY: ${EMBEDDING_ADMIN_API_KEY:-}
       TEI_MAX_CLIENT_BATCH: "8"
       TEI_MAX_CONCURRENCY: "16"
       KVROCKS_READ_TIMEOUT_MS: "50"

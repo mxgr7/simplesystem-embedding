@@ -16,9 +16,14 @@ class Config:
     tei_url: str
     kvrocks_url: str
     api_key: str
+    admin_api_key: str
     port: int
     tei_max_client_batch: int
     tei_max_concurrency: int
+    tei_weight: float
+    tei_timeout_s: float
+    tei_probe_interval_s: float
+    tei_drain_timeout_s: float
     kvrocks_read_timeout_ms: int
     kvrocks_max_connections: int
     max_inflight: int
@@ -43,9 +48,17 @@ def load_config() -> Config:
         tei_url=os.environ.get("TEI_URL", "http://localhost:8080").rstrip("/"),
         kvrocks_url=os.environ.get("KVROCKS_URL", "redis://localhost:6666/0"),
         api_key=os.environ.get("API_KEY", ""),
+        # Admin endpoints (/admin/backends) authenticate against this key;
+        # falls back to API_KEY when unset, so a single key still works.
+        admin_api_key=os.environ.get("ADMIN_API_KEY", ""),
         port=_int("PORT", 8082),
         tei_max_client_batch=_int("TEI_MAX_CLIENT_BATCH", 8),
         tei_max_concurrency=tei_max_concurrency,
+        # Bootstrap backend (seeded from TEI_URL) routing defaults.
+        tei_weight=_float("TEI_WEIGHT", 1.0),
+        tei_timeout_s=_float("TEI_TIMEOUT_S", 30.0),
+        tei_probe_interval_s=_float("TEI_PROBE_INTERVAL_S", 5.0),
+        tei_drain_timeout_s=_float("TEI_DRAIN_TIMEOUT_S", 30.0),
         kvrocks_read_timeout_ms=_int("KVROCKS_READ_TIMEOUT_MS", 50),
         kvrocks_max_connections=_int("KVROCKS_MAX_CONNECTIONS", 64),
         # 8× TEI concurrency = ~8 batch-rounds of buffering before we 429.

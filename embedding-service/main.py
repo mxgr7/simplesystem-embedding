@@ -40,9 +40,9 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from cache import EmbeddingCache, fp16_from_bytes, vec_bytes_from_fp16
 from config import load_config
-from embed_client import TEIClient
+from embed_client import TEIPool
 from hashing import article_hash
-from models import EmbedRequest
+from models import AddBackendRequest, EmbedRequest, PatchBackendRequest
 from rendering import N_FIELDS, render_from_nul
 
 log = logging.getLogger(__name__)
@@ -88,6 +88,52 @@ _CACHE_HIT_RATIO = Gauge(
     "embedding_service_cache_hit_ratio",
     "EWMA of cache hit ratio across recent requests.",
 )
+_BACKENDS_TOTAL = Gauge(
+    "embedding_service_tei_backends_total",
+    "Number of TEI backends currently registered in the pool.",
+)
+_BACKEND_INFLIGHT = Gauge(
+    "embedding_service_tei_backend_inflight",
+    "Assigned-or-running chunks per TEI backend.",
+    ("backend", "url"),
+)
+_BACKEND_HEALTHY = Gauge(
+    "embedding_service_tei_backend_healthy",
+    "1 if the TEI backend is healthy and selectable, else 0.",
+    ("backend", "url"),
+)
+_BACKEND_WEIGHT = Gauge(
+    "embedding_service_tei_backend_weight",
+    "Routing weight per TEI backend (0 = fallback-only / draining).",
+    ("backend", "url"),
+)
+
+# Label sets currently published, so departed backends can be cleared from
+# the registry on the next refresh (otherwise stale series linger forever).
+_PUBLISHED_BACKEND_LABELS: set[tuple[str, str]] = set()
+
+
+def _refresh_backend_metrics(backends: list[dict]) -> None:
+    """on_change callback for the pool — mirror the live backend set into
+    per-backend gauges and drop series for backends that have gone away."""
+    live: set[tuple[str, str]] = set()
+    for b in backends:
+        labels = (b["id"], b["url"])
+        live.add(labels)
+        _BACKEND_INFLIGHT.labels(*labels).set(b["inflight"])
+        _BACKEND_HEALTHY.labels(*labels).set(
+            1 if (b["healthy"] and not b["draining"]) else 0
+        )
+        _BACKEND_WEIGHT.labels(*labels).set(b["weight"])
+    for labels in _PUBLISHED_BACKEND_LABELS - live:
+        for g in (_BACKEND_INFLIGHT, _BACKEND_HEALTHY, _BACKEND_WEIGHT):
+            try:
+                g.remove(*labels)
+            except KeyError:
+                pass
+    _PUBLISHED_BACKEND_LABELS.clear()
+    _PUBLISHED_BACKEND_LABELS.update(live)
+    _BACKENDS_TOTAL.set(len(backends))
 
 
 class _HitRatioEWMA:
@@ -120,11 +166,23 @@ async def lifespan(app: FastAPI):
         read_timeout_s=cfg.kvrocks_read_timeout_ms / 1000.0,
         max_connections=cfg.kvrocks_max_connections,
     )
-    app.state.tei = TEIClient(
-        cfg.tei_url,
-        max_client_batch=cfg.tei_max_client_batch,
-        max_concurrency=cfg.tei_max_concurrency,
+    pool = TEIPool(
+        probe_interval_s=cfg.tei_probe_interval_s,
+        drain_timeout_s=cfg.tei_drain_timeout_s,
+        on_change=_refresh_backend_metrics,
     )
+    # Seed the local TEI as backend #0 — identical behaviour to before when
+    # no extra backends are added. Operators add/drain more at runtime via
+    # /admin/backends.
+    await pool.add_backend(
+        cfg.tei_url,
+        weight=cfg.tei_weight,
+        max_concurrency=cfg.tei_max_concurrency,
+        max_client_batch=cfg.tei_max_client_batch,
+        timeout_s=cfg.tei_timeout_s,
+    )
+    pool.start()
+    app.state.tei = pool
     app.state.inflight = 0
     app.state.hit_ratio = _HitRatioEWMA()
     log.info(
@@ -169,7 +227,15 @@ async def require_api_key(request: Request, call_next):
     if request.url.path in _PUBLIC_PATHS:
         return await call_next(request)
 
-    expected: str = request.app.state.cfg.api_key
+    cfg = request.app.state.cfg
+    # /admin/* authenticates against the admin key (falling back to the
+    # client key when ADMIN_API_KEY is unset) so the operator key for
+    # mutating the backend pool can differ from the client embed key.
+    if request.url.path.startswith("/admin"):
+        expected: str = cfg.admin_api_key or cfg.api_key
+    else:
+        expected = cfg.api_key
+
     if not expected:
         return await call_next(request)
 
@@ -190,6 +256,48 @@ async def require_api_key(request: Request, call_next):
 @app.get("/healthz", include_in_schema=False)
 async def healthz() -> dict:
     return {"ok": True}
+
+
+# --- Admin: runtime TEI backend pool --------------------------------------
+# Add / drain / re-weight TEI endpoints without restarting. Used to fan a
+# one-off indexing run onto a bigger remote GPU and drain it afterwards —
+# clients calling /embed see nothing change.
+
+@app.get("/admin/backends", include_in_schema=False)
+async def list_backends(request: Request) -> list[dict]:
+    return request.app.state.tei.list_backends()
+
+
+@app.post("/admin/backends", include_in_schema=False)
+async def add_backend(body: AddBackendRequest, request: Request) -> dict:
+    return await request.app.state.tei.add_backend(
+        body.url,
+        weight=body.weight,
+        max_concurrency=body.max_concurrency,
+        max_client_batch=body.max_client_batch,
+        timeout_s=body.timeout_s,
+    )
+
+
+@app.patch("/admin/backends/{backend_id}", include_in_schema=False)
+async def patch_backend(
+    backend_id: str, body: PatchBackendRequest, request: Request
+) -> dict:
+    try:
+        return await request.app.state.tei.set_weight(backend_id, body.weight)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"no backend {backend_id!r}")
+
+
+@app.delete("/admin/backends/{backend_id}", include_in_schema=False)
+async def delete_backend(backend_id: str, request: Request) -> JSONResponse:
+    try:
+        snap = await request.app.state.tei.remove_backend(backend_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"no backend {backend_id!r}")
+    # 202: draining is asynchronous; the backend leaves the pool once its
+    # inflight chunks finish (or the drain timeout elapses).
+    return JSONResponse(status_code=202, content=snap)
 
 
 # --- /embed handler -------------------------------------------------------
@@ -218,7 +326,7 @@ async def _embed_handler(
 ) -> list[list[float]]:
     cfg = request.app.state.cfg
     cache: EmbeddingCache = request.app.state.cache
-    tei: TEIClient = request.app.state.tei
+    tei: TEIPool = request.app.state.tei
 
     # 1. Normalise inputs to list[str].
     inputs = body.inputs if isinstance(body.inputs, list) else [body.inputs]

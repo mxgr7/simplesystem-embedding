@@ -74,6 +74,83 @@ paths:
         "200":
           description: Prometheus exposition format.
 
+  /admin/backends:
+    get:
+      summary: List the runtime TEI backend pool.
+      description: |
+        Authenticates with `ADMIN_API_KEY` (falls back to `API_KEY`).
+      responses:
+        "200":
+          description: Current backends with live inflight / health / weight.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Backend" }
+    post:
+      summary: Register a TEI backend at runtime.
+      description: |
+        Add another TEI endpoint (e.g. a bigger remote GPU for a one-off
+        indexing run). Misses route across backends proportionally to
+        `weight`; clients of `/embed` are unaffected. The backend starts
+        unhealthy and only enters rotation once its first `/health` probe
+        (kicked immediately on add) succeeds.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddBackendRequest" }
+      responses:
+        "200":
+          description: The newly added backend.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Backend" }
+
+  /admin/backends/{backend_id}:
+    patch:
+      summary: Re-weight a backend.
+      description: Weight `0` drains a backend to fallback-only.
+      parameters:
+        - name: backend_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [weight]
+              properties:
+                weight: { type: number, minimum: 0 }
+      responses:
+        "200":
+          description: The updated backend.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Backend" }
+        "404":
+          description: No such backend id.
+    delete:
+      summary: Gracefully drain and remove a backend.
+      parameters:
+        - name: backend_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "202":
+          description: |
+            Drain accepted. The backend stops taking new chunks and is
+            removed once inflight finishes (or the drain timeout elapses).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Backend" }
+        "404":
+          description: No such backend id.
+
 components:
   schemas:
     EmbedRequest:
@@ -96,6 +173,42 @@ components:
             inputs longer than the model's max_input_length (256 tokens)
             instead of returning 413. Belt-and-braces — the model already
             caps at 256.
+    AddBackendRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          description: TEI base URL, e.g. `https://big-gpu.example.com`.
+        weight:
+          type: number
+          default: 1.0
+          minimum: 0
+          exclusiveMinimum: true
+          description: Relative capacity; misses route proportionally to weight.
+        max_concurrency:
+          type: integer
+          default: 16
+          description: Match the backend's TEI `--max-concurrent-requests`.
+        max_client_batch:
+          type: integer
+          default: 8
+          description: Match the backend's TEI `--max-client-batch-size`.
+        timeout_s:
+          type: number
+          default: 30.0
+          description: Per-request HTTP timeout for this backend.
+    Backend:
+      type: object
+      properties:
+        id: { type: string }
+        url: { type: string }
+        weight: { type: number }
+        healthy: { type: boolean }
+        draining: { type: boolean }
+        inflight: { type: integer }
+        max_concurrency: { type: integer }
+        max_client_batch: { type: integer }
   securitySchemes:
     bearerAuth:
       type: http
