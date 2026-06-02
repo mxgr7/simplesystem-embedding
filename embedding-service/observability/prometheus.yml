@@ -8,7 +8,27 @@ scrape_configs:
   - job_name: embedding-service
     metrics_path: /metrics
     static_configs:
-      - targets: ["host.docker.internal:8082"]
+      - targets: ["host.docker.internal:9000"]   # rebound 8082 -> 9000 for the v1-semantic indexer
+        labels:
+          stack: embedding-service
+
+  # article-search-indexer — Spring Boot actuator/prometheus on the management
+  # port (ACTUATOR_PORT=9091); network_mode:host, reached via the host gateway.
+  - job_name: indexer
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # indexer now runs on milvus (172.16.20.115); was host.docker.internal:9091
+      - targets: ["172.16.20.115:9091"]
+        labels:
+          stack: embedding-service
+
+  # Kafka offset/lag exporter (scripts/kafka_lag_exporter.py) on the host —
+  # exposes per-partition end/start/committed offsets for producer/consumer
+  # rate + queue size + lag panels.
+  - job_name: kafka_lag
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9145"]
         labels:
           stack: embedding-service
 
@@ -19,6 +39,15 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["host.docker.internal:8080"]
+        labels:
+          stack: embedding-service
+
+  # Remote TEI box (vast.ai) — same te_* metric names as local TEI, so
+  # dashboard queries must filter by job to avoid summing the two.
+  - job_name: tei_remote
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["88.207.86.141:41661"]
         labels:
           stack: embedding-service
 
