@@ -5,9 +5,14 @@ Counterpart to bench_hnsw.py. Where bench_hnsw.py sweeps the (m, ef_construction
 (m, ef_construction) and sweeps the precision axis instead:
 
   - hnsw         — full fp32, no quantization (reference recall ceiling)
+  - bfloat16     — bfloat16 element_type, hnsw graph (2× smaller; precision
+                   reduction, NOT scalar quantization — gentler than int8)
   - int8_hnsw    — int8 scalar quantization (4× smaller than fp32)
   - int4_hnsw    — int4 scalar quantization (8× smaller)
   - bbq_hnsw     — 1-bit binary quantization + rotation + on-disk rerank (32× smaller)
+
+Note: "bfloat16" is a dense_vector `element_type` (graph stays `hnsw`), unlike the
+int8/int4/bbq variants which are `index_options.type` quantizations of fp32 input.
 
 Same harness as bench_hnsw.py — bulk-loads the corpus, force-merges to one
 segment, runs the same 1k queries from build_hnsw_eval_dataset.py against
@@ -38,7 +43,7 @@ BULK_CONCURRENCY = 4
 DEFAULT_M = 16
 DEFAULT_EF_CONSTRUCTION = 100
 
-PRECISIONS: list[str] = ["hnsw", "int8_hnsw", "int4_hnsw", "bbq_hnsw"]
+PRECISIONS: list[str] = ["hnsw", "bfloat16", "int8_hnsw", "int4_hnsw", "bbq_hnsw"]
 NUM_CANDIDATES = [50, 100, 200, 500, 1000, 2000]
 
 
@@ -51,6 +56,27 @@ def create_index(
     dim: int,
 ) -> None:
     client.delete(f"/{name}", params={"ignore_unavailable": "true"})
+    # bfloat16 is an element_type (graph stays plain hnsw); the int8/int4/bbq
+    # variants are index_options.type quantizations of the default fp32 element.
+    vector_mapping: dict = {
+        "type": "dense_vector",
+        "dims": dim,
+        "similarity": "cosine",
+        "index": True,
+    }
+    if precision == "bfloat16":
+        vector_mapping["element_type"] = "bfloat16"
+        vector_mapping["index_options"] = {
+            "type": "hnsw",
+            "m": m,
+            "ef_construction": ef_construction,
+        }
+    else:
+        vector_mapping["index_options"] = {
+            "type": precision,
+            "m": m,
+            "ef_construction": ef_construction,
+        }
     body = {
         "settings": {
             "index": {
@@ -63,17 +89,7 @@ def create_index(
         "mappings": {
             "properties": {
                 "idx": {"type": "integer"},
-                "vector": {
-                    "type": "dense_vector",
-                    "dims": dim,
-                    "similarity": "cosine",
-                    "index": True,
-                    "index_options": {
-                        "type": precision,
-                        "m": m,
-                        "ef_construction": ef_construction,
-                    },
-                },
+                "vector": vector_mapping,
             }
         },
     }
