@@ -39,6 +39,7 @@ from threading import Lock
 import duckdb
 import httpx
 import numpy as np
+import pyarrow.dataset as pds
 import pyarrow.parquet as pq
 import redis
 from dotenv import load_dotenv
@@ -119,7 +120,8 @@ log = logging.getLogger("prewarm_v2")
 
 # --- Phase 1: build render-inputs parquet --------------------------------
 
-def build_render_inputs(input_glob: str, out_path: Path) -> None:
+def build_render_inputs(input_glob: str, out_path: Path,
+                        memory_limit: str = "4GB") -> None:
     if out_path.exists():
         log.info("render-inputs parquet exists at %s — skipping build", out_path)
         return
@@ -130,13 +132,22 @@ def build_render_inputs(input_glob: str, out_path: Path) -> None:
     con = duckdb.connect()
     con.execute(f"SET threads = {os.cpu_count() or 8}")
     con.execute("SET enable_progress_bar = false")
-    # GROUP BY hash table for 455M rows won't fit in RAM on this 7GB box;
-    # cap memory and spill to disk via temp_directory.
-    con.execute("SET memory_limit = '4GB'")
+    # GROUP BY hash table for 455M rows is large; sized via --memory-limit
+    # (default 4GB for small VMs). temp_directory spills overflow to disk.
+    con.execute(f"SET memory_limit = '{memory_limit}'")
     con.execute("SET preserve_insertion_order = false")
-    con.execute(f"SET temp_directory = '{EXPORT_DIR}/duckdb_tmp'")
+    # temp_directory derived from out_path's parent — don't reuse the
+    # hard-coded EXPORT_DIR constant (it points at the OLD May 12 dump
+    # dir; spill would write to the wrong filesystem).
+    tmp_dir = out_path.parent / "duckdb_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    con.execute(f"SET temp_directory = '{tmp_dir}'")
     con.execute(_DUCKDB_MACROS)
 
+    # Write to a directory with 32 hash buckets so the parquet write runs
+    # in parallel (DuckDB's single-file writer is one thread; the per-bucket
+    # writes parallelise). The same path is read back via pyarrow.dataset
+    # in prewarm(), which handles the Hive-partitioned directory natively.
     sql = f"""
     COPY (
       WITH src AS (
@@ -175,14 +186,18 @@ def build_render_inputs(input_glob: str, out_path: Path) -> None:
         any_value(ean)                        AS ean,
         any_value(article_number)             AS article_number,
         any_value(manufacturer_article_number) AS manufacturer_article_number,
-        any_value(manufacturer_article_type)  AS manufacturer_article_type
+        any_value(manufacturer_article_type)  AS manufacturer_article_type,
+        CAST(abs(hash(article_hash)) % 32 AS INT) AS bucket
       FROM hashed
       GROUP BY article_hash
     ) TO '{out_path}'
-    (FORMAT PARQUET, COMPRESSION 'zstd', ROW_GROUP_SIZE 50000);
+    (FORMAT PARQUET, COMPRESSION 'zstd', ROW_GROUP_SIZE 50000,
+     PARTITION_BY (bucket), OVERWRITE_OR_IGNORE);
     """
     con.execute(sql)
-    n_rows = duckdb.sql(f"SELECT COUNT(*) FROM '{out_path}'").fetchone()[0]
+    n_rows = duckdb.sql(
+        f"SELECT COUNT(*) FROM read_parquet('{out_path}/**/*.parquet')"
+    ).fetchone()[0]
     log.info("built render-inputs parquet: %s rows in %.1fs",
              f"{n_rows:,}", time.time() - t0)
 
@@ -343,6 +358,7 @@ def prewarm(
     concurrency: int,
     chunk_size: int,
     exists_batch: int,
+    shard: str | None = None,
 ) -> None:
     # Set module-level state BEFORE forking workers — they inherit it via COW.
     global _g_renderer, _g_tei_url, _g_redis_kwargs
@@ -350,8 +366,26 @@ def prewarm(
     _g_tei_url = tei_url
     _g_redis_kwargs = redis_kwargs
 
-    pq_file = pq.ParquetFile(str(parquet_path))
-    total_unique = pq_file.metadata.num_rows
+    # parquet_path is a directory of Hive-partitioned files
+    # (bucket=NN/data_*.parquet). The single-threaded EXISTS scan is the
+    # bottleneck, so --shard K/N lets several processes each own the buckets
+    # where bucket % N == K and scan in parallel (KVRocks has the headroom).
+    if shard:
+        k, n = (int(x) for x in shard.split("/"))
+        all_buckets = sorted(Path(parquet_path).glob("bucket=*"),
+                             key=lambda p: int(p.name.split("=")[1]))
+        my_buckets = [p for p in all_buckets
+                      if int(p.name.split("=")[1]) % n == k]
+        # pds.dataset needs file paths, not dirs -> expand to *.parquet.
+        # No hive partitioning (the `bucket` column isn't projected anyway).
+        mine = [str(f) for p in my_buckets for f in p.glob("*.parquet")]
+        dataset = pds.dataset(mine, format="parquet")
+        log.info("shard %s: %d of %d buckets, %d files", shard,
+                 len(my_buckets), len(all_buckets), len(mine))
+    else:
+        dataset = pds.dataset(str(parquet_path), format="parquet",
+                              partitioning="hive")
+    total_unique = dataset.count_rows()
     log.info("scanning %s (%s unique hashes)", parquet_path, f"{total_unique:,}")
 
     stats = PrewarmStats()
@@ -361,10 +395,16 @@ def prewarm(
     pending_rows: list[dict] = []
     futures: set = set()
 
+    # Project only the columns we need (drop the synthetic `bucket` partition
+    # column the writer added).
+    columns = ["article_hash", "name", "manufacturer_name", "description",
+               "category_paths", "ean", "article_number",
+               "manufacturer_article_number", "manufacturer_article_type"]
+
     ctx = mp.get_context("fork")
     with ProcessPoolExecutor(max_workers=concurrency, mp_context=ctx) as pool:
         try:
-            for chunk in pq_file.iter_batches(batch_size=chunk_size):
+            for chunk in dataset.to_batches(batch_size=chunk_size, columns=columns):
                 rows = chunk.to_pylist()
                 if not rows:
                     continue
@@ -453,11 +493,17 @@ def main() -> None:
                     help="Glob for the gzipped Mongo offer exports.")
     ap.add_argument("--build-only", action="store_true",
                     help="Build the render-inputs parquet and exit.")
+    ap.add_argument("--shard", default=None,
+                    help="K/N — scan only buckets where bucket %% N == K, so N "
+                         "processes can parallelize the single-threaded EXISTS "
+                         "scan. Build (if needed) still covers all buckets.")
+    ap.add_argument("--memory-limit", default="4GB",
+                    help="DuckDB memory_limit during the render-inputs build.")
     args = ap.parse_args()
 
     # Phase 1 — DuckDB build
     out_path = Path(args.render_inputs_parquet)
-    build_render_inputs(args.input_glob, out_path)
+    build_render_inputs(args.input_glob, out_path, memory_limit=args.memory_limit)
     if args.build_only:
         return
 
@@ -489,6 +535,7 @@ def main() -> None:
         concurrency=args.concurrency,
         chunk_size=args.chunk_size,
         exists_batch=args.exists_batch,
+        shard=args.shard,
     )
 
 

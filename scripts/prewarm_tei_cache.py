@@ -1,4 +1,10 @@
-"""Pre-populate the TEI Redis cache from `offers_embedded_full.parquet`.
+"""Pre-populate the TEI cache from `offers_embedded_full.parquet`.
+
+Targets any Redis-protocol store — point `--redis-url` at the redis
+service (6379) or the kvrocks service (6666, see `dev/kvrocks/`). The
+value layout (256 B fp16) and key format (`tei:{HASH_VERSION}:
+{compute_article_hash(row)}`) are identical across backends, so the
+bulk indexer reads either transparently via `redis.Redis.from_url`.
 
 The bulk indexer (`indexer/bulk.py`) consults `indexer/tei_cache.py`
 before calling TEI; on a hit it skips the GPU. The parquet bundles
@@ -7,17 +13,25 @@ already-computed fp16 embeddings for every offer-grouped article
 fallback misses), so populating the cache up front lets the bulk run
 skip TEI for every article whose identity matches a parquet row.
 
-Idempotent: each row maps to a deterministic key (`tei:{HASH_VERSION}:
-{compute_article_hash(row)}`) and a fixed-bytes value; re-running
-overwrites with identical content. Resumable per-bucket via
-`--progress-dir/bucket=NN.done` markers — a bucket completes
-atomically before its marker is written, so a crashed run resumes at
-the bucket boundary, not mid-bucket.
+Idempotent: each row maps to a deterministic key and a fixed-bytes
+value; re-running overwrites with identical content. Resumable
+per-bucket via `--progress-dir/bucket=NN.done` markers — a bucket
+completes atomically before its marker is written, so a crashed run
+resumes at the bucket boundary, not mid-bucket. Use a different
+`--progress-dir` per backend so a Redis-only load doesn't make the
+KVRocks loader skip buckets it hasn't actually written.
 
-Run example:
+Run examples:
+    # Redis
     uv run python scripts/prewarm_tei_cache.py \
         --parquet-dir /data/datasets/offers_embedded_full.parquet \
         --redis-url redis://localhost:6379/0
+
+    # KVRocks
+    uv run python scripts/prewarm_tei_cache.py \
+        --parquet-dir /data/datasets/offers_embedded_full.parquet \
+        --redis-url redis://localhost:6666/0 \
+        --progress-dir /tmp/prewarm_kvrocks.progress
 """
 
 from __future__ import annotations

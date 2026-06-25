@@ -75,7 +75,7 @@ _PINNED_COLUMNS = (
 )
 
 
-def build(input_glob, out_dir, buckets):
+def build(input_glob, out_dir, buckets, memory_limit):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -84,8 +84,10 @@ def build(input_glob, out_dir, buckets):
     con.execute("SET enable_progress_bar = false")
     con.execute("SET preserve_insertion_order = false")
     # The GROUP BY hash table for 455M rows -> ~150-250M (vendor,artno) groups
-    # would not fit in RAM on this 7GB box; cap memory and spill to disk.
-    con.execute("SET memory_limit = '4GB'")
+    # is large. Sized via --memory-limit (default 4GB for small VMs); raise
+    # to a fraction of available RAM on big boxes. temp_directory lets
+    # DuckDB spill any overflow to /data.
+    con.execute(f"SET memory_limit = '{memory_limit}'")
     tmp_dir = out_dir.parent / "duckdb_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     con.execute(f"SET temp_directory = '{tmp_dir}'")
@@ -155,8 +157,10 @@ def main():
     ap.add_argument("--out-dir", required=True,
                     help="Output directory; will hold bucket=NN/*.parquet.")
     ap.add_argument("--buckets", type=int, default=16)
+    ap.add_argument("--memory-limit", default="4GB",
+                    help="DuckDB memory_limit; spill happens above this.")
     args = ap.parse_args()
-    build(args.input_glob, args.out_dir, args.buckets)
+    build(args.input_glob, args.out_dir, args.buckets, args.memory_limit)
 
 
 if __name__ == "__main__":
