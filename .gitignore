@@ -14,7 +14,7 @@ mlruns-smoke/
 
 mlflow.db
 
-logs/playground-app.log
+logs/
 
 .env
 .nextgen-auth
