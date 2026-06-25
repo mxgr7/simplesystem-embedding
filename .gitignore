@@ -16,6 +16,9 @@ mlflow.db
 
 logs/
 
+# Local-only 6GB mmap lookup cache (symlink to /data); rebuilt by the v5 importer.
+lookup_cache
+
 .env
 .nextgen-auth
 .nextgen-auth.tmp
