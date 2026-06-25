@@ -1,0 +1,15 @@
+services:
+  kvrocks:
+    image: apache/kvrocks:latest
+    # Disk-backed Redis-protocol cache. Runs alongside (not in place of)
+    # the redis service in playground-app/compose.yaml — same
+    # `tei:v{HASH_VERSION}:` keyspace, different port. RocksDB store so
+    # the ~50 GB working set doesn't pin RAM.
+    # Config lives at /data/kvrocks-data/kvrocks.conf (mounted to
+    # /var/lib/kvrocks/kvrocks.conf inside the container, which is where
+    # the image's default `-c` flag points).
+    ports:
+      - "6666:6666"
+    volumes:
+      - /data/kvrocks-data:/var/lib/kvrocks
+    restart: unless-stopped
