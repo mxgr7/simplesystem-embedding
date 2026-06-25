@@ -138,14 +138,21 @@ for i in $(seq 1 $((NUM_GPUS - 1))); do
   launch_tei $i
 done
 
-# nginx round-robin on :3000 -> backends
+# nginx least_conn on :3000 -> backends. least_conn (vs round-robin) avoids
+# head-of-line blocking when request durations vary by 10x (small vs large batch).
+# Per-backend /teiN/metrics locations bypass the upstream so Prometheus can
+# scrape each backend as a distinct target (round-robined /metrics is useless).
 UPSTREAMS=""
+METRICS_LOCATIONS=""
 for i in $(seq 0 $((NUM_GPUS - 1))); do
-  UPSTREAMS="${UPSTREAMS}    server 127.0.0.1:$((3001 + i));\n"
+  PORT=$((3001 + i))
+  UPSTREAMS="${UPSTREAMS}    server 127.0.0.1:${PORT};\n"
+  METRICS_LOCATIONS="${METRICS_LOCATIONS}  location = /tei${i}/metrics { proxy_pass http://127.0.0.1:${PORT}/metrics; }\n"
 done
 rm -f /etc/nginx/sites-enabled/default
 cat >/etc/nginx/sites-available/tei <<NGINX
 upstream tei {
+    least_conn;
 $(printf "%b" "$UPSTREAMS")
 }
 server {
@@ -154,6 +161,7 @@ server {
   proxy_read_timeout  600s;
   proxy_send_timeout  600s;
   location = /_status { return 200 "nginx-ok\n"; }
+$(printf "%b" "$METRICS_LOCATIONS")
   location / {
     proxy_pass http://tei;
     proxy_set_header Host \$host;

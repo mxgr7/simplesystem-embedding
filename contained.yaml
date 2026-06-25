@@ -1,4 +1,5 @@
 defaults:
   mounts:
     - ../../data:/data
+    - ../../tei-models:/tei-models
     - ../next-gen:/next-gen
