@@ -34,6 +34,44 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
+  # Second TEI on the same T4, dedicated to indexer embedding so a queue-Full
+  # panic / crash-loop under indexer burst can't refuse query traffic on :8080.
+  # Shares the GPU with `tei` via the default compute mode (Turing = no MIG);
+  # memory is abundant (~700MB model each of 15GB) and they time-slice — fine
+  # because query embed is ~7ms of a ~1s query, not the bottleneck. The
+  # embedding-service pool routes indexer misses here (admin /admin/backends).
+  tei-indexer:
+    # 1.9.x fixes the queue-Full panic (PR #726: bounded admission → graceful
+    # 429 instead of crash-loop). GeLU erf→tanh default change verified to
+    # produce identical vectors for this model (cosine 1.0); --auto-truncate
+    # pinned to false to preserve 1.8.x behavior (1.9 flips the default).
+    image: ghcr.io/huggingface/text-embeddings-inference:turing-1.9
+    command: [
+      "--model-id", "/model",
+      "--port", "80",
+      "--pooling", "mean",
+      "--max-client-batch-size", "32",
+      # Server-side admission pool. Held above the wrapper's client throttle
+      # (TEI_MAX_CONCURRENCY=16) so bursts queue *inside* TEI instead of being
+      # rejected with "no permits available" (429) — permits are a queue-depth
+      # counter, not GPU memory (that's bounded by --max-batch-tokens).
+      "--max-concurrent-requests", "128",
+      "--max-batch-tokens", "8192",
+      "--auto-truncate", "false",
+    ]
+    ports:
+      - "8081:80"
+    volumes:
+      - ${TEI_MODEL_DIR:-/data/tei-models/useful-cub-58-st}:/model:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
   kvrocks:
     image: apache/kvrocks:latest
     # Disk-backed Redis-protocol cache. Same `tei:v2:` keyspace as
@@ -66,13 +104,28 @@ services:
     volumes:
       - /mnt/nvme/kvrocks-data:/var/lib/kvrocks
     restart: unless-stopped
+    # Bound the working set on this 15GB/0-swap box. cgroup v2 charges the
+    # SST page cache to this cgroup, so this caps KVRocks's *total* footprint
+    # (block cache + memtables + page cache of the 55GB dataset) — preventing
+    # it from thrashing the whole box during an anonymous-memory spike.
+    # Reclaimable page cache is evicted within this budget before any OOM.
+    mem_limit: 5g
+    memswap_limit: 5g
 
   embedding-service:
     build:
       context: ..
       dockerfile: embedding-service/Dockerfile
+    # Listen on :9000 (host networking). The Dockerfile CMD defaults to :8082;
+    # this override moves it to the port the next-gen article-search-indexer
+    # points its TEI client at (TEI_URL=http://localhost:9000) for the
+    # v1-semantic backfill. --limit-concurrency kept at the image default.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000", "--limit-concurrency", "256"]
     environment:
-      TEI_URL: http://localhost:8080
+      # Bootstrap backend = the indexer-dedicated TEI on :8081 (see tei-indexer).
+      # :8080 is reserved for the query service. The live pool is mutated at
+      # runtime via /admin/backends; this seed only applies on (re)create.
+      TEI_URL: http://localhost:8081
       KVROCKS_URL: redis://localhost:6666/0
       API_KEY: ${EMBEDDING_API_KEY:-}
       # Operator key for /admin/backends (runtime TEI pool mgmt). Falls back
@@ -88,7 +141,7 @@ services:
       RETRY_AFTER_S: "0.3"
     network_mode: host
     depends_on:
-      - tei
+      - tei-indexer
       - kvrocks
     restart: unless-stopped
 
@@ -106,6 +159,66 @@ services:
       - "9121:9121"
     depends_on:
       - kvrocks
+    restart: unless-stopped
+
+  search-prober:
+    # Synthetic search prober: health-check + cold-start warm-keeper. Fires ONE real
+    # semantic query at the preprod gateway every PROBE_INTERVAL s, rotating query+context
+    # so it keeps the shared ES page cache warm AND exposes real end-to-end preprod
+    # p50/p90/p99 to Prometheus (the preprod pod itself isn't scrapable). stdlib-only, so
+    # the base python image runs it with no pip install. Same bridge net as Prometheus ->
+    # scraped by service name on :9155. Creds come from the repo-root .env (PREPROD_REV_PROXY_*).
+    image: python:3.12-slim
+    command: ["python", "/app/prober.py"]
+    volumes:
+      - ./observability/search-prober/prober.py:/app/prober.py:ro
+      - ../scripts/company_context_map.json:/app/company_context_map.json:ro
+    environment:
+      PROBE_URL: https://preprod-api.platform.simplesystem.com
+      PROBE_AUTH: ${PREPROD_REV_PROXY_USER:-}:${PREPROD_REV_PROXY_PASSWORD:-}
+      PROBE_INTERVAL: "10"
+      PROBE_PORT: "9155"
+      PROBE_MAP: /app/company_context_map.json
+      PROBE_TARGET_LABEL: preprod
+    ports:
+      - "9155:9155"
+    restart: unless-stopped
+
+  elasticsearch_exporter:
+    # Monitors the temporary semantic ES ("semantic-es-temp", ES 9.3.3, single
+    # node) that holds prod-article-index-v1-semantic-bf16 during the catch-up
+    # backfill. On the same bridge net as Prometheus, so it's scraped by
+    # service name on :9114.
+    #
+    # The ES host (semantic-es-temp.prod.nextgen -> 172.16.10.21) resolves over
+    # the bridge's embedded DNS, so no host-gateway trick is needed here.
+    #
+    # Credentials: user max.gerer is a temp-cluster superuser, so cluster:monitor
+    # works directly. The exporter merges ES_USERNAME/ES_PASSWORD into the URI;
+    # we pass them from discrete .env vars (ES_SEMANTIC_USERNAME/PASSWORD, derived
+    # from ELASTIC_SEMANTIC_URL) via compose substitution so the password is never
+    # committed and never appears in the process args / docker inspect.
+    image: quay.io/prometheuscommunity/elasticsearch-exporter:v1.10.0
+    command:
+      - --es.uri=http://semantic-es-temp.prod.nextgen:9200
+      - --es.all
+      - --es.indices
+      - --es.indices_settings
+      - --es.shards
+      - --collector.clustersettings
+      - --es.timeout=30s
+      - --web.listen-address=:9114
+    # Sourced from the repo-root .env via `--env-file ../.env` (the compose
+    # project dir is embedding-service/, so .env isn't auto-loaded). Empty
+    # defaults keep `docker compose up` from failing on the OTHER services when
+    # no env-file is passed; the exporter just won't authenticate until creds
+    # are supplied. Deploy this service with:
+    #   docker compose --env-file .env -f embedding-service/compose.yaml up -d elasticsearch_exporter
+    environment:
+      ES_USERNAME: ${ES_SEMANTIC_USERNAME:-}
+      ES_PASSWORD: ${ES_SEMANTIC_PASSWORD:-}
+    ports:
+      - "9114:9114"
     restart: unless-stopped
 
   dcgm_exporter:
@@ -167,6 +280,7 @@ services:
       - redis_exporter
       - dcgm_exporter
       - node_exporter
+      - elasticsearch_exporter
     restart: unless-stopped
 
   grafana:
