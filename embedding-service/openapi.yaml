@@ -67,6 +67,24 @@ paths:
         "200":
           description: Always returns a small JSON body when the process is up.
 
+  /readyz:
+    get:
+      summary: Readiness probe (real TEI embed canary + cache populated).
+      description: |
+        Returns 200 only when the box can actually serve embeddings:
+        a real end-to-end embed canary through TEI succeeds (GPU/model
+        up — bypasses the cache) AND KVRocks is reachable and populated
+        (SCAN-based, so it survives KVRocks' post-restart DBSIZE reset).
+        Polled by the weekly bootup automation (INFRA-1782).
+      responses:
+        "200":
+          description: |
+            Ready. `{"ready": true, "checks": {"tei_embed": "ok", "cache": "ok"}}`
+        "503":
+          description: |
+            Not ready; the body says which check(s) failed, e.g.
+            `{"ready": false, "checks": {"tei_embed": "error: ...", "cache": "empty"}}`
+
   /metrics:
     get:
       summary: Prometheus metrics scrape endpoint.

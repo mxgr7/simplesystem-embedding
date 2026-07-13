@@ -283,3 +283,205 @@ def test_embed_rejects_oversize_request(app_with_stubs, monkeypatch):
         "inputs": [_make_8field(), _make_8field(), _make_8field()],
     })
     assert r.status_code == 413
+
+
+# ---------------------------------------------------------------------------
+# /readyz — readiness gate (INFRA-1782)
+# ---------------------------------------------------------------------------
+
+class StubReadyCache:
+    """Cache stub for /readyz tests — tracks whether the canary ever
+    touched the read path (it must not)."""
+
+    def __init__(self) -> None:
+        self.populated = True
+        self.error: Exception | None = None
+        self.scan_calls = 0
+        self.mget_calls = 0
+
+    async def scan_any(self, match="tei:*", *, timeout_s):
+        self.scan_calls += 1
+        if self.error:
+            raise self.error
+        return self.populated
+
+    async def mget(self, hashes):
+        self.mget_calls += 1
+        return [None] * len(hashes)
+
+    async def mset(self, hash_to_bytes):
+        pass
+
+    async def aclose(self):
+        pass
+
+
+class StubReadyPool:
+    def __init__(self) -> None:
+        self.embed_calls = 0
+        self.error: Exception | None = None
+
+    async def add_backend(self, url, **kw):
+        return {"id": "b1", "url": url}
+
+    def start(self):
+        pass
+
+    async def embed(self, texts, *, truncate=True):
+        self.embed_calls += 1
+        if self.error:
+            raise self.error
+        return np.zeros((len(texts), 128), dtype=np.float16)
+
+    async def aclose(self):
+        pass
+
+
+@pytest.fixture
+def readyz_app(monkeypatch):
+    """Patch the names `lifespan` actually constructs (EmbeddingCache /
+    TEIPool — unlike the stale TEIClient stub above)."""
+    import main
+
+    cache_stub = StubReadyCache()
+    pool_stub = StubReadyPool()
+    monkeypatch.setattr(main, "EmbeddingCache", lambda *a, **kw: cache_stub)
+    monkeypatch.setattr(main, "TEIPool", lambda *a, **kw: pool_stub)
+
+    with TestClient(main.app) as client:
+        yield client, main.app, pool_stub, cache_stub
+
+
+def test_readyz_ok(readyz_app):
+    client, app, pool, cache = readyz_app
+    r = client.get("/readyz")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ready": True, "checks": {"tei_embed": "ok", "cache": "ok"}}
+    assert pool.embed_calls == 1
+    assert cache.scan_calls == 1
+
+
+def test_readyz_canary_bypasses_cache(readyz_app):
+    client, app, pool, cache = readyz_app
+    r = client.get("/readyz")
+    assert r.status_code == 200
+    # The canary must go straight to TEI — never through the cache read
+    # path, or a warm cache could fake GPU readiness.
+    assert cache.mget_calls == 0
+    assert pool.embed_calls == 1
+
+
+def test_readyz_tei_down(readyz_app):
+    client, app, pool, cache = readyz_app
+    pool.error = RuntimeError("no healthy TEI backend available")
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["ready"] is False
+    assert body["checks"]["tei_embed"].startswith("error:")
+    assert body["checks"]["cache"] == "ok"  # isolation: cache still reported
+
+
+def test_readyz_cache_empty(readyz_app):
+    client, app, pool, cache = readyz_app
+    cache.populated = False
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    body = r.json()
+    assert body["checks"]["cache"] == "empty"
+    assert body["checks"]["tei_embed"] == "ok"
+
+
+def test_readyz_cache_error(readyz_app):
+    client, app, pool, cache = readyz_app
+    cache.error = ConnectionError("connection refused")
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    assert r.json()["checks"]["cache"].startswith("error:")
+
+
+def test_readyz_both_fail(readyz_app):
+    client, app, pool, cache = readyz_app
+    pool.error = RuntimeError("tei down")
+    cache.error = ConnectionError("kvrocks down")
+    r = client.get("/readyz")
+    assert r.status_code == 503
+    checks = r.json()["checks"]
+    assert checks["tei_embed"] != "ok" and checks["cache"] != "ok"
+
+
+def test_readyz_is_public(readyz_app):
+    """No bearer token required even when API_KEY is set — the bootup
+    automation polls unauthenticated."""
+    client, app, pool, cache = readyz_app
+    app.state.cfg = app.state.cfg.__class__(
+        **{**app.state.cfg.__dict__, "api_key": "sekret"}
+    )
+    r = client.get("/readyz")
+    assert r.status_code != 401
+
+
+def test_readyz_success_memo(readyz_app):
+    """A full success within the memo TTL skips re-running the canary."""
+    client, app, pool, cache = readyz_app
+    assert client.get("/readyz").status_code == 200
+    assert client.get("/readyz").status_code == 200
+    assert pool.embed_calls == 1
+    # Once the memo is expired, checks run again and see new failures.
+    app.state.readyz_ok_at = float("-inf")
+    pool.error = RuntimeError("tei down")
+    assert client.get("/readyz").status_code == 503
+
+
+def test_readyz_failure_not_memoized(readyz_app):
+    """Failures re-check on every poll — recovery is seen immediately."""
+    client, app, pool, cache = readyz_app
+    pool.error = RuntimeError("tei down")
+    assert client.get("/readyz").status_code == 503
+    pool.error = None
+    assert client.get("/readyz").status_code == 200
+    assert pool.embed_calls == 2
+
+
+# --- EmbeddingCache.scan_any (unit, hand-rolled fake redis client) ---------
+
+def _cache_with_fake_client(fake) -> "object":
+    from cache import EmbeddingCache
+
+    c = EmbeddingCache.__new__(EmbeddingCache)
+    c._client = fake
+    return c
+
+
+def test_scan_any_pages_past_empty_match_batches():
+    """MATCH filters after COUNT, so intermediate batches can be empty —
+    scan_any must follow the cursor until a key shows up."""
+    class FakeClient:
+        def __init__(self):
+            self.pages = [(42, []), (7, []), (0, [b"tei:v2:x"])]
+
+        async def scan(self, cursor, match, count):
+            return self.pages.pop(0)
+
+    cache = _cache_with_fake_client(FakeClient())
+    assert asyncio.run(cache.scan_any(timeout_s=1.0)) is True
+
+
+def test_scan_any_empty_db_returns_false():
+    class FakeClient:
+        async def scan(self, cursor, match, count):
+            return (0, [])
+
+    cache = _cache_with_fake_client(FakeClient())
+    assert asyncio.run(cache.scan_any(timeout_s=1.0)) is False
+
+
+def test_scan_any_timeout_raises():
+    class FakeClient:
+        async def scan(self, cursor, match, count):
+            await asyncio.sleep(5.0)
+            return (0, [])
+
+    cache = _cache_with_fake_client(FakeClient())
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(cache.scan_any(timeout_s=0.05))

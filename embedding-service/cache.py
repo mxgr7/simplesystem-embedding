@@ -122,6 +122,30 @@ class EmbeddingCache:
                 e, len(hash_to_bytes),
             )
 
+    async def scan_any(self, match: str = "tei:*", *, timeout_s: float) -> bool:
+        """True iff at least one key matching `match` exists (/readyz).
+
+        Deliberately NOT DBSIZE: KVRocks serves a cached counter that
+        resets to 0 after a restart until an explicit `DBSIZE SCAN`
+        recount, so DBSIZE>0 false-negatives on exactly the weekly-bootup
+        path this check gates. COUNT 100 because MATCH filters *after*
+        fetching COUNT entries, so COUNT 1 could return empty batches
+        indefinitely. Unlike mget/mset this raises on error or timeout —
+        the caller must distinguish unreachable from empty.
+        """
+        async def _scan() -> bool:
+            cursor = 0
+            while True:
+                cursor, keys = await self._client.scan(
+                    cursor=cursor, match=match, count=100,
+                )
+                if keys:
+                    return True
+                if cursor == 0:
+                    return False
+
+        return await asyncio.wait_for(_scan(), timeout=timeout_s)
+
 
 def vec_bytes_from_fp16(arr: np.ndarray) -> bytes:
     """fp16 ndarray → raw bytes for cache storage. Shape (128,) → 256 B."""

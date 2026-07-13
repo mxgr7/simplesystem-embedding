@@ -30,6 +30,8 @@ class Config:
     max_inputs_per_request: int
     request_budget_s: float
     retry_after_s: float
+    readyz_tei_timeout_s: float
+    readyz_cache_timeout_s: float
 
 
 def _int(name: str, default: int) -> int:
@@ -66,4 +68,10 @@ def load_config() -> Config:
         max_inputs_per_request=_int("MAX_INPUTS_PER_REQUEST", 256),
         request_budget_s=_float("REQUEST_BUDGET_S", 5.0),
         retry_after_s=_float("RETRY_AFTER_S", 0.3),
+        # /readyz check budgets. The TEI canary fails fast instead of
+        # running the pool's full 5s retry budget — the poller retries
+        # anyway. The cache scan gets more than the 50ms hot-path read
+        # timeout: right after reboot the first SCAN hits cold disk.
+        readyz_tei_timeout_s=_float("READYZ_TEI_TIMEOUT_S", 3.0),
+        readyz_cache_timeout_s=_float("READYZ_CACHE_TIMEOUT_S", 2.0),
     )

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -38,7 +39,7 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from cache import EmbeddingCache, fp16_from_bytes, vec_bytes_from_fp16
+from cache import VECTOR_DIM, EmbeddingCache, fp16_from_bytes, vec_bytes_from_fp16
 from config import load_config
 from embed_client import TEIPool
 from hashing import article_hash
@@ -58,6 +59,7 @@ _PUBLIC_PATHS = frozenset({
     "/docs/oauth2-redirect",
     "/redoc",
     "/healthz",
+    "/readyz",
 })
 
 
@@ -185,6 +187,7 @@ async def lifespan(app: FastAPI):
     app.state.tei = pool
     app.state.inflight = 0
     app.state.hit_ratio = _HitRatioEWMA()
+    app.state.readyz_ok_at = float("-inf")
     log.info(
         "embedding-service up: TEI=%s KVROCKS=%s MAX_INFLIGHT=%d",
         cfg.tei_url, cfg.kvrocks_url, cfg.max_inflight,
@@ -256,6 +259,63 @@ async def require_api_key(request: Request, call_next):
 @app.get("/healthz", include_in_schema=False)
 async def healthz() -> dict:
     return {"ok": True}
+
+
+_READYZ_CANARY_TEXT = "readyz canary"  # goes straight to TEI, never the cache
+_READYZ_MEMO_TTL_S = 5.0               # success-only; failures never memoized
+
+
+@app.get("/readyz", include_in_schema=False)
+async def readyz(request: Request) -> JSONResponse:
+    """Readiness gate for the weekly bootup automation (INFRA-1782).
+
+    Ready == (a) a real end-to-end embed canary through the TEI pool
+    succeeds — proving GPU/model, not just a live process; bypasses the
+    KVRocks read path so a warm cache can't fake it — and (b) KVRocks is
+    reachable AND populated, so we don't serve before the EBS→NVMe
+    rehydrate finishes. /healthz stays the unconditional liveness probe.
+    """
+    state = request.app.state
+    cfg = state.cfg
+    checks = {"tei_embed": "ok", "cache": "ok"}
+
+    if time.monotonic() - state.readyz_ok_at >= _READYZ_MEMO_TTL_S:
+
+        async def check_tei() -> str:
+            # Fail fast instead of running the pool's full retry budget —
+            # the readiness poller retries anyway.
+            vecs = await asyncio.wait_for(
+                state.tei.embed([_READYZ_CANARY_TEXT], truncate=True),
+                timeout=cfg.readyz_tei_timeout_s,
+            )
+            if vecs.shape != (1, VECTOR_DIM):
+                return f"error: unexpected canary shape {vecs.shape}"
+            return "ok"
+
+        async def check_cache() -> str:
+            populated = await state.cache.scan_any(
+                timeout_s=cfg.readyz_cache_timeout_s,
+            )
+            return "ok" if populated else "empty"
+
+        # Concurrent + isolated: one check failing can't mask the other.
+        results = await asyncio.gather(
+            check_tei(), check_cache(), return_exceptions=True,
+        )
+        for name, res in zip(("tei_embed", "cache"), results):
+            if isinstance(res, BaseException):
+                checks[name] = f"error: {type(res).__name__}: {res}"[:200]
+            else:
+                checks[name] = res
+
+        if all(v == "ok" for v in checks.values()):
+            state.readyz_ok_at = time.monotonic()
+
+    ready = all(v == "ok" for v in checks.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"ready": ready, "checks": checks},
+    )
 
 
 # --- Admin: runtime TEI backend pool --------------------------------------
