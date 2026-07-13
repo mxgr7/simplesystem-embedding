@@ -63,8 +63,10 @@ PROJECTION = {
 def _open_client(uri):
     """Open a fresh MongoClient. Called once per process — never share
     a client across fork (pymongo explicitly disallows it)."""
+    # readPreference=secondary (NOT nearest/secondaryPreferred, which can route
+    # to the prod PRIMARY) — backfill reads must never load the prod primary.
     return MongoClient(uri, uuidRepresentation="standard",
-                       maxPoolSize=4, readPreference="nearest")
+                       maxPoolSize=4, readPreference="secondary")
 
 
 def list_all_vendor_ids(uri, db, coll_name):

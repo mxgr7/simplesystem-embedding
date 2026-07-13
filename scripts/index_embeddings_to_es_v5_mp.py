@@ -714,7 +714,7 @@ def main() -> None:
                          "same dir auto-resumes each slice where it left off "
                          "(idempotent _id makes re-cover safe). --procs must "
                          "match the checkpointed run. Default: import_ckpt.<dst>")
-    ap.add_argument("--lookup-cache-dir", default="/data/lookup_cache",
+    ap.add_argument("--lookup-cache-dir", default="lookup_cache",
                     help="Dir to cache the built lookup buffers (np.save) so a "
                          "resumed run mmap-loads them instead of the ~10-30 min "
                          "rebuild. Empty string disables.")
