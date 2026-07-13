@@ -180,10 +180,10 @@
       "type": "timeseries",
       "id": 33,
       "title": "TEI request count",
-      "description": "Per-second TEI request rate from TEI's own /metrics. Should be << embedding-service request rate when cache hits dominate.",
+      "description": "Per-second TEI request rate from TEI's own /metrics. Should be << embedding-service request rate when cache hits dominate. Pinned to the local TEI; remote TEI has its own section.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
-      "targets": [{"expr": "rate(te_request_count[1m])", "refId": "A"}],
+      "targets": [{"expr": "rate(te_request_count{job=\"tei\"}[1m])", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
     },
 
@@ -299,14 +299,14 @@
     {
       "type": "timeseries",
       "id": 53,
-      "title": "Filesystem usage",
-      "description": "Per-mount used / total bytes. KVRocks lives on /mnt/nvme (see fstype label).",
+      "title": "Filesystem usage (% of capacity)",
+      "description": "Per-mount used as a fraction of that filesystem's total capacity. KVRocks lives on /mnt/nvme (see fstype label).",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 74},
       "targets": [
-        {"expr": "node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\"} - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\"}", "legendFormat": "{{mountpoint}} used", "refId": "A"}
+        {"expr": "100 * (node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\"} - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\"}) / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\"}", "legendFormat": "{{mountpoint}}", "refId": "A"}
       ],
-      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []}
     },
     {
       "type": "timeseries",
@@ -333,6 +333,63 @@
         {"expr": "node_load5", "legendFormat": "5m", "refId": "B"},
         {"expr": "node_load15", "legendFormat": "15m", "refId": "C"},
         {"expr": "count(count by (cpu) (node_cpu_seconds_total))", "legendFormat": "cores", "refId": "D"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+
+    {
+      "type": "row",
+      "id": 600,
+      "title": "Remote TEI (88.207.86.141:41661)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 90},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 60,
+      "title": "Request rate by method",
+      "description": "Per-second request rate from the remote TEI's own /metrics, split by client batch vs single endpoint.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
+      "targets": [
+        {"expr": "sum by (method) (rate(te_request_count{job=\"tei_remote\"}[1m]))", "legendFormat": "{{method}}", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 61,
+      "title": "Inference latency (p50 / p95 / p99)",
+      "description": "GPU-side inference time from te_request_inference_duration. Excludes tokenization and queue wait.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(te_request_inference_duration_bucket{job=\"tei_remote\"}[1m])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_request_inference_duration_bucket{job=\"tei_remote\"}[1m])))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(te_request_inference_duration_bucket{job=\"tei_remote\"}[1m])))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "type": "timeseries",
+      "id": 62,
+      "title": "Queue depth",
+      "description": "te_queue_size — requests waiting for a batch slot. Sustained >0 means the remote TEI is saturating.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 99},
+      "targets": [{"expr": "te_queue_size{job=\"tei_remote\"}", "legendFormat": "queue", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
+    },
+    {
+      "type": "heatmap",
+      "id": 63,
+      "title": "Effective batch size",
+      "description": "te_batch_next_size — actual batch sizes the scheduler is forming. Should approach the configured --max-batch-tokens / mean-seq-len when traffic is heavy.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 99},
+      "targets": [
+        {"expr": "sum by (le) (rate(te_batch_next_size_bucket{job=\"tei_remote\"}[1m]))", "legendFormat": "{{le}}", "refId": "A", "format": "heatmap"}
       ],
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
     }

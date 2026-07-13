@@ -17,8 +17,11 @@ scrape_configs:
   - job_name: indexer
     metrics_path: /actuator/prometheus
     static_configs:
-      # indexer now runs on milvus (172.16.20.115); was host.docker.internal:9091
-      - targets: ["172.16.20.115:9091"]
+      # indexer runs on this box again (was 172.16.20.115 during the milvus-box
+      # stint). Single instance only (two share a static group.instance.id under
+      # host-net and fence each other). Must be ACTUATOR_PORT=9091 — the SG only
+      # allows 9091 cross-box from this host (9092 is dropped/timeout).
+      - targets: ["host.docker.internal:9091"]
         labels:
           stack: embedding-service
 
@@ -76,5 +79,43 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["host.docker.internal:9100"]
+        labels:
+          stack: embedding-service
+
+  # article-semantic-search query service — runs on milvus (172.16.20.115)
+  # on port 9099. The SG blocks this box from reaching milvus:9099 directly,
+  # so an SSH tunnel bridges it: `ssh -fN -L 172.17.0.1:19099:localhost:9099 milvus`
+  # binds to the docker0 gateway (what host.docker.internal resolves to inside
+  # this container), so Prometheus scrapes the local tunnel endpoint.
+  # Exposes http_server_requests_seconds_* (Micrometer) for the search endpoint.
+  - job_name: query_service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["host.docker.internal:19099"]
+        labels:
+          stack: embedding-service
+
+  # search-prober — synthetic semantic-search prober hitting the preprod gateway
+  # every 10s (health-check + ES warm-keeper). Same bridge net as Prometheus →
+  # service-name addressing. Exposes probe_search_latency_seconds (histogram →
+  # real preprod p50/p90/p99), probe_up, probe_requests_total, probe_hit_count.
+  - job_name: search_prober
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["search-prober:9155"]
+        labels:
+          stack: embedding-service
+
+  # elasticsearch_exporter — monitors the temporary semantic ES
+  # (semantic-es-temp, ES 9.3.3) holding prod-article-index-v1-semantic-bf16
+  # during the catch-up backfill. Same bridge network as Prometheus →
+  # service-name addressing. Scrape interval relaxed because the exporter
+  # hits _nodes/stats + _all/_stats + _cat/shards on each scrape.
+  - job_name: semantic_es_temp
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 30s
+    static_configs:
+      - targets: ["elasticsearch_exporter:9114"]
         labels:
           stack: embedding-service

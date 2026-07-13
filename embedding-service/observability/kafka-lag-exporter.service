@@ -1,0 +1,28 @@
+[Unit]
+Description=Kafka lag exporter (Prometheus :9145) for the semantic indexer dashboard
+Documentation=file:///home/mgerer/simplesystem-embedding/scripts/kafka_lag_exporter.py
+After=network-online.target
+Wants=network-online.target
+# Keep retrying forever; never trip the start-rate limiter (this is what
+# turned a one-off SIGHUP on session teardown into a permanent outage before).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=mgerer
+Group=mgerer
+WorkingDirectory=/home/mgerer/simplesystem-embedding
+Environment=HOME=/home/mgerer
+Environment=PATH=/home/mgerer/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Reads SASL creds from ./.env (KAFKA_PROD_PORTAL_*). Tracks both the backfill
+# group (v1-semantic) and the live prod group (v1) against the same topic.
+ExecStart=/home/mgerer/.local/bin/uv run --with prometheus-client --with confluent-kafka \
+    python scripts/kafka_lag_exporter.py \
+    --group article-indexer-v1-semantic \
+    --group article-indexer-v1 \
+    --port 9145 --interval 15
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

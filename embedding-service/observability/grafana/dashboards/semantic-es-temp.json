@@ -1,0 +1,2045 @@
+{
+  "title": "Semantic ES (temp) \u2014 semantic-es-temp",
+  "uid": "semantic-es-temp",
+  "schemaVersion": 38,
+  "version": 5,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "tags": [
+    "elasticsearch",
+    "semantic-es-temp",
+    "knn"
+  ],
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Cluster health",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Exporter up",
+      "description": "Prometheus scrape target health for the elasticsearch_exporter.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "up{job=\"semantic_es_temp\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Cluster status",
+      "description": "elasticsearch_cluster_health_status \u2014 picks the color whose series == 1.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "label_replace(elasticsearch_cluster_health_status{cluster=\"semantic-es-temp\"} == 1, \"st\", \"$1\", \"color\", \"(.*)\")",
+          "legendFormat": "{{color}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "textMode": "name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "green": {
+                  "color": "green",
+                  "index": 0
+                },
+                "yellow": {
+                  "color": "yellow",
+                  "index": 1
+                },
+                "red": {
+                  "color": "red",
+                  "index": 2
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Nodes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_cluster_health_number_of_nodes{cluster=\"semantic-es-temp\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Active shards",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_cluster_health_active_shards{cluster=\"semantic-es-temp\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Unassigned shards",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_cluster_health_unassigned_shards{cluster=\"semantic-es-temp\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 6,
+      "title": "Relocating / Initializing",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_cluster_health_relocating_shards{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "relocating",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_cluster_health_initializing_shards{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "initializing",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 200,
+      "title": "JVM",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "JVM heap used %",
+      "description": "Heap used / heap max. Sustained >75% pressures GC; >90% risks circuit breakers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "100 * elasticsearch_jvm_memory_used_bytes{cluster=\"semantic-es-temp\",area=\"heap\"} / elasticsearch_jvm_memory_max_bytes{cluster=\"semantic-es-temp\",area=\"heap\"}",
+          "legendFormat": "{{name}} heap %",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "max": 100,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 75
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "JVM heap used vs max (bytes)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_jvm_memory_used_bytes{cluster=\"semantic-es-temp\",area=\"heap\"}",
+          "legendFormat": "{{name}} used",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_jvm_memory_max_bytes{cluster=\"semantic-es-temp\",area=\"heap\"}",
+          "legendFormat": "{{name}} max",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "GC collection rate (collections/s)",
+      "description": "rate of elasticsearch_jvm_gc_collection_seconds_count by gc generation.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "targets": [
+        {
+          "expr": "rate(elasticsearch_jvm_gc_collection_seconds_count{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "{{gc}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "GC time spent (s/s)",
+      "description": "rate of elasticsearch_jvm_gc_collection_seconds_sum \u2014 fraction of wall time in GC per generation.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "targets": [
+        {
+          "expr": "rate(elasticsearch_jvm_gc_collection_seconds_sum{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "{{gc}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "JVM pools used (young/survivor/old)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_jvm_memory_pool_used_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "{{pool}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 300,
+      "title": "OS / host",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "OS CPU %",
+      "description": "elasticsearch_os_cpu_percent \u2014 node-wide CPU. process_cpu_percent shown for the ES JVM share.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 23
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_os_cpu_percent{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "OS {{name}}",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_process_cpu_percent{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "ES process {{name}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "max": 100,
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Load average (1m)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 23
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_os_load1{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "load1 {{name}}",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_os_load5{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "load5 {{name}}",
+          "refId": "B"
+        },
+        {
+          "expr": "elasticsearch_os_load15{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "load15 {{name}}",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "OS memory: used / free / page cache",
+      "description": "os.mem.used = ES JVM + everything; the gap between os.mem.used and os.mem.actual_used is the OS page cache (filesystem buffers). Page cache is critical for the bf16 kNN path \u2014 kNN reads vectors off-heap from mmap'd segments, served from page cache when hot.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 23
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_os_mem_used_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "used",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_os_mem_free_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "free",
+          "refId": "B"
+        },
+        {
+          "expr": "elasticsearch_os_mem_actual_used_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "actual used (excl. cache)",
+          "refId": "C"
+        },
+        {
+          "expr": "elasticsearch_os_mem_used_bytes{cluster=\"semantic-es-temp\"} - elasticsearch_os_mem_actual_used_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "page cache (approx)",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 400,
+      "title": "Disk",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "Disk total / used / available (data path)",
+      "description": "elasticsearch_filesystem_data_* \u2014 used = size - available.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_filesystem_data_size_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "total {{path}}",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_filesystem_data_size_bytes{cluster=\"semantic-es-temp\"} - elasticsearch_filesystem_data_available_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "used {{path}}",
+          "refId": "B"
+        },
+        {
+          "expr": "elasticsearch_filesystem_data_available_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "available {{path}}",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          },
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^total/"
+            },
+            "properties": [
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "stat",
+      "id": 31,
+      "title": "Disk used % + watermark headroom",
+      "description": "Disk used %. ES default flood-stage watermark is 95% (index goes read-only). Watch headroom as the bf16 backfill grows the store.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "expr": "100 * (elasticsearch_filesystem_data_size_bytes{cluster=\"semantic-es-temp\"} - elasticsearch_filesystem_data_available_bytes{cluster=\"semantic-es-temp\"}) / elasticsearch_filesystem_data_size_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "used % {{path}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 85
+              },
+              {
+                "color": "orange",
+                "value": 90
+              },
+              {
+                "color": "red",
+                "value": 95
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 500,
+      "title": "Indexing / refresh / flush",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 40,
+      "title": "Indexing rate (docs/s)",
+      "description": "rate(elasticsearch_indices_indexing_index_total) \u2014 cluster-wide root-doc indexing throughput from the catch-up indexer.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "expr": "rate(elasticsearch_indices_indexing_index_total{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "index docs/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(elasticsearch_indices_indexing_delete_total{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "delete docs/s",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 41,
+      "title": "Index latency (ms/doc)",
+      "description": "\u0394 index_time / \u0394 index_total \u2014 average per-doc indexing latency.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 41
+      },
+      "targets": [
+        {
+          "expr": "1000 * rate(elasticsearch_indices_indexing_index_time_seconds_total{cluster=\"semantic-es-temp\"}[5m]) / clamp_min(rate(elasticsearch_indices_indexing_index_total{cluster=\"semantic-es-temp\"}[5m]), 1)",
+          "legendFormat": "index latency",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 42,
+      "title": "Refresh & flush rate + time",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 41
+      },
+      "targets": [
+        {
+          "expr": "rate(elasticsearch_indices_refresh_total{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "refresh/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(elasticsearch_indices_flush_total{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "flush/s",
+          "refId": "B"
+        },
+        {
+          "expr": "1000 * rate(elasticsearch_indices_refresh_time_seconds_total{cluster=\"semantic-es-temp\"}[5m]) / clamp_min(rate(elasticsearch_indices_refresh_total{cluster=\"semantic-es-temp\"}[5m]), 1)",
+          "legendFormat": "refresh latency (ms)",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "refresh latency (ms)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 43,
+      "title": "Indexing throttled?",
+      "description": "elasticsearch_indices_indexing_is_throttled (1 = ES is throttling indexing, usually merge backpressure).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 49
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_indexing_is_throttled{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "throttled",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "max": 1,
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 600,
+      "title": "Search (kNN path)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 50,
+      "title": "Search query / fetch rate",
+      "description": "rate(elasticsearch_indices_search_query_total / _fetch_total). The kNN search load lands on the query phase.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 58
+      },
+      "targets": [
+        {
+          "expr": "rate(elasticsearch_indices_search_query_total{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "query/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(elasticsearch_indices_search_fetch_total{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "fetch/s",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 51,
+      "title": "Query latency (ms/query)",
+      "description": "\u0394 search_query_time / \u0394 search_query_total \u2014 average query-phase latency (dominant for kNN).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 58
+      },
+      "targets": [
+        {
+          "expr": "1000 * rate(elasticsearch_indices_search_query_time_seconds{cluster=\"semantic-es-temp\"}[5m]) / clamp_min(rate(elasticsearch_indices_search_query_total{cluster=\"semantic-es-temp\"}[5m]), 1)",
+          "legendFormat": "query latency",
+          "refId": "A"
+        },
+        {
+          "expr": "1000 * rate(elasticsearch_indices_search_fetch_time_seconds{cluster=\"semantic-es-temp\"}[5m]) / clamp_min(rate(elasticsearch_indices_search_fetch_total{cluster=\"semantic-es-temp\"}[5m]), 1)",
+          "legendFormat": "fetch latency",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 52,
+      "title": "Active search queries",
+      "description": "elasticsearch_search_active_queries \u2014 in-flight searches right now.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 58
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_search_active_queries{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "active",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 700,
+      "title": "Segments / merges / translog",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 60,
+      "title": "Segment count (total / primary)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 67
+      },
+      "targets": [
+        {
+          "expr": "sum(elasticsearch_indices_segment_count_total{cluster=\"semantic-es-temp\"})",
+          "legendFormat": "total",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(elasticsearch_indices_segment_count_primary{cluster=\"semantic-es-temp\"})",
+          "legendFormat": "primary",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 61,
+      "title": "Segment memory",
+      "description": "elasticsearch_indices_segments_memory_bytes \u2014 heap held by segment data structures.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 67
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_segments_memory_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "{{name}} segment mem",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 62,
+      "title": "Merges: current + rate",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 67
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_merges_current{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "current merges",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(elasticsearch_indices_merges_total{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "merges/s",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(elasticsearch_indices_merges_docs_total{cluster=\"semantic-es-temp\"}[5m])",
+          "legendFormat": "merged docs/s",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "merged docs/s"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "ops"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 63,
+      "title": "Translog size",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 75
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_translog_size_in_bytes{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "{{name}} translog",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 64,
+      "title": "Translog operations",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 75
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_translog_operations{cluster=\"semantic-es-temp\"}",
+          "legendFormat": "{{name}} ops",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 800,
+      "title": "Thread pools (write / search / force_merge)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 70,
+      "title": "Active threads",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 84
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_thread_pool_active_count{cluster=\"semantic-es-temp\",type=~\"write|search|force_merge\"}",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 71,
+      "title": "Queue depth",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 84
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_thread_pool_queue_count{cluster=\"semantic-es-temp\",type=~\"write|search|force_merge\"}",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 72,
+      "title": "Rejected (rate)",
+      "description": "rate(elasticsearch_thread_pool_rejected_count) \u2014 any non-zero on write/search means the pool is overwhelmed and dropping work.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 84
+      },
+      "targets": [
+        {
+          "expr": "rate(elasticsearch_thread_pool_rejected_count{cluster=\"semantic-es-temp\",type=~\"write|search|force_merge\"}[5m])",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.001
+              }
+            ]
+          },
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "fillOpacity": 25
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 900,
+      "title": "Index: prod-article-index-v1-semantic-bf16",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 92
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 80,
+      "title": "Store size",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 93
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_store_size_bytes_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "legendFormat": "total",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_indices_store_size_bytes_primary{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "legendFormat": "primary",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 81,
+      "title": "Docs (root)",
+      "description": "elasticsearch_indices_docs_total \u2014 root docs (nested children are not counted here).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 93
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_docs_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "legendFormat": "docs total",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_indices_docs_primary{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "legendFormat": "docs primary",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 82,
+      "title": "Segment count",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 93
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_segment_count_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "legendFormat": "total",
+          "refId": "A"
+        },
+        {
+          "expr": "elasticsearch_indices_segment_count_primary{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "legendFormat": "primary",
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 83,
+      "title": "Deleted docs",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 93
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_deleted_docs_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "legendFormat": "deleted",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 84,
+      "title": "bf16: indexing rate (docs/s)",
+      "description": "rate(elasticsearch_index_stats_indexing_index_total{index=...}) \u2014 live backfill throughput into the bf16 index.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 99
+      },
+      "targets": [
+        {
+          "expr": "rate(elasticsearch_index_stats_indexing_index_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}[5m])",
+          "legendFormat": "index docs/s",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 85,
+      "title": "bf16: merge time rate (s/s)",
+      "description": "rate(elasticsearch_index_stats_merge_time_seconds_total{index=...}) \u2014 merge pressure on this index.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 99
+      },
+      "targets": [
+        {
+          "expr": "rate(elasticsearch_index_stats_merge_time_seconds_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}[5m])",
+          "legendFormat": "merge s/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(elasticsearch_index_stats_merge_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}[5m])",
+          "legendFormat": "merges/s",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 86,
+      "title": "bf16: store size growth",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 99
+      },
+      "targets": [
+        {
+          "expr": "elasticsearch_indices_store_size_bytes_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "legendFormat": "store size",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 1100,
+      "type": "row",
+      "title": "Preprod synthetic prober \u2014 live health + end-to-end latency (client-side, every 10s)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 107
+      },
+      "panels": []
+    },
+    {
+      "id": 92,
+      "type": "stat",
+      "title": "Preprod search UP",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "probe_up{target=\"preprod\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 93,
+      "type": "stat",
+      "title": "Last HTTP status",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 200
+              },
+              {
+                "color": "red",
+                "value": 201
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "probe_last_status{target=\"preprod\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 94,
+      "type": "stat",
+      "title": "Last hitCount",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "probe_hit_count{target=\"preprod\"}",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 95,
+      "type": "stat",
+      "title": "Probe errors/min",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 108
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.001
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "60*rate(probe_requests_total{target=\"preprod\",outcome=\"error\"}[$__rate_interval])",
+          "legendFormat": ""
+        }
+      ]
+    },
+    {
+      "id": 96,
+      "type": "timeseries",
+      "title": "Preprod search latency p50 / p90 / p99 (client-side)",
+      "description": "Live synthetic prober (search-prober job): one real semantic query at the PREPROD gateway every 10s, end-to-end (gateway+proxy+query-service+TEI+ES), CLIENT-side latency. Doubles as a health check and ES page-cache warm-keeper. This is the only source of real preprod p50/p90/p99 (the preprod pod's own actuator isn't scrapable).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 112
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum(rate(probe_search_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.90, sum(rate(probe_search_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p90"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum(rate(probe_search_latency_seconds_bucket[10m])) by (le))",
+          "legendFormat": "p99"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "rate(probe_search_latency_seconds_sum[10m]) / clamp_min(rate(probe_search_latency_seconds_count[10m]),1)",
+          "legendFormat": "mean"
+        }
+      ]
+    },
+    {
+      "id": 97,
+      "type": "timeseries",
+      "title": "Probe rate by routing mode (warm-keeper activity)",
+      "description": "Probes/min by predicted mode \u2014 confirms the warm-keeper is firing and which paths it exercises.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 112
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "last",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "60*rate(probe_mode_requests_total{target=\"preprod\"}[$__rate_interval])",
+          "legendFormat": "{{mode}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "60*rate(probe_requests_total{target=\"preprod\",outcome=\"error\"}[$__rate_interval])",
+          "legendFormat": "errors"
+        }
+      ]
+    }
+  ]
+}
