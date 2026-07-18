@@ -1,0 +1,13 @@
+defaults:
+  - splade
+  - _self_
+
+# Stage v1 (SPLADE++/v3 recipe): additive MarginMSE distillation from the
+# cross-encoder teacher. Requires data.ce_scores_path to be set.
+loss_weights:
+  margin_mse: 0.05
+  kl: 0.0
+# Teacher gains [0,1] scaled to logit range; weight warmed in after the
+# FLOPS warmup has begun shrinking raw dot magnitudes.
+margin_mse_teacher_scale: 20.0
+margin_mse_warmup_steps: 1000

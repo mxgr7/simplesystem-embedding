@@ -63,6 +63,23 @@ def resolve_loss_type(loss_type):
     raise ValueError(f"Unsupported loss type: {loss_type}")
 
 
+VALID_ARCHITECTURES = {"dense", "splade"}
+
+
+def resolve_architecture(value):
+    if value is None:
+        return "dense"
+
+    normalized = str(value).strip().lower()
+    if normalized in VALID_ARCHITECTURES:
+        return normalized
+
+    choices = "|".join(sorted(VALID_ARCHITECTURES))
+    raise ValueError(
+        f"Unsupported architecture: {value}. Expected one of {choices}"
+    )
+
+
 VALID_TRIPLET_NEGATIVE_SELECTIONS = {"semi_hard", "hardest"}
 
 
@@ -241,7 +258,15 @@ def load_embedding_module_from_checkpoint(checkpoint_path, map_location="cpu"):
         raise ValueError(f"Checkpoint is missing state_dict: {checkpoint_path}")
 
     cfg = build_config_from_hyperparameters(checkpoint.get("hyper_parameters"))
-    model = EmbeddingModule(cfg)
+    architecture = resolve_architecture(
+        OmegaConf.select(cfg, "model.architecture")
+    )
+    if architecture == "splade":
+        from embedding_train.splade_model import SpladeModule
+
+        model = SpladeModule(cfg)
+    else:
+        model = EmbeddingModule(cfg)
     state_dict = _align_encoder_compile_prefix(state_dict, model)
     model.load_state_dict(state_dict)
     model.eval()
@@ -267,10 +292,7 @@ class EmbeddingModule(L.LightningModule):
         self.validation_similarity = resolve_validation_similarity(
             getattr(cfg.trainer, "validation_similarity", "dot")
         )
-        self.encoder = AutoModel.from_pretrained(
-            cfg.model.model_name,
-            dtype=self.model_dtype,
-        )
+        self.encoder = self.build_encoder(cfg)
         self.encoder_hidden_size = int(self.encoder.config.hidden_size)
         self.output_dim = resolve_output_dim(cfg.model.output_dim)
         self.projection = None
@@ -313,6 +335,12 @@ class EmbeddingModule(L.LightningModule):
             # List-wrap to keep the teacher out of self.parameters(),
             # the optimizer, DDP sync, and the checkpoint state_dict.
             self._teacher_ref = [teacher]
+
+    def build_encoder(self, cfg):
+        return AutoModel.from_pretrained(
+            cfg.model.model_name,
+            dtype=self.model_dtype,
+        )
 
     def on_fit_start(self):
         self._move_teacher_to_device()

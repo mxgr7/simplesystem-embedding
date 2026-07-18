@@ -13,10 +13,40 @@ from omegaconf import OmegaConf
 from embedding_train.data import EmbeddingDataModule
 from embedding_train.model import (
     EmbeddingModule,
+    _align_encoder_compile_prefix,
     build_full_catalog_monitor_metric,
+    resolve_architecture,
     resolve_validation_metric,
     resolve_validation_mode,
 )
+
+
+def build_module(cfg):
+    architecture = resolve_architecture(OmegaConf.select(cfg, "model.architecture"))
+    if architecture == "splade":
+        from embedding_train.splade_model import SpladeModule
+
+        module = SpladeModule(cfg)
+    else:
+        module = EmbeddingModule(cfg)
+
+    # Warm start: load weights only (no optimizer/scheduler/epoch state, in
+    # contrast to trainer.resume_from_checkpoint) for fine-tuning stages.
+    init_checkpoint = OmegaConf.select(cfg, "model.init_checkpoint")
+    if init_checkpoint:
+        checkpoint = torch.load(
+            str(init_checkpoint), map_location="cpu", weights_only=False
+        )
+        state_dict = checkpoint.get("state_dict")
+        if state_dict is None:
+            raise ValueError(
+                f"init_checkpoint is missing state_dict: {init_checkpoint}"
+            )
+        state_dict = _align_encoder_compile_prefix(state_dict, module)
+        module.load_state_dict(state_dict)
+        logging.info("Warm-started model weights from %s", init_checkpoint)
+
+    return module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -147,7 +177,7 @@ def run(cfg):
     print(OmegaConf.to_yaml(cfg, resolve=True))
 
     datamodule = EmbeddingDataModule(cfg)
-    model = EmbeddingModule(cfg)
+    model = build_module(cfg)
     logger = build_logger(cfg)
     # Materialize the MLflow run before build_callbacks reads logger.run_id.
     _ = logger.experiment

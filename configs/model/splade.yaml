@@ -1,0 +1,20 @@
+model_name: deepset/gbert-base
+architecture: splade
+init_checkpoint: null
+output_dim: null
+pooling: splade_max
+loss_type: contrastive
+similarity_scale: 1.0
+triplet_margin: 0.2
+triplet_negative_selection: semi_hard
+gradient_checkpointing: true
+teacher_checkpoint: null
+distill_temperature: 0.05
+# torch.compile struggles with the MLM head + dynamic shapes; revisit later.
+compile: false
+flops_lambda_q: 5.0e-4
+flops_lambda_d: 3.0e-4
+flops_warmup_steps: 1500
+loss_weights:
+  margin_mse: 0.0
+  kl: 0.0

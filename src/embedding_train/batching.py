@@ -31,6 +31,7 @@ def build_hard_negative_record(anchor_query_id, anchor_query_text, hard_negative
         "query_text": anchor_query_text,
         "offer_id": hard_negative["offer_id"],
         "offer_text": hard_negative["offer_text"],
+        "ce_score": hard_negative.get("ce_score", float("nan")),
         "label": 0.0,
         "raw_label": HARD_NEGATIVE_LABEL,
     }
@@ -44,6 +45,7 @@ def build_semi_hard_negative_record(
         "query_text": anchor_query_text,
         "offer_id": semi_hard_negative["offer_id"],
         "offer_text": semi_hard_negative["offer_text"],
+        "ce_score": semi_hard_negative.get("ce_score", float("nan")),
         "label": 0.0,
         "raw_label": SEMI_HARD_NEGATIVE_LABEL,
     }

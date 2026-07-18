@@ -97,7 +97,7 @@ class InferenceCliTests(unittest.TestCase):
         )
         pq.write_table(table, path)
 
-    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_fast_tokenizer")
     @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
     def test_exports_embeddings_in_chunked_batches(
         self, load_checkpoint, from_pretrained
@@ -138,7 +138,7 @@ class InferenceCliTests(unittest.TestCase):
         self.assertEqual(output_rows[0]["offer_embedding"], [7.0, 8.0])
         self.assertEqual(output_rows[1]["offer_embedding"], [10.0, 11.0])
 
-    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_fast_tokenizer")
     @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
     def test_pair_score_mode_scores_paired_rows(self, load_checkpoint, from_pretrained):
         load_checkpoint.return_value = (_InferenceModelStub(), build_cfg())
@@ -172,7 +172,7 @@ class InferenceCliTests(unittest.TestCase):
         self.assertEqual(len(output_rows), 2)
         self.assertEqual([row["pair_score"] for row in output_rows], [53.0, 116.0])
 
-    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_fast_tokenizer")
     @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
     def test_exports_float16_embeddings(self, load_checkpoint, from_pretrained):
         load_checkpoint.return_value = (_InferenceModelStub(), build_cfg())
@@ -208,7 +208,7 @@ class InferenceCliTests(unittest.TestCase):
         self.assertEqual(table.schema.metadata[b"embedding_precision"], b"float16")
         self.assertEqual(table.schema.metadata[b"embedding_dim"], b"2")
 
-    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_fast_tokenizer")
     @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
     def test_exports_binary_embeddings_as_packed_bytes(
         self, load_checkpoint, from_pretrained
@@ -246,7 +246,7 @@ class InferenceCliTests(unittest.TestCase):
         self.assertEqual(output_rows[0]["offer_embedding"], b"\xc0")
         self.assertEqual(output_rows[1]["offer_embedding"], b"\xc0")
 
-    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_fast_tokenizer")
     @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
     def test_pair_score_mode_supports_binary_scoring(
         self, load_checkpoint, from_pretrained
@@ -283,7 +283,7 @@ class InferenceCliTests(unittest.TestCase):
         )
         self.assertEqual([row["pair_score"] for row in output_rows], [1.0, 1.0])
 
-    @patch("embedding_train.infer.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.infer.load_fast_tokenizer")
     @patch("embedding_train.infer.load_embedding_module_from_checkpoint")
     def test_offer_mode_raises_for_missing_offer_template_column(
         self, load_checkpoint, from_pretrained

@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from dotenv import load_dotenv
-from transformers import AutoTokenizer
+from embedding_train.tokenization import load_fast_tokenizer
 
 from embedding_train.model import load_embedding_module_from_checkpoint
 from embedding_train.precision import (
@@ -264,7 +264,7 @@ def resolve_output_column(mode, output_column):
 
 
 def build_tokenizer(model_name):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    tokenizer = load_fast_tokenizer(model_name)
 
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token

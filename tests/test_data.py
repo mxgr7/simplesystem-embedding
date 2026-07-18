@@ -69,21 +69,21 @@ def build_cfg(**data_overrides):
 
 
 class EmbeddingDataModuleConfigTests(unittest.TestCase):
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_rejects_unknown_train_batching_mode(self, from_pretrained):
         from_pretrained.return_value = _TokenizerStub()
 
         with self.assertRaisesRegex(ValueError, "Unsupported train batching mode"):
             EmbeddingDataModule(build_cfg(train_batching_mode="unknown_mode"))
 
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_rejects_unknown_val_split_mode(self, from_pretrained):
         from_pretrained.return_value = _TokenizerStub()
 
         with self.assertRaisesRegex(ValueError, "Unsupported val split mode"):
             EmbeddingDataModule(build_cfg(val_split_mode="unknown_mode"))
 
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_rejects_anchor_query_batch_size_smaller_than_minimum(
         self, from_pretrained
     ):
@@ -102,7 +102,7 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
                 )
             )
 
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_accepts_anchor_query_as_default_batching_mode(
         self, from_pretrained
     ):
@@ -113,7 +113,7 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
         self.assertEqual(datamodule.train_batching_mode, "anchor_query")
         self.assertEqual(datamodule.val_split_mode, "query_id")
 
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_accepts_random_query_pool_mode(self, from_pretrained):
         from_pretrained.return_value = _TokenizerStub()
 
@@ -123,7 +123,7 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
 
         self.assertEqual(datamodule.train_batching_mode, "random_query_pool")
 
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_accepts_query_id_val_split_mode(self, from_pretrained):
         from_pretrained.return_value = _TokenizerStub()
 
@@ -133,7 +133,7 @@ class EmbeddingDataModuleConfigTests(unittest.TestCase):
 
 
 class RowTextRendererTests(unittest.TestCase):
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_datamodule_record_builder_matches_shared_renderer(self, from_pretrained):
         from_pretrained.return_value = _TokenizerStub()
         cfg = build_cfg(
@@ -181,7 +181,7 @@ class RowTextRendererTests(unittest.TestCase):
         )
         self.assertEqual(datamodule._build_record(row), expected_record)
 
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_record_builder_supports_configurable_id_columns(self, from_pretrained):
         from_pretrained.return_value = _TokenizerStub()
         cfg = build_cfg(
@@ -213,7 +213,7 @@ class RowTextRendererTests(unittest.TestCase):
         self.assertEqual(datamodule._build_record(row), expected_record)
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_datamodule_setup_raises_for_missing_offer_template_column(
         self, from_pretrained, read_parquet
     ):
@@ -318,7 +318,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         )
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_builds_train_metadata_and_eligibility_from_positive_counts_only(
         self, from_pretrained, read_parquet
     ):
@@ -363,7 +363,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         self.assertEqual(datamodule.dataset_stats["val_positive_rate"], 0.0)
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_setup_shows_progress_for_dataset_preparation(
         self, from_pretrained, read_parquet
     ):
@@ -377,7 +377,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
 
         self.assertIn("Preparing dataset", stderr.getvalue())
 
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_prepared_records_cache_is_reused_when_parameters_are_unchanged(
         self, from_pretrained
     ):
@@ -443,7 +443,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             self.assertEqual(len(cache_files_after), 2)
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_split_keeps_shared_offers_in_a_single_split(
         self, from_pretrained, read_parquet
     ):
@@ -520,7 +520,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         self.assertEqual(datamodule.dataset_stats["val_offers"], len(val_offer_ids))
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_split_keeps_transitively_connected_queries_together(
         self, from_pretrained, read_parquet
     ):
@@ -599,7 +599,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         self.assertGreaterEqual(datamodule.dataset_stats["connected_components"], 2)
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_setup_raises_clear_error_when_val_split_consumes_only_component(
         self, from_pretrained, read_parquet
     ):
@@ -633,7 +633,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             datamodule.setup()
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_query_id_split_can_place_shared_offer_in_both_splits(
         self, from_pretrained, read_parquet
     ):
@@ -703,7 +703,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         )
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_query_id_split_raises_clear_error_when_it_consumes_all_queries(
         self, from_pretrained, read_parquet
     ):
@@ -730,7 +730,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             datamodule.setup()
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_anchor_query_mode_raises_when_no_query_has_enough_positives(
         self, from_pretrained, read_parquet
     ):
@@ -769,7 +769,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
             datamodule.setup()
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_random_pairs_allows_setup_even_without_eligible_anchor_queries(
         self, from_pretrained, read_parquet
     ):
@@ -798,7 +798,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         self.assertEqual(datamodule.eligible_query_ids, [])
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_anchor_query_train_dataloader_uses_single_anchor_query_batches(
         self, from_pretrained, read_parquet
     ):
@@ -868,7 +868,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         )
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_random_pairs_collate_shape_remains_unchanged(
         self, from_pretrained, read_parquet
     ):
@@ -891,7 +891,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         self.assertEqual(batch["query_inputs"]["input_ids"].shape[0], 3)
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_random_query_pool_train_dataloader_builds_diverse_batches_from_query_pools(
         self, from_pretrained, read_parquet
     ):
@@ -990,7 +990,7 @@ class EmbeddingDataModuleMetadataTests(unittest.TestCase):
         self.assertNotIn("anchor_query_id", batch["batch_stats"])
 
     @patch("embedding_train.data.pd.read_parquet")
-    @patch("embedding_train.data.AutoTokenizer.from_pretrained")
+    @patch("embedding_train.data.load_fast_tokenizer")
     def test_validation_dataloader_remains_exhaustive_and_real_only(
         self, from_pretrained, read_parquet
     ):

@@ -694,7 +694,7 @@ class CollateTextPassthroughTests(unittest.TestCase):
         )
 
         with patch(
-            "embedding_train.data.AutoTokenizer.from_pretrained",
+            "embedding_train.data.load_fast_tokenizer",
             return_value=_StubTokenizer(),
         ):
             dm = EmbeddingDataModule(cfg)

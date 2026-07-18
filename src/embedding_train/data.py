@@ -19,7 +19,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoTokenizer
+from embedding_train.tokenization import load_fast_tokenizer
 
 from embedding_train.batching import (
     HARD_NEGATIVE_LABEL,
@@ -40,7 +40,7 @@ VALID_NEGATIVE_PROVENANCES = (
 VALID_TRAIN_BATCHING_MODES = {"random_pairs", "anchor_query", "random_query_pool"}
 VALID_VAL_SPLIT_MODES = {"offer_connected_component", "query_id"}
 PREPARED_RECORDS_CACHE_SCHEMA_VERSION = 1
-RANDOM_QUERY_POOL_CACHE_SCHEMA_VERSION = 1
+RANDOM_QUERY_POOL_CACHE_SCHEMA_VERSION = 2
 DEFAULT_PREPARED_RECORDS_CACHE_DIR = ".cache/prepared_dataset"
 
 
@@ -118,9 +118,7 @@ class EmbeddingDataModule(LightningDataModule):
             getattr(cfg.data, "val_split_mode", "query_id")
         )
         self.row_renderer = RowTextRenderer(cfg.data)
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            cfg.model.model_name, use_fast=True
-        )
+        self.tokenizer = load_fast_tokenizer(cfg.model.model_name)
         self.train_dataset = None
         self.val_dataset = None
         self.dataset_stats = {}
@@ -130,6 +128,7 @@ class EmbeddingDataModule(LightningDataModule):
         self.semi_hard_negative_records_by_query = {}
         self.eligible_query_ids = []
         self.synthetic_negative_offer_pool = []
+        self.ce_score_by_pair = self._load_ce_scores()
         self._validate_batching_config()
 
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
@@ -354,6 +353,15 @@ class EmbeddingDataModule(LightningDataModule):
             "offer_texts": offer_texts,
         }
 
+        if self.ce_score_by_pair is not None:
+            collated_batch["ce_scores"] = torch.tensor(
+                [
+                    float(item.get("ce_score", float("nan")))
+                    for item in batch_records
+                ],
+                dtype=torch.float32,
+            )
+
         if (
             batch_stats is None
             and self.train_batching_mode == "random_query_pool"
@@ -472,6 +480,9 @@ class EmbeddingDataModule(LightningDataModule):
         semi_hard_path, semi_hard_stat = sidecar_stat(
             getattr(data_cfg, "semi_hard_negatives_path", None)
         )
+        ce_scores_path, ce_scores_stat = sidecar_stat(
+            getattr(data_cfg, "ce_scores_path", None)
+        )
 
         cache_dir_cfg = data_cfg.get(
             "prepare_cache_dir", DEFAULT_PREPARED_RECORDS_CACHE_DIR
@@ -502,6 +513,17 @@ class EmbeddingDataModule(LightningDataModule):
             ),
             "semi_hard_negatives_size": (
                 semi_hard_stat.st_size if semi_hard_stat is not None else None
+            ),
+            "ce_scores_path": (
+                str(ce_scores_path.resolve())
+                if ce_scores_path is not None
+                else None
+            ),
+            "ce_scores_mtime_ns": (
+                ce_scores_stat.st_mtime_ns if ce_scores_stat is not None else None
+            ),
+            "ce_scores_size": (
+                ce_scores_stat.st_size if ce_scores_stat is not None else None
             ),
             "limit_rows": data_cfg.limit_rows,
             "column_mapping": resolve_column_mapping(data_cfg),
@@ -625,11 +647,23 @@ class EmbeddingDataModule(LightningDataModule):
         )
         cache_dir = Path(str(cache_dir_cfg))
 
+        ce_scores_cfg = getattr(data_cfg, "ce_scores_path", None)
+        ce_scores_stat = None
+        if ce_scores_cfg:
+            try:
+                ce_scores_stat = Path(str(ce_scores_cfg)).stat()
+            except OSError:
+                ce_scores_stat = None
+
         key_payload = {
             "schema_version": PREPARED_RECORDS_CACHE_SCHEMA_VERSION,
             "source_path": str(source_path.resolve()),
             "source_mtime_ns": stat_result.st_mtime_ns,
             "source_size": stat_result.st_size,
+            "ce_scores_path": str(ce_scores_cfg) if ce_scores_cfg else None,
+            "ce_scores_mtime_ns": (
+                ce_scores_stat.st_mtime_ns if ce_scores_stat is not None else None
+            ),
             "limit_rows": data_cfg.limit_rows,
             "column_mapping": resolve_column_mapping(data_cfg),
             "query_template": str(data_cfg.query_template),
@@ -641,8 +675,33 @@ class EmbeddingDataModule(LightningDataModule):
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
         return cache_dir / f"prepared-{digest}.pkl"
 
+    def _load_ce_scores(self):
+        ce_scores_path = getattr(self.cfg.data, "ce_scores_path", None)
+        if not ce_scores_path:
+            return None
+
+        frame = pd.read_parquet(str(ce_scores_path))
+        lookup = {
+            (query_id, offer_id): float(score)
+            for query_id, offer_id, score in zip(
+                frame["query_id"], frame["offer_id_b64"], frame["ce_score"]
+            )
+        }
+        print(
+            f"Loaded {len(lookup)} CE teacher scores from {ce_scores_path}",
+            file=sys.stderr,
+        )
+        return lookup
+
     def _build_record(self, row):
-        return self.row_renderer.build_training_record(row)
+        record = self.row_renderer.build_training_record(row)
+        if record is None or self.ce_score_by_pair is None:
+            return record
+
+        record["ce_score"] = self.ce_score_by_pair.get(
+            (record["query_id"], record["offer_id"]), float("nan")
+        )
+        return record
 
     def _empty_split_stats(self):
         return {
@@ -972,9 +1031,12 @@ class EmbeddingDataModule(LightningDataModule):
                 skipped_unknown_provenance += 1
                 continue
 
-            target.setdefault(query_id, []).append(
-                {"offer_id": offer_id, "offer_text": offer_text}
-            )
+            mined_record = {"offer_id": offer_id, "offer_text": offer_text}
+            if self.ce_score_by_pair is not None:
+                mined_record["ce_score"] = self.ce_score_by_pair.get(
+                    (query_id, offer_id), float("nan")
+                )
+            target.setdefault(query_id, []).append(mined_record)
             if target is hard_negative_records_by_query:
                 loaded_hard += 1
             else:

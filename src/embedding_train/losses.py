@@ -45,6 +45,36 @@ def kl_distillation_loss(student_sims, teacher_sims, temperature):
     return loss * (temperature ** 2)
 
 
+def flops_regularizer(representations):
+    return (representations.abs().mean(dim=0) ** 2).sum()
+
+
+def quadratic_warmup(step, warmup_steps, max_value):
+    if warmup_steps <= 0:
+        return float(max_value)
+    ratio = min(1.0, float(step) / float(warmup_steps))
+    return float(max_value) * ratio * ratio
+
+
+def margin_mse_loss(scores, query_ids, labels, teacher_scores):
+    # Rows sharing a query_id share the same query embedding, so the
+    # pairwise student margin reduces to a difference of diagonal scores.
+    query_group_ids = _query_group_ids(query_ids, labels.device)
+    same_query = query_group_ids.unsqueeze(1) == query_group_ids.unsqueeze(0)
+    has_teacher_score = torch.isfinite(teacher_scores)
+    positive_rows = (labels > 0.5) & has_teacher_score
+    negative_rows = (labels <= 0.5) & has_teacher_score
+    pair_mask = same_query & positive_rows.unsqueeze(1) & negative_rows.unsqueeze(0)
+
+    if not pair_mask.any():
+        return scores.sum() * 0.0
+
+    student_margins = scores.unsqueeze(1) - scores.unsqueeze(0)
+    teacher_margins = teacher_scores.unsqueeze(1) - teacher_scores.unsqueeze(0)
+    differences = (student_margins - teacher_margins)[pair_mask]
+    return (differences ** 2).mean()
+
+
 def in_batch_triplet_loss(
     query_embeddings,
     offer_embeddings,
