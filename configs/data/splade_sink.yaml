@@ -41,6 +41,11 @@ ce_scores_path: null
 cache_prepared_dataset: true
 prepare_cache_dir: .cache/prepared_dataset
 column_rename: null
+# Length-bucketed batching (speed): shuffle -> window of N batches -> sort by
+# rendered-offer char length -> chunk -> shuffle batch order. Cuts the ~40%
+# pad-to-longest waste; batch composition stays random at window granularity.
+length_bucketing: false
+length_bucket_window: 16
 
 # No e5-style "query:"/"passage:" prefixes — SPLADE has no instruction
 # prefix convention and prefix terms would waste sparse activations.

@@ -26,6 +26,7 @@ from embedding_train.batching import (
     HARD_NEGATIVE_LABEL,
     AnchorQueryBatchBuilder,
     AnchorQueryBatchDataset,
+    LengthBucketedBatchSampler,
     RandomQueryPoolBuilder,
     build_batch_stats,
 )
@@ -293,6 +294,27 @@ class EmbeddingDataModule(LightningDataModule):
 
         if self.train_batching_mode == "random_query_pool":
             train_dataset = cast(Dataset, self._build_random_query_pool_train_dataset())
+            if bool(self.cfg.data.get("length_bucketing", False)):
+                # Char length of the rendered offer text is a cheap, strongly
+                # correlated proxy for token count — good enough for bucketing.
+                sampler = LengthBucketedBatchSampler(
+                    lengths=[
+                        len(record["offer_text"])
+                        for record in train_dataset.records
+                    ],
+                    batch_size=int(self.cfg.data.batch_size),
+                    window_batches=int(
+                        self.cfg.data.get("length_bucket_window", 16)
+                    ),
+                    seed=int(self.cfg.seed),
+                )
+                return DataLoader(
+                    train_dataset,
+                    batch_sampler=sampler,
+                    num_workers=int(self.cfg.data.num_workers),
+                    pin_memory=bool(self.cfg.data.pin_memory),
+                    collate_fn=train_collate_fn,
+                )
             return DataLoader(
                 train_dataset,
                 batch_size=int(self.cfg.data.batch_size),
