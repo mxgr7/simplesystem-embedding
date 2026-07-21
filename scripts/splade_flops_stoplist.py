@@ -214,7 +214,7 @@ def main():
     for k in (50, 100):
         report(f"full+mask{k}", zero_cols(Md, order[:k]), zero_cols(Mq.copy(), order[:k]))
 
-    result["top_doc_terms"] = [[int(j), float(dbin[j])] for j in order[:60]]
+    result["top_doc_terms"] = [[int(j), float(dbin[j])] for j in order[:300]]
     with open(args.out, "w") as f:
         json.dump(result, f)
     print(f"wrote {args.out}", flush=True)
