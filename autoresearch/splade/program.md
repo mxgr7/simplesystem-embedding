@@ -22,7 +22,7 @@ but a dense-ish model that wins recall is NOT a keep.
 keep AND neither metric drops by more than 0.004 AND FLOPS_w ≤ 6.0 on both.
 Otherwise `git reset --hard` to the last keep.
 
-## Baselines (already trained; beat these)
+## Reference baselines (8-epoch full runs — context, not your comparison point)
 
 | model | seg R@100 | gold R@100 | seg R@10 | gold R@10 | FLOPS_w | qnnz |
 |---|--:|--:|--:|--:|--:|--:|
@@ -55,16 +55,30 @@ are [B,seq,vocab] ≈ 32 GiB), encode_batch_size=32.
    own the etiquette): another team job may be running; if busy, wait — never
    kill processes you did not start.
 6. `results.tsv` here is pre-seeded with the baselines. Append; never rewrite.
-7. First run: reproduce the fold_b50 screen baseline (45-min budget, seg eval)
-   to validate the whole loop before touching any knob.
+7. First runs: the two in-budget baselines (see Experimentation) to validate
+   the loop and set your comparison points before touching any knob.
 
 ## Experimentation
 
-- **Screens**: train on `data/splade_train_b50_fold.parquet` with
-  `trainer.max_time=00:00:45:00`, then seg eval only. A screen that clearly
-  beats the screen baseline graduates.
-- **Keeps**: full 8-epoch run on `data/splade_train_raw_fold.parquet`
-  (`trainer.max_time` unset), then BOTH evals. Only full runs can be keeps.
+**⏱ HARD TIME BUDGET: NO RUN MAY TRAIN LONGER THAN 45 MINUTES.**
+`run_remote.sh` enforces `trainer.max_time=00:00:45:00` on every launch (it
+injects the cap if you omit it and REFUSES anything larger) and hard-kills the
+remote process at 90 minutes wall-clock. Do not try to work around this — the
+session's value is iteration count, not run length. Promising configs get
+full-length training runs by the humans AFTER the session; your job is to find
+which configs deserve them.
+
+- **Screens**: train on `data/splade_train_b50_fold.parquet` (45-min cap), seg
+  eval only. A screen that clearly beats your in-budget screen baseline
+  graduates.
+- **Keeps**: 45-min run on `data/splade_train_raw_fold.parquet`, then BOTH
+  evals. Keeps are judged against your own in-budget keep chain — NOT against
+  the 8-epoch fold_* baselines in the table above, which 45-minute runs will
+  not reach (they are context and the eventual full-length bar, not your
+  comparison point).
+- **Establish in-budget baselines first**: run the reference recipe for 45 min
+  on b50_fold (screen baseline) and on raw_fold with both evals (keep-chain
+  root) before touching any knob.
 - Example screen (overrides are plain `key=value` tokens, no spaces/quotes —
   they are passed through ssh; data paths must be absolute box paths):
   `autoresearch/splade/run_remote.sh myrun data.path=/home/max/simplesystem-embedding/data/splade_train_b50_fold.parquet trainer.max_time=00:00:45:00 optimizer.lr=1.5e-5 trainer.max_epochs=8`
@@ -73,8 +87,8 @@ are [B,seq,vocab] ≈ 32 GiB), encode_batch_size=32.
   λs/warmup, batch 256; `trainer.accumulate_grad_batches=2` and
   `encode_batch_size=32` are fixed by run_remote.sh) — a run with only the
   overrides in the example above IS the reference recipe.
-- Timeout: kill a run at 2× its budget + 10 min (`run_remote.sh` prints the
-  remote pid; screens that hang are discards).
+- Timeout: `run_remote.sh` wraps the remote process in `timeout 5400` (90 min
+  = 2× budget); a run that hits it is a discard — log it and move on.
 
 **What you CAN do**
 - Any `configs/**` and `src/embedding_train/**` change: losses (contrastive

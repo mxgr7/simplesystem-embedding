@@ -11,6 +11,22 @@ SSH="ssh -F /workspace/.ssh/vastai.conf vastai0"
 AR=/home/max/ar_splade
 MAIN=/home/max/simplesystem-embedding
 
+# HARD TIME BUDGET: every run trains for at most 45 minutes. Inject the cap if
+# absent; refuse any user-supplied max_time above it (format DD:HH:MM:SS).
+MAXTIME_ARG=""
+for a in "$@"; do
+  case "$a" in trainer.max_time=*)
+    MAXTIME_ARG="${a#trainer.max_time=}"
+    SECS=$(echo "$MAXTIME_ARG" | awk -F: '{print $1*86400+$2*3600+$3*60+$4}')
+    if [ "$SECS" -gt 2700 ]; then
+      echo "REFUSED: trainer.max_time=$MAXTIME_ARG exceeds the 45-minute budget."
+      exit 3
+    fi ;;
+  esac
+done
+EXTRA=""
+[ -z "$MAXTIME_ARG" ] && EXTRA="trainer.max_time=00:00:45:00"
+
 if $SSH "pgrep -f 'embedding_train.tra[i]n' >/dev/null || pgrep -f 'splade_flops_stopli[s]t' >/dev/null"; then
   echo "GPU BUSY on vastai0 (training or eval running) — not launching. Wait and retry."
   exit 2
@@ -25,11 +41,12 @@ $SSH "mkdir -p $AR/checkpoints && cd $AR && \
   setsid env PYTORCH_ALLOC_CONF=expandable_segments:True \
     LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1 \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONPATH=$AR/src \
+    timeout --signal=KILL 5400 \
     $MAIN/.venv/bin/python -m embedding_train.train \
     model=splade data=splade_sink logger=local \
     trainer.checkpoint_dir=$AR/checkpoints logger.run_name=$NAME \
     trainer.encode_batch_size=32 trainer.accumulate_grad_batches=2 \
-    $* > $AR/run_$NAME.log 2>&1 < /dev/null & echo REMOTE_PID=\$!"
+    $EXTRA $* > $AR/run_$NAME.log 2>&1 < /dev/null & echo REMOTE_PID=\$!"
 
 echo "launched $NAME; log: vastai0:$AR/run_$NAME.log"
 sleep 60
