@@ -61,6 +61,16 @@ class SpladeModule(EmbeddingModule):
             if 0 <= token_id < vocab_size
         ]
         vocab_mask[special_ids] = 0.0
+        # Optional train-time stoplist: zero always-on stopword/punctuation dims so
+        # the model never spends capacity (or FLOPS budget) on non-discriminative
+        # terms and reallocates expansion onto content terms.
+        stopword_ids = [
+            int(i)
+            for i in (getattr(cfg.model, "stopword_mask_ids", None) or [])
+            if 0 <= int(i) < vocab_size
+        ]
+        if stopword_ids:
+            vocab_mask[stopword_ids] = 0.0
         self.register_buffer(
             "special_token_vocab_mask", vocab_mask, persistent=False
         )

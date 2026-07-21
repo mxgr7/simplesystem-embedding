@@ -20,6 +20,9 @@ def build_synthetic_negative_record(
         "query_text": anchor_query_text,
         "offer_id": synthetic_offer["offer_id"],
         "offer_text": synthetic_offer["offer_text"],
+        # Carried when field dropout is active so cross-query synthetic
+        # negatives get masked like real records.
+        "offer_fields": synthetic_offer.get("offer_fields"),
         "label": 0.0,
         "raw_label": SYNTHETIC_NEGATIVE_LABEL,
     }

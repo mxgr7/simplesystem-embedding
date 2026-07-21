@@ -1,6 +1,7 @@
 model_name: deepset/gbert-base
 architecture: splade
-init_checkpoint: null
+init_checkpoint: /home/max/simplesystem-embedding/data/v1a_best.ckpt  # domain-pretrained warm start — REQUIRED (from-scratch degenerates)
+stopword_mask_ids: null   # optional list of vocab token-ids to zero (train-time stoplist)
 output_dim: null
 pooling: splade_max
 loss_type: contrastive
@@ -14,7 +15,7 @@ distill_temperature: 0.05
 compile: false
 flops_lambda_q: 5.0e-4
 flops_lambda_d: 3.0e-4
-flops_warmup_steps: 1500
+flops_warmup_steps: 300
 loss_weights:
   margin_mse: 0.0
   kl: 0.0

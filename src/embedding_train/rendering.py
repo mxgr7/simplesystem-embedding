@@ -77,6 +77,20 @@ class RowTextRenderer:
 
         return normalize_text(self.offer_template.render(**context))
 
+    def render_offer_text_masked(self, row, dropped_fields):
+        """Re-render the offer with the given source columns blanked.
+
+        `dropped_fields` are parquet/source column names; blanking the source
+        propagates through build_context (column_mapping, clean_description,
+        category_text), so a dropped field's template line disappears exactly
+        as if the column had been empty in the data.
+        """
+        masked_row = dict(row)
+        for field in dropped_fields:
+            if field in masked_row:
+                masked_row[field] = ""
+        return self.render_offer_text(masked_row)
+
     def build_context(self, row):
         context = {}
 

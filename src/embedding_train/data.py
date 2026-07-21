@@ -3,6 +3,7 @@ import json
 import pickle
 import random
 import sys
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -118,6 +119,18 @@ class EmbeddingDataModule(LightningDataModule):
             getattr(cfg.data, "val_split_mode", "query_id")
         )
         self.row_renderer = RowTextRenderer(cfg.data)
+        # Field dropout (train-time data augmentation): source columns listed
+        # in data.field_dropout_fields are independently blanked with
+        # probability data.field_dropout_p per record per batch, and the offer
+        # text is re-rendered in the collate path — so masks resample every
+        # epoch. Records capture their raw row (offer_fields) whenever the
+        # field list is non-empty; p only controls masking, keeping the
+        # prepared-dataset cache shareable across p values (including p=0).
+        self.field_dropout_fields = [
+            str(field)
+            for field in (cfg.data.get("field_dropout_fields", None) or [])
+        ]
+        self.field_dropout_p = float(cfg.data.get("field_dropout_p", 0.0) or 0.0)
         self.tokenizer = load_fast_tokenizer(cfg.model.model_name)
         self.train_dataset = None
         self.val_dataset = None
@@ -264,6 +277,8 @@ class EmbeddingDataModule(LightningDataModule):
         if self.train_dataset is None:
             raise RuntimeError("train_dataset is not initialized. Call setup() first.")
 
+        train_collate_fn = self._train_collate_fn()
+
         if self.train_batching_mode == "anchor_query":
             train_batch_dataset = cast(
                 Dataset, self._build_anchor_query_train_dataset()
@@ -273,7 +288,7 @@ class EmbeddingDataModule(LightningDataModule):
                 batch_size=None,
                 num_workers=int(self.cfg.data.num_workers),
                 pin_memory=bool(self.cfg.data.pin_memory),
-                collate_fn=self.collate_fn,
+                collate_fn=train_collate_fn,
             )
 
         if self.train_batching_mode == "random_query_pool":
@@ -284,7 +299,7 @@ class EmbeddingDataModule(LightningDataModule):
                 shuffle=True,
                 num_workers=int(self.cfg.data.num_workers),
                 pin_memory=bool(self.cfg.data.pin_memory),
-                collate_fn=self.collate_fn,
+                collate_fn=train_collate_fn,
             )
 
         train_dataset = cast(Dataset, self.train_dataset)
@@ -295,8 +310,14 @@ class EmbeddingDataModule(LightningDataModule):
             shuffle=True,
             num_workers=int(self.cfg.data.num_workers),
             pin_memory=bool(self.cfg.data.pin_memory),
-            collate_fn=self.collate_fn,
+            collate_fn=train_collate_fn,
         )
+
+    def _train_collate_fn(self):
+        """Masking collate for train loaders only — validation stays clean."""
+        if self.field_dropout_p > 0 and self.field_dropout_fields:
+            return partial(self.collate_fn, apply_field_dropout=True)
+        return self.collate_fn
 
     def val_dataloader(self):
         if self.val_dataset is None:
@@ -313,7 +334,7 @@ class EmbeddingDataModule(LightningDataModule):
             collate_fn=self.collate_fn,
         )
 
-    def collate_fn(self, batch):
+    def collate_fn(self, batch, apply_field_dropout=False):
         batch_records = batch
         batch_stats = None
 
@@ -323,6 +344,8 @@ class EmbeddingDataModule(LightningDataModule):
 
         query_texts = [item["query_text"] for item in batch_records]
         offer_texts = [item["offer_text"] for item in batch_records]
+        if apply_field_dropout:
+            offer_texts = self._apply_field_dropout(batch_records, offer_texts)
 
         query_inputs = self.tokenizer(
             query_texts,
@@ -373,6 +396,31 @@ class EmbeddingDataModule(LightningDataModule):
             collated_batch["batch_stats"] = dict(batch_stats)
 
         return collated_batch
+
+    def _apply_field_dropout(self, batch_records, offer_texts):
+        """Independently blank each configured field with p, re-render.
+
+        Uses torch RNG: the DataLoader rotates worker base seeds per epoch, so
+        masks differ across epochs and workers. Records without captured
+        offer_fields (e.g. mined-negative sidecars) keep their static text.
+        """
+        p = self.field_dropout_p
+        fields = self.field_dropout_fields
+        masked_texts = list(offer_texts)
+        for index, item in enumerate(batch_records):
+            offer_fields = item.get("offer_fields")
+            if not offer_fields:
+                continue
+            draws = torch.rand(len(fields)).tolist()
+            dropped = [
+                field for field, draw in zip(fields, draws) if draw < p
+            ]
+            if not dropped:
+                continue
+            masked_texts[index] = self.row_renderer.render_offer_text_masked(
+                offer_fields, dropped
+            )
+        return masked_texts
 
     def _build_anchor_query_train_dataset(self):
         if self.train_dataset is None:
@@ -536,6 +584,10 @@ class EmbeddingDataModule(LightningDataModule):
             "seed": int(self.cfg.seed),
             "n_pos_samples_per_query": int(data_cfg.n_pos_samples_per_query),
             "n_neg_samples_per_query": int(data_cfg.n_neg_samples_per_query),
+            # Cached records carry offer_fields iff this list is non-empty;
+            # field_dropout_p is deliberately NOT in the key (p sweeps reuse
+            # the cache — masking happens at collate, not here).
+            "field_dropout_fields": self.field_dropout_fields or None,
         }
         serialized = json.dumps(key_payload, sort_keys=True, default=str)
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
@@ -670,6 +722,7 @@ class EmbeddingDataModule(LightningDataModule):
             "offer_template": str(data_cfg.offer_template),
             "positive_label": str(data_cfg.positive_label),
             "clean_html": bool(data_cfg.clean_html),
+            "field_dropout_fields": self.field_dropout_fields or None,
         }
         serialized = json.dumps(key_payload, sort_keys=True, default=str)
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
@@ -695,12 +748,16 @@ class EmbeddingDataModule(LightningDataModule):
 
     def _build_record(self, row):
         record = self.row_renderer.build_training_record(row)
-        if record is None or self.ce_score_by_pair is None:
+        if record is None:
             return record
 
-        record["ce_score"] = self.ce_score_by_pair.get(
-            (record["query_id"], record["offer_id"]), float("nan")
-        )
+        if self.field_dropout_fields:
+            record["offer_fields"] = dict(row)
+
+        if self.ce_score_by_pair is not None:
+            record["ce_score"] = self.ce_score_by_pair.get(
+                (record["query_id"], record["offer_id"]), float("nan")
+            )
         return record
 
     def _empty_split_stats(self):
@@ -915,6 +972,7 @@ class EmbeddingDataModule(LightningDataModule):
                     "offer_source_query_id": query_id,
                     "offer_id": record["offer_id"],
                     "offer_text": record["offer_text"],
+                    "offer_fields": record.get("offer_fields"),
                 }
             )
 
