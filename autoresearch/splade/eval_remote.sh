@@ -14,10 +14,18 @@ AR=/home/max/ar_splade
 MAIN=/home/max/simplesystem-embedding
 DATA=$MAIN/data
 
+# Optional 3rd arg picks the checkpoint flavor for run-name targets:
+#   final (default if present) = end-of-fit weights (all trained steps),
+#   best = internal-val best (directional metric), last = ModelCheckpoint last.
+FLAVOR=${3:-auto}
 CKPT=$TARGET
 case "$TARGET" in
   /*) : ;;
-  *) CKPT=$($SSH "ls -t $AR/checkpoints/$TARGET/best-*.ckpt 2>/dev/null | head -1");;
+  *) if [ "$FLAVOR" = auto ]; then
+       CKPT=$($SSH "ls -t $AR/checkpoints/$TARGET/final-*.ckpt $AR/checkpoints/$TARGET/best-*.ckpt 2>/dev/null | head -1")
+     else
+       CKPT=$($SSH "ls -t $AR/checkpoints/$TARGET/$FLAVOR-*.ckpt 2>/dev/null | head -1")
+     fi;;
 esac
 [ -z "$CKPT" ] && { echo "NO CKPT for $TARGET"; exit 1; }
 echo "ckpt: $CKPT"

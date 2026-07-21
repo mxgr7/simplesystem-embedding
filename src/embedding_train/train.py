@@ -230,6 +230,19 @@ def run(cfg):
     if best_model_path:
         print(f"Best checkpoint: {best_model_path}")
 
+    # Time-capped runs (trainer.max_time) stop mid-epoch; ModelCheckpoint only
+    # saves at validation/epoch boundaries, silently discarding the tail of
+    # training. Persist the end-of-fit weights explicitly so evals can use
+    # every trained step.
+    for callback in callbacks:
+        if isinstance(callback, ModelCheckpoint) and callback.dirpath:
+            final_path = str(
+                Path(callback.dirpath) / f"final-step={trainer.global_step}.ckpt"
+            )
+            trainer.save_checkpoint(final_path, weights_only=True)
+            print(f"Final checkpoint: {final_path}")
+            break
+
 
 def main():
     run()
