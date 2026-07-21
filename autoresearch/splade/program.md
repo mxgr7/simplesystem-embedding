@@ -79,6 +79,36 @@ which configs deserve them.
 - **Establish in-budget baselines first**: run the reference recipe for 45 min
   on b50_fold (screen baseline) and on raw_fold with both evals (keep-chain
   root) before touching any knob.
+
+### Phase 0 — throughput first (do this before quality experiments)
+
+**Your first real work after the baselines is making the 45 minutes go
+further.** Every minute of dataset prepare, padding waste, mid-run validation,
+or slow eval is a minute not spent training or iterating. Targets, in order of
+expected payoff (timing facts in NOTES.md):
+
+1. **Eval turnaround** (seg ~15–20 min, gold ~25 min today, mostly
+   single-process CPU render+tokenize): the eval doc pools are FROZEN — render
+   and tokenize them ONCE, cache the tensors, and make every subsequent eval
+   pure GPU encode + top-k. You may optimize `scripts/splade_flops_stoplist.py`
+   for SPEED ONLY: metrics logic, pools, and label handling stay untouched, and
+   any optimized version must reproduce soup_fold's known numbers
+   (seg .9588/.4293, gold .9040/.4925) to ±0.0005 before you adopt it.
+2. **Dataset prepare**: warm the prepared-dataset cache for both fold parquets
+   once (it keys on data path + template + sampling; field_dropout p is
+   excluded from the key by design, so p sweeps reuse it). After that, prepare
+   should cost ~0 per run. If cold prepare is still slow, parallelize the
+   render loop (`encode_shards.py` has the fork-pool pattern).
+3. **Training step rate**: length-sorted/bucketed batching (renders are p50
+   ~300 tokens vs the 512 cap — pad-to-longest across a shuffled batch wastes
+   ~40%), mid-run validation cost (`val_check_interval`/full-catalog encode —
+   for 45-min runs consider validating once at end; internal val is
+   directional anyway), gradient-checkpointing trade (off = faster but VRAM is
+   already ~79/81 GB — would need smaller batch), dataloader workers.
+
+Log speedups as results.tsv rows (status `speedup`, description = before→after
+minutes and the reproduction check). A throughput keep is as valuable as a
+quality keep — it compounds across every later iteration.
 - Example screen (overrides are plain `key=value` tokens, no spaces/quotes —
   they are passed through ssh; data paths must be absolute box paths):
   `autoresearch/splade/run_remote.sh myrun data.path=/home/max/simplesystem-embedding/data/splade_train_b50_fold.parquet trainer.max_time=00:00:45:00 optimizer.lr=1.5e-5 trainer.max_epochs=8`
@@ -111,9 +141,11 @@ which configs deserve them.
 - Query-side augmentation derived from the provided train queries.
 
 **What you CANNOT do**
-- Touch `scripts/splade_flops_stoplist.py` metrics logic, the `*_fold` eval
-  jsonls, or anything under `~/simplesystem-embedding` on the box other than
-  reading `data/` and `checkpoints/` (your runs live in `~/ar_splade`).
+- Change `scripts/splade_flops_stoplist.py` METRICS (scoring, pools, labels,
+  top-k semantics) or the `*_fold` eval jsonls. Speed-only optimization of the
+  harness is allowed under the Phase-0 reproduction rule. Nothing under
+  `~/simplesystem-embedding` on the box may be modified — read-only access to
+  its `data/` and `checkpoints/` (your runs live in `~/ar_splade`).
 - Introduce new supervision sources: the provided parquets are the ONLY
   training data (the frozen test/calib terms would leak through anything you
   scrape yourself).
