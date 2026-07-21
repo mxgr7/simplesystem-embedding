@@ -18,6 +18,8 @@ recall@{10,100} (E and E+S), macro over terms.
 import argparse
 import glob
 import json
+import multiprocessing as mp
+import os
 import time
 
 import numpy as np
@@ -30,6 +32,31 @@ from embedding_train.tokenization import load_fast_tokenizer
 
 KS = [10, 100]
 MASK_LEVELS = [0, 20, 50, 100, 200]
+N_WORKERS = max(1, min(32, (os.cpu_count() or 8) - 2))
+
+# fork-shared read-only state for the worker pools (copy-on-write; workers
+# never mutate). Set before Pool creation, read inside workers.
+_G = {}
+
+
+def _render_doc(row):
+    return _G["ren"].render_offer_text({**row, "description": ""})
+
+
+def _recall_chunk(term_indices):
+    Md, Q = _G["Md"], _G["Q"]
+    terms, rel_E, rel_ES = _G["terms"], _G["rel_E"], _G["rel_ES"]
+    out = []
+    for ti in term_indices:
+        term = terms[ti]
+        scores = Md.dot(Q[ti])
+        tops = {k: topk_rows(scores, k) for k in KS}
+        e = ({k: len(tops[k] & rel_E[term]) / len(rel_E[term]) for k in KS}
+             if rel_E.get(term) else None)
+        es = ({k: len(tops[k] & rel_ES[term]) / len(rel_ES[term]) for k in KS}
+              if rel_ES.get(term) else None)
+        out.append((ti, e, es))
+    return out
 
 
 def load_rows(path):
@@ -90,18 +117,19 @@ def topk_rows(scores, k):
 
 
 def macro_recall(M_d, M_q, terms, rel_E, rel_ES):
-    Q = M_q.toarray()
-    accE = {k: [] for k in KS}
-    accES = {k: [] for k in KS}
-    for ti, term in enumerate(terms):
-        scores = M_d.dot(Q[ti])
-        tops = {k: topk_rows(scores, k) for k in KS}
-        if term in rel_E and rel_E[term]:
-            for k in KS:
-                accE[k].append(len(tops[k] & rel_E[term]) / len(rel_E[term]))
-        if term in rel_ES and rel_ES[term]:
-            for k in KS:
-                accES[k].append(len(tops[k] & rel_ES[term]) / len(rel_ES[term]))
+    """Parallel over terms via fork pool; per-term results reassembled in term
+    order, so the means are bit-identical to the old sequential loop."""
+    _G.update(Md=M_d.tocsr(), Q=M_q.toarray(), terms=terms,
+              rel_E=rel_E, rel_ES=rel_ES)
+    chunks = [list(range(i, min(i + 32, len(terms))))
+              for i in range(0, len(terms), 32)]
+    per_term = [None] * len(terms)
+    with mp.get_context("fork").Pool(N_WORKERS) as pool:
+        for res in pool.imap_unordered(_recall_chunk, chunks):
+            for ti, e, es in res:
+                per_term[ti] = (e, es)
+    accE = {k: [p[0][k] for p in per_term if p and p[0]] for k in KS}
+    accES = {k: [p[1][k] for p in per_term if p and p[1]] for k in KS}
     return ({k: float(np.mean(accE[k])) for k in KS},
             {k: float(np.mean(accES[k])) for k in KS})
 
@@ -145,7 +173,11 @@ def main():
     t0 = time.time()
     qtexts = [ren.render_query_text({"query_term": t}) for t in terms]
     Mq = encode_splade(model, tok, qtexts, int(cfg.data.max_query_length), args.device, bs=256)
-    dtexts = [ren.render_offer_text({**r, "description": ""}) for r in docrows]  # deploy: desc-free
+    _G["ren"] = ren
+    with mp.get_context("fork").Pool(N_WORKERS) as pool:
+        dtexts = pool.map(_render_doc, docrows, chunksize=512)  # deploy: desc-free
+    print(f"rendered {len(dtexts):,} docs in {time.time()-t0:.0f}s "
+          f"({N_WORKERS} workers)", flush=True)
     Md = encode_splade(model, tok, dtexts, int(cfg.data.max_offer_length), args.device, bs=128)
     print(f"encoded q={Mq.shape} d={Md.shape} in {time.time()-t0:.0f}s", flush=True)
 
