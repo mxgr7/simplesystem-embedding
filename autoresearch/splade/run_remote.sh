@@ -27,6 +27,14 @@ done
 EXTRA=""
 [ -z "$MAXTIME_ARG" ] && EXTRA="trainer.max_time=00:00:45:00"
 
+# accumulate_grad_batches defaults to 2 (H100 VRAM at seq 512); overridable
+# for short-seq configs (e.g. seq 256 + batch 512 + accum 1). Hydra errors on
+# duplicate overrides, so only inject the default when the caller didn't.
+ACCUM="trainer.accumulate_grad_batches=2"
+for a in "$@"; do
+  case "$a" in trainer.accumulate_grad_batches=*) ACCUM="";; esac
+done
+
 if $SSH "pgrep -f 'embedding_train.tra[i]n' >/dev/null || pgrep -f 'splade_flops_stopli[s]t' >/dev/null"; then
   echo "GPU BUSY on vastai0 (training or eval running) — not launching. Wait and retry."
   exit 2
@@ -45,7 +53,7 @@ $SSH "mkdir -p $AR/checkpoints && cd $AR && \
     $MAIN/.venv/bin/python -m embedding_train.train \
     model=splade data=splade_sink logger=local \
     trainer.checkpoint_dir=$AR/checkpoints logger.run_name=$NAME \
-    trainer.encode_batch_size=32 trainer.accumulate_grad_batches=2 \
+    trainer.encode_batch_size=32 $ACCUM \
     $EXTRA $* > $AR/run_$NAME.log 2>&1 < /dev/null & echo REMOTE_PID=\$!"
 
 echo "launched $NAME; log: vastai0:$AR/run_$NAME.log"
