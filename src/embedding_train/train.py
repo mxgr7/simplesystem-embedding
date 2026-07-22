@@ -134,11 +134,23 @@ class DatasetStatsLogger(Callback):
         self._logged = True
 
 
+class StopAfterFirstValidation(Callback):
+    """Stop the instant the first real validation finishes (skips sanity check).
+    For LR/HP sweeps: one val on the full 8-epoch anneal schedule, then a precise
+    stop -- no wasted post-val steps, scheduler horizon untouched (unlike max_steps
+    which shrinks estimated_stepping_batches). Enable with +trainer.stop_after_first_val=true."""
+    def on_validation_end(self, trainer, pl_module):
+        if not trainer.sanity_checking:
+            trainer.should_stop = True
+
+
 def build_callbacks(cfg, logger):
     callbacks = [
         LearningRateMonitor(logging_interval="step"),
         DatasetStatsLogger(),
     ]
+    if getattr(cfg.trainer, "stop_after_first_val", False):
+        callbacks.append(StopAfterFirstValidation())
 
     if not getattr(cfg.trainer, "enable_checkpointing", True):
         return callbacks

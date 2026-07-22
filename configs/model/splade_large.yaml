@@ -1,6 +1,6 @@
 model_name: deepset/gbert-large
 architecture: splade
-init_checkpoint: null
+init_checkpoint: /home/max/prod_splade/large_pretrain.ckpt  # =-free symlink -> checkpoints/splade-large-pretrain/best-step=4688...=0.6423.ckpt (Hydra = trap); domain-pretrained large SPLADE warm start
 output_dim: null
 pooling: splade_max
 loss_type: contrastive
