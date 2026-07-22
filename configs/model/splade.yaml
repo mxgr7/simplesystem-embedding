@@ -19,3 +19,7 @@ flops_warmup_steps: 300
 loss_weights:
   margin_mse: 0.0
   kl: 0.0
+# MarginMSE distillation knobs (active only when loss_weights.margin_mse > 0);
+# defined here so CLI overrides pass Hydra struct mode without model=splade_distill.
+margin_mse_teacher_scale: 1.0
+margin_mse_warmup_steps: 0
