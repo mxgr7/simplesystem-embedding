@@ -141,6 +141,10 @@ def main():
     ap.add_argument("--dist", default="data/desc_distractors.jsonl")
     ap.add_argument("--out", default="splade_flops_stoplist.json")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--skip-mask-configs", action="store_true",
+                    help="speed only: report just full+top256; the mask-sweep "
+                         "configs are skipped (their metrics logic is "
+                         "unchanged when run)")
     args = ap.parse_args()
     ckpt = sorted(glob.glob(args.splade_ckpt))[0]
 
@@ -205,14 +209,15 @@ def main():
     report("full", Md, Mq)
     Md256 = prune_topk_rows(Md, 256)
     report("top256", Md256, Mq)
-    for k in MASK_LEVELS:
-        if k == 0:
-            continue
-        cols = order[:k]
-        report(f"top256+mask{k}", zero_cols(Md256, cols), zero_cols(Mq.copy(), cols))
-    # also: mask on full (model-native) to see best-case FLOPS drop
-    for k in (50, 100):
-        report(f"full+mask{k}", zero_cols(Md, order[:k]), zero_cols(Mq.copy(), order[:k]))
+    if not args.skip_mask_configs:
+        for k in MASK_LEVELS:
+            if k == 0:
+                continue
+            cols = order[:k]
+            report(f"top256+mask{k}", zero_cols(Md256, cols), zero_cols(Mq.copy(), cols))
+        # also: mask on full (model-native) to see best-case FLOPS drop
+        for k in (50, 100):
+            report(f"full+mask{k}", zero_cols(Md, order[:k]), zero_cols(Mq.copy(), order[:k]))
 
     result["top_doc_terms"] = [[int(j), float(dbin[j])] for j in order[:300]]
     with open(args.out, "w") as f:

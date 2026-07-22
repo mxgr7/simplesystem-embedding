@@ -30,13 +30,17 @@ esac
 [ -z "$CKPT" ] && { echo "NO CKPT for $TARGET"; exit 1; }
 echo "ckpt: $CKPT"
 
+# FAST=1 skips the mask-sweep configs (speed only; top256 metrics identical).
+FASTFLAG=""
+[ "${FAST:-0}" = "1" ] && FASTFLAG="--skip-mask-configs"
+
 run_eval() { # $1 = gold jsonl, $2 = tag
   $SSH "cd $AR && env PYTORCH_ALLOC_CONF=expandable_segments:True \
     LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1 \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONPATH=$AR/src \
     $MAIN/.venv/bin/python scripts/splade_flops_stoplist.py \
     --splade-ckpt '$CKPT' --gold $1 \
-    --dist $DATA/desc_distractors_fold.jsonl \
+    --dist $DATA/desc_distractors_fold.jsonl $FASTFLAG \
     --out $AR/eval_${2}_\$(basename '$CKPT' .ckpt | tr -d '=').json 2>&1" \
     | grep -E "^top256 |Error|Traceback" | sed "s/^/[$2] /"
 }
