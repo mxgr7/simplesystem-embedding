@@ -44,7 +44,7 @@ column_rename: null
 # Length-bucketed batching (speed): shuffle -> window of N batches -> sort by
 # rendered-offer char length -> chunk -> shuffle batch order. Cuts the ~40%
 # pad-to-longest waste; batch composition stays random at window granularity.
-length_bucketing: false
+length_bucketing: true
 length_bucket_window: 16
 
 # No e5-style "query:"/"passage:" prefixes — SPLADE has no instruction
