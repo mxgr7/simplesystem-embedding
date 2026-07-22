@@ -11,21 +11,22 @@ SSH="ssh -F /workspace/.ssh/vastai.conf vastai0"
 AR=/home/max/ar_splade
 MAIN=/home/max/simplesystem-embedding
 
-# HARD TIME BUDGET: every run trains for at most 45 minutes. Inject the cap if
-# absent; refuse any user-supplied max_time above it (format DD:HH:MM:SS).
+# HARD TIME BUDGET: every run trains for at most 15 minutes (Max directive
+# 2026-07-22, was 45). Inject the cap if absent; refuse any user-supplied
+# max_time above it (format DD:HH:MM:SS).
 MAXTIME_ARG=""
 for a in "$@"; do
   case "$a" in trainer.max_time=*)
     MAXTIME_ARG="${a#trainer.max_time=}"
     SECS=$(echo "$MAXTIME_ARG" | awk -F: '{print $1*86400+$2*3600+$3*60+$4}')
-    if [ "$SECS" -gt 2700 ]; then
-      echo "REFUSED: trainer.max_time=$MAXTIME_ARG exceeds the 45-minute budget."
+    if [ "$SECS" -gt 900 ]; then
+      echo "REFUSED: trainer.max_time=$MAXTIME_ARG exceeds the 15-minute budget."
       exit 3
     fi ;;
   esac
 done
 EXTRA=""
-[ -z "$MAXTIME_ARG" ] && EXTRA="trainer.max_time=00:00:45:00"
+[ -z "$MAXTIME_ARG" ] && EXTRA="trainer.max_time=00:00:15:00"
 
 # accumulate_grad_batches defaults to 2 (H100 VRAM at seq 512); overridable
 # for short-seq configs (e.g. seq 256 + batch 512 + accum 1). Hydra errors on
@@ -49,7 +50,7 @@ $SSH "mkdir -p $AR/checkpoints && cd $AR && \
   setsid env PYTORCH_ALLOC_CONF=expandable_segments:True \
     LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1 \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONPATH=$AR/src \
-    timeout --signal=KILL 5400 \
+    timeout --signal=KILL 2100 \
     $MAIN/.venv/bin/python -m embedding_train.train \
     model=splade data=splade_sink logger=local \
     trainer.checkpoint_dir=$AR/checkpoints logger.run_name=$NAME \

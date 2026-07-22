@@ -60,13 +60,18 @@ are [B,seq,vocab] ≈ 32 GiB), encode_batch_size=32.
 
 ## Experimentation
 
-**⏱ HARD TIME BUDGET: NO RUN MAY TRAIN LONGER THAN 45 MINUTES.**
-`run_remote.sh` enforces `trainer.max_time=00:00:45:00` on every launch (it
-injects the cap if you omit it and REFUSES anything larger) and hard-kills the
-remote process at 90 minutes wall-clock. Do not try to work around this — the
+**⏱ HARD TIME BUDGET: NO RUN MAY TRAIN LONGER THAN 15 MINUTES** (Max
+directive 2026-07-22; was 45). `run_remote.sh` enforces
+`trainer.max_time=00:00:15:00` on every launch (it injects the cap if you
+omit it and REFUSES anything larger) and hard-kills the remote process at 35
+minutes wall-clock (`timeout 2100`). Do not try to work around this — the
 session's value is iteration count, not run length. Promising configs get
-full-length training runs by the humans AFTER the session; your job is to find
-which configs deserve them.
+full-length training runs by the humans AFTER the session; your job is to
+find which configs deserve them. At 15 min (~1,000 steps ≈ 1.9 epochs of the
+k2 chain-base config) R@100 effects ≥.003 remain detectable; FLOPS/qnnz are
+mid-schedule (~3-4 expected) — the ≤6.0 guardrail applies but FLOPS is NOT
+comparable across budget generations. Flag suspected budget-sensitive levers
+as "full-length candidate" instead of burning budget on them.
 
 - **Screens**: train on `data/splade_train_b50_fold.parquet` (45-min cap), seg
   eval only. A screen that clearly beats your in-budget screen baseline
