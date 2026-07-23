@@ -1,7 +1,20 @@
+import re
+import unicodedata
+
 import torch
 from transformers import AutoModelForMaskedLM
 
 from embedding_train.tokenization import load_fast_tokenizer
+
+
+def is_cased_token(tok):
+    """True if the token string carries uppercase or a diacritic — i.e. text
+    folding (lowercase + strip diacritics) would change it. Used to build the
+    folded-vocab output mask for models trained on folded input."""
+    s = tok.replace("##", "")
+    if re.search(r"[A-ZÄÖÜ]", s):
+        return True
+    return any(unicodedata.combining(c) for c in unicodedata.normalize("NFD", s))
 
 from embedding_train.losses import (
     flops_regularizer,
@@ -71,6 +84,17 @@ class SpladeModule(EmbeddingModule):
         ]
         if stopword_ids:
             vocab_mask[stopword_ids] = 0.0
+        # Optional folded-vocab mask: for models trained on folded (lowercase,
+        # diacritic-stripped) input, the cased/diacritic output dims are largely
+        # redundant case-twins of a lowercase token (System vs system). Zeroing
+        # them at train time frees capacity + FLOPS budget for content terms and
+        # consolidates each lemma onto its lowercase dimension.
+        if bool(getattr(cfg.model, "fold_vocab_mask", False)):
+            # index by the REAL token id (not enumerate position) so gaps / added
+            # tokens beyond vocab_size can't misalign the mask.
+            cased_ids = [i for tok, i in tokenizer.get_vocab().items()
+                         if i < vocab_size and is_cased_token(tok)]
+            vocab_mask[cased_ids] = 0.0
         self.register_buffer(
             "special_token_vocab_mask", vocab_mask, persistent=False
         )
