@@ -1,0 +1,62 @@
+services:
+  splade-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    image: simplesystem-splade-backend:prod-soup-cpu-v1
+    network_mode: host
+    environment:
+      SPLADE_CHECKPOINT: /model/prod_soup.ckpt
+      HF_HOME: /data/huggingface
+      DEVICE: cpu
+      BACKEND_BATCH_SIZE: "2"
+      BACKEND_MAX_CONCURRENCY: "1"
+      TORCH_NUM_THREADS: "16"
+      BACKEND_API_KEY: ${SPLADE_BACKEND_API_KEY:-}
+      PYTHONPATH: /runtime
+    volumes:
+      - /data/splade-service/model:/model:ro
+      - /data/splade-service/huggingface:/data/huggingface
+      - /data/splade-service/runtime:/runtime:ro
+    command: ["uvicorn", "backend:app", "--host", "127.0.0.1", "--port", "8138", "--limit-concurrency", "16", "--no-access-log"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8138/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 30
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "3"
+
+  splade-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    image: simplesystem-splade-service:prod-soup-v1
+    network_mode: host
+    environment:
+      BACKEND_URLS: http://127.0.0.1:8138
+      KVROCKS_URL: redis://127.0.0.1:6666/0
+      MAX_INPUTS_PER_REQUEST: "256"
+      MAX_INFLIGHT: "32"
+      REQUEST_BUDGET_S: "120"
+      KVROCKS_READ_TIMEOUT_MS: "100"
+      API_KEY: ${SPLADE_API_KEY:-}
+      ADMIN_API_KEY: ${SPLADE_ADMIN_API_KEY:-}
+      BACKEND_API_KEY: ${SPLADE_BACKEND_API_KEY:-}
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--limit-concurrency", "128", "--no-access-log"]
+    depends_on:
+      splade-backend:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "3"
