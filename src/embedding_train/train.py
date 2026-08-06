@@ -43,6 +43,23 @@ def build_module(cfg):
                 f"init_checkpoint is missing state_dict: {init_checkpoint}"
             )
         state_dict = _align_encoder_compile_prefix(state_dict, module)
+        # Untied encoders start from the SAME warm-start weights and diverge
+        # during training. Checkpoints predate the split and carry only
+        # `encoder.*`, so mirror them onto `query_encoder.*`; without this the
+        # strict load below raises on missing keys, and training SPLADE from a
+        # vanilla backbone degenerates.
+        if any(k.startswith("query_encoder.") for k, _ in module.state_dict().items()):
+            if not any(k.startswith("query_encoder.") for k in state_dict):
+                mirrored = {
+                    "query_encoder." + k[len("encoder."):]: v
+                    for k, v in state_dict.items()
+                    if k.startswith("encoder.")
+                }
+                state_dict = {**state_dict, **mirrored}
+                logging.info(
+                    "Mirrored %d encoder tensors onto query_encoder for warm start",
+                    len(mirrored),
+                )
         module.load_state_dict(state_dict)
         logging.info("Warm-started model weights from %s", init_checkpoint)
 

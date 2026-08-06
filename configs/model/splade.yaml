@@ -17,6 +17,38 @@ compile: false
 flops_lambda_q: 5.0e-4
 flops_lambda_d: 3.0e-4
 flops_warmup_steps: 300
+# Sparsity regularizer per side: flops | l1 | df_flops. Defaults reproduce plain
+# FLOPS bit-for-bit. flops_lambda_q/d stay the lambda for whichever type is used.
+#   l1       — constant gradient near zero, so it actually reduces query nnz;
+#              FLOPS only shrinks magnitudes (measured: x20 lambda RAISED nnz).
+#   df_flops — weights each dim's penalty by a logistic of its document
+#              frequency, penalizing breadth rather than magnitude.
+reg_type_q: flops
+reg_type_d: flops
+# Calibrated against the measured df of prod_soup query tokens (p10=0.011,
+# p50=0.076, p90=0.207): alpha=40/beta=0.08 gives 17x discrimination p10->p90,
+# leaving rare dims near-unpenalized (w=0.06) and common ones fully penalized
+# (w=0.99). alpha=20/beta=0.05 was only 3.1x — barely distinguishable from plain
+# FLOPS. Raise alpha (60, 100) for a harder threshold.
+df_alpha: 40.0            # logistic steepness; alpha -> 0 degenerates to 0.5 * flops
+df_beta: 0.08             # df at which the penalty reaches half weight
+df_ema_momentum: 0.99     # EMA over batch doc-side document frequency
+# df weighting shape. 'sigmoid' = sigmoid(df_alpha*(df-df_beta)), broad pressure.
+# 'paper' = the DF-FLOPS generalized logistic (arXiv:2505.15070 Eq. 3), a
+# near-hard high-pass: w~0.0003 at df=2%, 0.5 at df_half, 0.99 at 20%. The paper
+# reports this keeps doc nnz high while collapsing top-token df; the sigmoid
+# variant instead collapses nnz globally. Materially different regularizers.
+df_activation: sigmoid    # sigmoid | paper
+df_half: 0.10             # 'paper' only: df at which weight = 0.5 (their alpha)
+df_sharp: 10.0            # 'paper' only: steepness (their beta)
+# Separate query encoder. Two papers find query-side regularization is near-inert
+# with a shared encoder; untying cut latency 59% at zero quality cost. Doubles
+# encoder params (109M -> 218M). Warm start mirrors encoder.* -> query_encoder.*.
+untied_encoders: false
+# Train ONLY the query encoder, holding the doc encoder fixed. Requires
+# untied_encoders. Keeps the existing document index valid (df_j is unchanged),
+# so a sparser query still cuts postings with no re-encode of the corpus.
+freeze_doc_encoder: false
 loss_weights:
   margin_mse: 0.0
   kl: 0.0

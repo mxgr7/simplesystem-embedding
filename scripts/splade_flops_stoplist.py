@@ -64,12 +64,16 @@ def load_rows(path):
 
 
 @torch.inference_mode()
-def encode_splade(model, tok, texts, max_len, device, bs=128):
+def encode_splade(model, tok, texts, max_len, device, bs=128, is_query=False):
+    # is_query routes to the untied query encoder when the checkpoint has one;
+    # for tied models (the default) it changes nothing. Encoding queries with the
+    # doc encoder on an untied model would silently produce wrong vectors.
     mats = []
     for i in range(0, len(texts), bs):
         inp = tok(texts[i:i + bs], padding=True, truncation=True,
                   max_length=max_len, return_tensors="pt")
-        rep = model.encode({k: v.to(device) for k, v in inp.items()}).float().cpu().numpy()
+        rep = model.encode({k: v.to(device) for k, v in inp.items()},
+                           is_query=is_query).float().cpu().numpy()
         rep[rep < 0] = 0.0
         mats.append(sp.csr_matrix(rep))
     return sp.vstack(mats).tocsr()
@@ -107,6 +111,40 @@ def flops(M_q, M_d):
     qbin = np.asarray((M_q > 0).mean(axis=0)).ravel()
     dbin = np.asarray((M_d > 0).mean(axis=0)).ravel()
     return float((qmean * dmean).sum()), float((qbin * dbin).sum())
+
+
+# Vectored docs in the live index; only used to express postings in absolute terms.
+CORPUS_N = 113_560_531
+
+
+def coverage_stats(M_q, M_d, corpus_n=CORPUS_N):
+    """Expected candidate-set size for an inverted-index disjunction.
+
+        cov(q)      = 1 - prod_{j in q} (1 - df_j)
+        postings(q) = sum_{j in q} df_j * N
+
+    FLOPS prices the dot product; this prices the posting-list UNION, which is
+    what actually sets Elasticsearch latency. A `sparse_vector` query compiles
+    to a disjunction over the query's tokens, so a model can sit at SOTA FLOPS
+    and still drag most of the index into the candidate set — prod_soup does
+    exactly that (FLOPS_w 1.28, coverage 86%).
+
+    Validated against the live index: postings/query predicts observed `took`
+    to within a near-constant ~1.2 factor across a 7x latency range.
+    """
+    df = np.asarray((M_d > 0).mean(axis=0)).ravel()
+    log_survival = np.log(np.clip(1.0 - df, 1e-12, 1.0))
+    Q = M_q.tocsr()
+    covs, posts = [], []
+    for row in range(Q.shape[0]):
+        cols = Q.indices[Q.indptr[row]:Q.indptr[row + 1]]
+        if len(cols) == 0:
+            covs.append(0.0)
+            posts.append(0.0)
+            continue
+        covs.append(1.0 - float(np.exp(log_survival[cols].sum())))
+        posts.append(float(df[cols].sum() * corpus_n))
+    return float(np.mean(covs)), float(np.mean(posts)), df
 
 
 def topk_rows(scores, k):
@@ -176,7 +214,8 @@ def main():
 
     t0 = time.time()
     qtexts = [ren.render_query_text({"query_term": t}) for t in terms]
-    Mq = encode_splade(model, tok, qtexts, int(cfg.data.max_query_length), args.device, bs=256)
+    Mq = encode_splade(model, tok, qtexts, int(cfg.data.max_query_length), args.device, bs=256,
+                       is_query=True)
     _G["ren"] = ren
     with mp.get_context("fork").Pool(N_WORKERS) as pool:
         dtexts = pool.map(_render_doc, docrows, chunksize=512)  # deploy: desc-free
@@ -195,15 +234,22 @@ def main():
 
     def report(tag, Md_c, Mq_c):
         fw, fb = flops(Mq_c, Md_c)
+        cov, post, df_c = coverage_stats(Mq_c, Md_c)
         rE, rES = macro_recall(Md_c, Mq_c, terms, rel_E, rel_ES)
         row = {"config": tag, "doc_nnz": float(Md_c.nnz / Md_c.shape[0]),
                "query_nnz": float(Mq_c.nnz / Mq_c.shape[0]),
                "flops_weighted": fw, "flops_binary": fb,
+               "coverage": cov, "postings": post,
                "recallE": {str(k): rE[k] for k in KS},
                "recallES": {str(k): rES[k] for k in KS}}
         result["configs"].append(row)
+        # Full per-dim df for the deploy config, so a df-weighted regularizer can
+        # be seeded and "did the df distribution actually move?" can be answered.
+        if tag == "top256":
+            result["doc_df_full"] = [round(float(v), 6) for v in df_c]
         print(f"{tag:16s} docnnz={row['doc_nnz']:6.1f} qnnz={row['query_nnz']:5.1f} "
               f"FLOPS_w={fw:6.2f} FLOPS_b={fb:6.2f} "
+              f"cov={100 * cov:5.1f}% post={post / 1e6:6.1f}M "
               f"R@100 E={rE[100]:.4f} ES={rES[100]:.4f} R@10 E={rE[10]:.4f}", flush=True)
 
     report("full", Md, Mq)
