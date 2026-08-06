@@ -15,6 +15,12 @@ The description field is deliberately blanked. Source values are normalised and
 German-folded before the checkpoint's kitchen-sink template is rendered. The
 response is a list of top-256 `{token_id: weight}` maps.
 
+`POST /embed-query` accepts a raw query string or list of strings in the same
+`{"inputs": ...}` envelope. It normalises and applies `fold_de` inside the
+service, then returns the complete positive float32 query vector. Query callers
+must send the raw user text, including umlauts; they must not strip diacritics
+before calling the service. Query vectors bypass the document cache.
+
 KVRocks values use compact `(uint16 token_id, fp16 weight)` storage under the
 model-scoped `splade:prod-soup-folde-top256-v1:` prefix. Cache failures fall back
 to inference.
@@ -22,6 +28,13 @@ to inference.
 The frontend can route misses across multiple compatible backends. Add, reweight,
 or drain them with `/admin/backends`; every backend must report the exact model
 contract and checkpoint SHA from `/metadata`.
+
+CUDA backends also expose `POST /encode-packed` for bulk document indexing. It
+runs document inference under BF16 autocast, applies the special-token mask and
+top-256 on GPU, and returns versioned batches of the existing uint16-token/
+float16-weight codec. Query encoding remains unpruned float32 through `/encode`.
+Use `compose.gpu.yaml` for the dedicated GPU backend and benchmark representative
+rendered texts with `scripts/bench_splade_backend.py` before approving a full run.
 
 On the storage-constrained dev host, the compose file mounts the CPU inference
 dependencies from `/data/splade-service/runtime`. Populate that directory with:

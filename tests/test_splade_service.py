@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 import sys
 from pathlib import Path
 
@@ -79,6 +80,51 @@ def test_sparse_codec_rejects_malformed_values():
         codec.unpack_sparse(b"\xff\xff")
 
 
+def test_sparse_batch_codec_round_trips_and_rejects_trailing_bytes():
+    vectors = [{"2": 1.25, "1": 0.5}, {}, {"31000": 0.25}]
+    packed = codec.pack_sparse_batch(vectors)
+    assert codec.unpack_sparse_batch(packed) == [
+        codec.unpack_sparse(codec.pack_sparse(vector)) for vector in vectors
+    ]
+    with pytest.raises(ValueError, match="trailing"):
+        codec.unpack_sparse_batch(packed + b"x")
+
+
+def test_sparse_array_codec_filters_fp16_underflow_and_sorts_ids():
+    packed = codec.pack_sparse_arrays(
+        np.array([20, 10, 30]), np.array([0.5, 1.0, 1e-12])
+    )
+    assert codec.unpack_sparse(packed) == {"10": 1.0, "20": 0.5}
+    with pytest.raises(ValueError, match="invalid token"):
+        codec.pack_sparse_arrays(np.array([constants.VOCAB_SIZE]), np.array([1.0]))
+
+
+def test_backend_tokenizer_uses_wordpiece_fallback_on_missing_dependency(
+    monkeypatch, tmp_path
+):
+    backend = importlib.import_module("backend")
+    vocab = tmp_path / "vocab.txt"
+    vocab.write_text("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\ntest\n")
+    config = tmp_path / "tokenizer_config.json"
+    config.write_text(json.dumps({"do_lower_case": True}))
+
+    def download(_model_name, filename, cache_dir):
+        assert cache_dir == str(tmp_path)
+        return str(vocab if filename == "vocab.txt" else config)
+
+    def missing_dependency(*_args, **_kwargs):
+        raise ImportError("protobuf is unavailable")
+
+    monkeypatch.setattr(
+        backend.AutoTokenizer, "from_pretrained", missing_dependency
+    )
+    monkeypatch.setattr(backend, "hf_hub_download", download)
+
+    tokenizer = backend.load_tokenizer("example/model", str(tmp_path))
+
+    assert tokenizer("TEST")["input_ids"] == [2, 5, 3]
+
+
 class StubConfig:
     kvrocks_url = "redis://stub"
     backend_urls = ["http://backend"]
@@ -129,7 +175,7 @@ class StubPool:
     def snapshots(self):
         return [{"id": "b1", "healthy": True}]
 
-    async def encode(self, texts):
+    async def encode(self, texts, document=True):
         self.calls += 1
         return [{"10": 1.25, "20": 0.5} for _ in texts]
 

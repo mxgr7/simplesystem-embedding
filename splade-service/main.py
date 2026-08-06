@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import secrets
 from contextlib import asynccontextmanager
 
@@ -13,9 +14,12 @@ from backend_pool import BackendPool
 from cache import SparseCache
 from codec import pack_sparse, unpack_sparse
 from config import Config
+from constants import VOCAB_SIZE
+from fold_de import fold_de
 from hashing import input_hash
 from rendering import canonical_input, render_from_nul
 from schemas import AddBackendRequest, EmbedRequest, PatchBackendRequest
+from text import normalize_text
 
 
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +31,7 @@ REQUESTS = Counter("splade_service_requests_total", "Requests", ("status",))
 CACHE_HITS = Counter("splade_service_cache_hits_total", "Cache hits")
 CACHE_MISSES = Counter("splade_service_cache_misses_total", "Cache misses")
 INFLIGHT = Gauge("splade_service_inflight", "Miss requests being processed")
+MAX_QUERY_CHARS = 4096
 
 
 @asynccontextmanager
@@ -148,6 +153,76 @@ async def embed(body: EmbedRequest, request: Request, background: BackgroundTask
         raise HTTPException(status_code=504, detail="request budget exhausted")
 
 
+@app.post("/embed-query")
+async def embed_query(body: EmbedRequest, request: Request):
+    config = request.app.state.config
+    try:
+        return await asyncio.wait_for(
+            _embed_query(body, request),
+            timeout=config.request_budget_s,
+        )
+    except asyncio.TimeoutError:
+        REQUESTS.labels("504").inc()
+        raise HTTPException(status_code=504, detail="request budget exhausted")
+
+
+async def _embed_query(body, request):
+    config = request.app.state.config
+    inputs = body.inputs if isinstance(body.inputs, list) else [body.inputs]
+    if not inputs:
+        raise HTTPException(status_code=400, detail="inputs must not be empty")
+    if len(inputs) > config.max_inputs:
+        raise HTTPException(status_code=413, detail="too many inputs")
+
+    texts = [fold_de(normalize_text(value)) for value in inputs]
+    if any(not value for value in texts):
+        REQUESTS.labels("400").inc()
+        raise HTTPException(
+            status_code=400,
+            detail="inputs must not contain empty queries",
+        )
+    if any(len(value) > MAX_QUERY_CHARS for value in texts):
+        REQUESTS.labels("413").inc()
+        raise HTTPException(status_code=413, detail="query input is too long")
+    if request.app.state.inflight >= config.max_inflight:
+        REQUESTS.labels("429").inc()
+        raise HTTPException(
+            status_code=429,
+            detail="SPLADE service at concurrency limit",
+            headers={"Retry-After": "1"},
+        )
+
+    request.app.state.inflight += 1
+    INFLIGHT.set(request.app.state.inflight)
+    try:
+        vectors = await request.app.state.pool.encode(texts, document=False)
+        if len(vectors) != len(texts):
+            raise ValueError("backend response cardinality does not match inputs")
+        for vector in vectors:
+            if not isinstance(vector, dict):
+                raise ValueError("backend query vector must be an object")
+            for token, weight in vector.items():
+                try:
+                    token_id = int(token)
+                except (TypeError, ValueError):
+                    raise ValueError(f"invalid query token {token!r}") from None
+                if (
+                    str(token_id) != str(token)
+                    or token_id < 0
+                    or token_id >= VOCAB_SIZE
+                    or isinstance(weight, bool)
+                    or not isinstance(weight, (int, float))
+                    or not math.isfinite(weight)
+                    or weight <= 0
+                ):
+                    raise ValueError(f"invalid query sparse entry {token!r}: {weight!r}")
+        REQUESTS.labels("200").inc()
+        return vectors
+    finally:
+        request.app.state.inflight -= 1
+        INFLIGHT.set(request.app.state.inflight)
+
+
 async def _embed(body, request, background):
     config = request.app.state.config
     inputs = body.inputs if isinstance(body.inputs, list) else [body.inputs]
@@ -187,7 +262,11 @@ async def _embed(body, request, background):
                 unique_hashes.append(value_hash)
                 texts.append(render_from_nul(value))
 
-        vectors = await request.app.state.pool.encode(texts) if texts else []
+        vectors = (
+            await request.app.state.pool.encode(texts, document=True)
+            if texts
+            else []
+        )
         new_values = {
             value_hash: pack_sparse(vector)
             for value_hash, vector in zip(unique_hashes, vectors)

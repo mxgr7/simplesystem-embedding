@@ -1,0 +1,230 @@
+import asyncio
+import importlib
+import sys
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+
+REPO = Path(__file__).resolve().parents[1]
+SERVICE = REPO / "splade-service"
+sys.path.insert(0, str(SERVICE))
+
+backend_pool = importlib.import_module("backend_pool")
+
+
+class StubConfig:
+    kvrocks_url = "redis://stub"
+    backend_urls = ["http://backend"]
+    backend_api_key = ""
+    api_key = "query-secret"
+    admin_api_key = ""
+    max_inputs = 2
+    max_inflight = 32
+    request_budget_s = 5
+    cache_read_timeout_s = 0.1
+    cache_connections = 4
+    probe_interval_s = 5
+
+
+class StubCache:
+    def __init__(self, *args):
+        self.calls = 0
+
+    async def mget(self, hashes):
+        self.calls += 1
+        return [None for _ in hashes]
+
+    async def mset(self, values):
+        self.calls += 1
+
+    async def ping(self):
+        return True
+
+    async def aclose(self):
+        pass
+
+
+class StubPool:
+    def __init__(self, *args):
+        self.calls = []
+
+    async def add(self, *args, **kwargs):
+        return {"id": "b1"}
+
+    def start(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+    def ready(self):
+        return True
+
+    async def encode(self, texts, document=True):
+        self.calls.append((texts, document))
+        return [
+            {"10": 1.23456789, "20": float(index + 1)}
+            for index, _ in enumerate(texts)
+        ]
+
+
+@pytest.fixture
+def query_client(monkeypatch):
+    main = importlib.import_module("main")
+    cache = StubCache()
+    pool = StubPool()
+    monkeypatch.setattr(main, "Config", StubConfig)
+    monkeypatch.setattr(main, "SparseCache", lambda *args: cache)
+    monkeypatch.setattr(main, "BackendPool", lambda *args: pool)
+    with TestClient(main.app) as client:
+        yield client, cache, pool
+
+
+def auth_post(client, path, inputs):
+    return client.post(
+        path,
+        json={"inputs": inputs},
+        headers={"Authorization": "Bearer query-secret"},
+    )
+
+
+def test_embed_query_is_authenticated_and_folds_singleton(query_client):
+    client, cache, pool = query_client
+
+    unauthorized = client.post("/embed-query", json={"inputs": "query"})
+    response = auth_post(client, "/embed-query", "  GRÖẞE\xa0für KÜHLUNG  ")
+
+    assert unauthorized.status_code == 401
+    assert response.status_code == 200
+    assert response.json() == [{"10": 1.23456789, "20": 1.0}]
+    assert pool.calls == [(["groesse fuer kuehlung"], False)]
+    assert cache.calls == 0
+
+
+def test_embed_query_preserves_list_order_and_raw_weights(query_client):
+    client, _, pool = query_client
+
+    response = auth_post(client, "/embed-query", ["Zweite", "Erste"])
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"10": 1.23456789, "20": 1.0},
+        {"10": 1.23456789, "20": 2.0},
+    ]
+    assert pool.calls == [(["zweite", "erste"], False)]
+
+
+@pytest.mark.parametrize(
+    ("inputs", "status", "detail"),
+    [
+        ([], 400, "inputs must not be empty"),
+        (["one", "two", "three"], 413, "too many inputs"),
+        (["valid", " \x00\xa0 "], 400, "inputs must not contain empty queries"),
+        (["x" * 4097], 413, "query input is too long"),
+    ],
+)
+def test_embed_query_rejects_invalid_batches(
+    query_client, inputs, status, detail
+):
+    client, cache, pool = query_client
+
+    response = auth_post(client, "/embed-query", inputs)
+
+    assert response.status_code == status
+    assert response.json() == {"detail": detail}
+    assert pool.calls == []
+    assert cache.calls == 0
+
+
+def test_embed_document_path_still_sets_document_true(query_client):
+    client, cache, pool = query_client
+    fields = [""] * 14
+    fields[0] = "Kühlschrank"
+
+    response = auth_post(client, "/embed", "\x00".join(fields))
+
+    assert response.status_code == 200
+    assert pool.calls[0][1] is True
+    assert cache.calls > 0
+
+
+def test_embed_query_obeys_shared_admission_limit(query_client):
+    client, _, pool = query_client
+    import main
+    main.app.state.inflight = StubConfig.max_inflight
+    response = auth_post(client, "/embed-query", "query")
+    assert response.status_code == 429
+    assert pool.calls == []
+
+
+def test_embed_query_rejects_malformed_backend_vector(query_client):
+    client, _, pool = query_client
+
+    async def malformed(texts, document=True):
+        return [{"bad": -1.0} for _ in texts]
+
+    pool.encode = malformed
+    with pytest.raises(ValueError, match="invalid query token"):
+        auth_post(client, "/embed-query", "query")
+
+
+class FakeBackend:
+    def __init__(self, backend_id, max_client_batch, fail=False):
+        self.id = backend_id
+        self.max_client_batch = max_client_batch
+        self.fail = fail
+        self.weight = 1
+        self.inflight = 0
+        self.healthy = True
+        self.draining = False
+        self.failures = 0
+        self.calls = []
+
+    async def encode(self, texts, document=True):
+        self.calls.append((texts, document))
+        self.inflight -= 1
+        if self.fail:
+            self.fail = False
+            raise RuntimeError("temporary failure")
+        await asyncio.sleep(0)
+        return [{"text": text} for text in texts]
+
+
+def test_backend_pool_propagates_document_through_chunking_and_retry():
+    pool = backend_pool.BackendPool()
+    first = FakeBackend("b1", 2, fail=True)
+    second = FakeBackend("b2", 2)
+    pool.backends = {first.id: first, second.id: second}
+
+    vectors = asyncio.run(pool.encode(["a", "b", "c"], document=False))
+
+    assert vectors == [{"text": "a"}, {"text": "b"}, {"text": "c"}]
+    assert first.calls == [(["a", "b"], False), (["c"], False)]
+    assert second.calls == [(["a", "b"], False)]
+
+
+def test_backend_posts_document_flag():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=[{"1": 0.25}])
+
+    backend = backend_pool.Backend("b1", "http://backend", 1, 1, 8, 5, "")
+    asyncio.run(backend.client.aclose())
+    backend.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://backend",
+    )
+    backend.inflight = 1
+    try:
+        result = asyncio.run(backend.encode(["query"], document=False))
+    finally:
+        asyncio.run(backend.aclose())
+
+    assert result == [{"1": 0.25}]
+    assert requests[0].read()
+    assert requests[0].content == b'{"inputs":["query"],"document":false}'

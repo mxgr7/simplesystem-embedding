@@ -66,11 +66,11 @@ class Backend:
                 self.healthy = False
             log.debug("backend %s probe failed: %s", self.id, exc)
 
-    async def encode(self, texts):
+    async def encode(self, texts, document=True):
         try:
             async with self.sem:
                 response = await self.client.post(
-                    "/encode", json={"inputs": texts, "document": True}
+                    "/encode", json={"inputs": texts, "document": document}
                 )
                 response.raise_for_status()
                 vectors = response.json()
@@ -201,7 +201,7 @@ class BackendPool:
         backend.inflight += 1
         return backend
 
-    async def _encode_chunk(self, chunk):
+    async def _encode_chunk(self, chunk, document=True):
         excluded = set()
         last_error = None
         for attempt in range(5):
@@ -211,7 +211,7 @@ class BackendPool:
                     raise last_error
                 raise RuntimeError("no healthy SPLADE backend available")
             try:
-                return await backend.encode(chunk)
+                return await backend.encode(chunk, document=document)
             except Exception as exc:
                 last_error = exc
                 transient = not isinstance(exc, httpx.HTTPStatusError) or (
@@ -233,7 +233,7 @@ class BackendPool:
                     excluded.clear()
         raise last_error or RuntimeError("SPLADE backend retries exhausted")
 
-    async def encode(self, texts):
+    async def encode(self, texts, document=True):
         if not texts:
             return []
         sizes = [
@@ -247,7 +247,10 @@ class BackendPool:
             for index in range(0, len(texts), chunk_size)
         ]
         batches = await asyncio.gather(
-            *(self._encode_chunk(chunk) for chunk in chunks)
+            *(
+                self._encode_chunk(chunk, document=document)
+                for chunk in chunks
+            )
         )
         return [vector for batch in batches for vector in batch]
 
