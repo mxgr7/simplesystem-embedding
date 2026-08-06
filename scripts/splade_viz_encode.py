@@ -48,8 +48,15 @@ except ImportError:
 
 @torch.inference_mode()
 def encode_sparse(model, tokenizer, texts, max_length, device, batch_size=128,
-                  tag="", log_every=20):
-    """texts -> list of (ids np.int32, weights np.float32) keeping only w > 0."""
+                  tag="", log_every=20, is_query=False):
+    """texts -> list of (ids np.int32, weights np.float32) keeping only w > 0.
+
+    is_query routes to the untied query encoder when the checkpoint has one. For
+    tied models it changes nothing. Without it, an untied model's queries would
+    be encoded by the DOC encoder — silently wrong vectors that still look
+    plausible, and these dumps feed pipeline/splade_df_metrics.py, i.e. the
+    coverage/postings numbers the whole comparison rests on.
+    """
     out = []
     t0 = time.time()
     n_batches = (len(texts) + batch_size - 1) // batch_size
@@ -57,7 +64,8 @@ def encode_sparse(model, tokenizer, texts, max_length, device, batch_size=128,
         chunk = texts[i:i + batch_size]
         inputs = tokenizer(chunk, padding=True, truncation=True,
                            max_length=max_length, return_tensors="pt")
-        rep = model.encode({k: v.to(device) for k, v in inputs.items()})
+        rep = model.encode({k: v.to(device) for k, v in inputs.items()},
+                           is_query=is_query)
         rep = rep.float().cpu().numpy()
         for vec in rep:
             idx = np.nonzero(vec > 0.0)[0]
@@ -161,7 +169,7 @@ def main():
     print(f"[{args.name}] encoding {len(q_texts):,} queries "
           f"(max_len={int(cfg.data.max_query_length)}) ...", flush=True)
     q_vecs = encode_sparse(model, tokenizer, q_texts, int(cfg.data.max_query_length),
-                           args.device, args.batch_size, tag=f"{args.name} q")
+                           args.device, args.batch_size, tag=f"{args.name} q", is_query=True)
     print(f"[{args.name}] encoding {len(a_texts):,} articles "
           f"(max_len={int(cfg.data.max_offer_length)}) ...", flush=True)
     a_vecs = encode_sparse(model, tokenizer, a_texts, int(cfg.data.max_offer_length),
@@ -189,6 +197,12 @@ def main():
 
     q_nnz = float(np.mean([len(w) for _, w in q_vecs])) if q_vecs else 0.0
     d_nnz = float(np.mean([len(w) for _, w in a_vecs])) if a_vecs else 0.0
+    # A fold_vocab_mask checkpoint zeroes its cased/diacritic output dims inside
+    # encode(), so those dims are simply absent from the vectors above — unlike the
+    # post-hoc "pruned" variants, which the server masks itself. Record it so the UI
+    # can say WHY this model's nnz is a fraction of an unmasked sibling's.
+    vmask = getattr(model, "special_token_vocab_mask", None)
+    masked_dims = int((vmask == 0).sum().item()) if vmask is not None else 0
     man_path = os.path.join(args.out_dir, "manifest.json")
     manifest = {}
     if os.path.exists(man_path):
@@ -208,6 +222,8 @@ def main():
         "description_rendered": bool(args.keep_description),
         "folded": bool(args.fold) or (args.fold_type not in (None, "none")),
         "fold_type": args.fold_type or ("strip" if args.fold else "none"),
+        "fold_vocab_mask": bool(cfg.model.get("fold_vocab_mask", False)),
+        "masked_dims": masked_dims,
     }
     with open(man_path, "w") as f:
         json.dump(manifest, f, indent=2)
