@@ -14,6 +14,13 @@ S2CLASS_MAPPING_PATH = "/data/s2class-categories.json"
 S2CLASS_MAPPING_SHA256 = (
     "900a5ac0c9a9cfcdd578a43770b5981b47eca29f0e874761b98bd8ddc2f4fd87"
 )
+# The s2class junk lexicon is normatively /workspace/pipeline/contracts/
+# s2_junk.json (MXG-50), which confirms SEVEN dumping-ground codes. This
+# literal is the `encoded_in_splade_v1` pin: it is what the live index was
+# actually encoded with, and widening it changes served documents, so it moves
+# with the re-encode (MXG-48) together with the training-side twin
+# pipeline/build_article_extras.py. Kept inline because this is a separate
+# repository and cannot import from /workspace/pipeline.
 S2_JUNK = {"27274091"}
 IDENTITY_UNION_FIELDS = (
     "ean",
