@@ -604,13 +604,19 @@ def custnos_from_source(src):
 
     Lives here because it is an INPUT to the rule, not a property of whoever
     is rendering: `union_keywords` cannot drop a keyword that copies the
-    article's customer article number unless it is handed the number. Both
-    renderers call this so neither can quietly feed the rule a shorter list
-    than the other -- a missing comparand does not raise, it just stops a drop
-    from firing (MXG-100)."""
+    article's customer article number unless it is handed the number. A missing
+    comparand does not raise, it just stops a drop from firing (MXG-100).
+
+    `splade-service/source_assembler.py` does NOT call this -- it extracts the
+    same list inline (`:255-257`) -- so "both renderers call it" was never true,
+    and the two accepted different shapes: the assembler takes a bare string as
+    the entry, this raised `AttributeError` on one. Production ES always stores
+    `{value, versionIds}`, so it never fired there; it fired the moment a
+    fixture used the shorter shape (MXG-98). Accept both, like the assembler.
+    """
     out = []
     for c in (src.get("customerArticleNumbers") or []):
-        v = (c or {}).get("value")
+        v = c.get("value") if isinstance(c, dict) else c
         if isinstance(v, dict):
             v = v.get("raw") or v.get("normalized")
         if v:
