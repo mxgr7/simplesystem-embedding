@@ -211,6 +211,41 @@ def render_paths(paths, cap=CAT_CAP):
     return out[:cap] if cap else out
 
 
+def render_path_strings(paths, cap=CAT_CAP):
+    """`render_paths` for paths ALREADY joined into strings -- the shape
+    `article_rules.build_row` stores in `category_paths`.
+
+    Exists so the two document renderers cannot each grow their own idea of
+    what "the category" is. Both used to take `category_paths[0]`, i.e. one
+    branch of a §16 union that deliberately keeps them all (MXG-103)."""
+    out = VALUE_SEP.join(p for p in paths if p)
+    return out[:cap] if cap else out
+
+
+def top_level_1(rendered):
+    """Level 1 of the top-ranked path, from a rendered multi-path string.
+
+    `rendered.split(RENDER_SEP)[0]` is what the callers used to do, and it is
+    wrong the moment there is more than one path: for `A | C > D` it returns
+    `A | C`. Split on the PATH separator first."""
+    if not rendered:
+        return ""
+    return rendered.split(VALUE_SEP)[0].split(RENDER_SEP)[0]
+
+
+def path_depth(rendered):
+    """Deepest level count across the paths in a rendered string.
+
+    `rendered.count(">") + 1` counts separators across the whole string, so
+    two two-level paths read as depth 3. §16 takes every path at ONE level,
+    but `clean_path` can shorten some of them, so this is a max rather than
+    the first path's length."""
+    if not rendered.strip():
+        return 0
+    return max(p.count(RENDER_SEP.strip()) + 1
+               for p in rendered.split(VALUE_SEP))
+
+
 # ------------------------------------------------------------------- lexicon
 
 class Lexicon:
@@ -339,6 +374,31 @@ def render_s2(names, cap=S2_CAP):
 
 # --------------------------------------------------------------- the G1 union
 
+# Best -> worst. One code can have different fates in different records: junk
+# in the offer that got dropped wholesale (rule 1), resolvable in another. This
+# used to be `dict.update`, so whichever record came LAST won and two
+# reshuffles of the same article returned different fates -- a G5 violation
+# found by MXG-65's order-invariance fence.
+#
+# Owner decision 2026-08-10: the record that says the code is FINE wins. That
+# is what the emitted facets already do -- a junk record contributes no leaves
+# and a good record's leaves are kept regardless -- so this only stops the
+# provenance from contradicting the output it describes.
+_FATE_RANK = ("leaf_named", "ancestor_named", "interim", "unmapped",
+              "junk_offer")
+
+
+def _merge_fates(into, new):
+    for code, fate in new.items():
+        cur = into.get(code)
+        if cur is None or _rank(fate) < _rank(cur):
+            into[code] = fate
+
+
+def _rank(fate):
+    return _FATE_RANK.index(fate) if fate in _FATE_RANK else len(_FATE_RANK)
+
+
 def union_category(offers, vendor_names=(), lex=None, max_depth=None,
                    cat_cap=CAT_CAP, s2_cap=S2_CAP):
     """Fold one article's records into the category representation.
@@ -371,7 +431,7 @@ def union_category(offers, vendor_names=(), lex=None, max_depth=None,
             path_rec.setdefault(tuple(_norm_seg(s) for s in segs), [segs, 0])[1] += 1
 
         leaves, fates = resolve_s2(off.get("s2classGroups"), lex)
-        all_fates.update(fates)
+        _merge_fates(all_fates, fates)
         leaf_codes |= set(leaves)
         # the RAW ancestor closure of every record rule 1 did not drop. Not
         # part of §17's emission -- it is what `ph.article_catalog.s2class`

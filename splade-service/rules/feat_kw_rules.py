@@ -599,6 +599,42 @@ def render_keywords(kept, cap_chars=None):
     return s[:cap_chars] if cap_chars else s
 
 
+def custnos_from_source(src):
+    """§15's CAN comparands, read off a raw ES `_source`.
+
+    Lives here because it is an INPUT to the rule, not a property of whoever
+    is rendering: `union_keywords` cannot drop a keyword that copies the
+    article's customer article number unless it is handed the number. Both
+    renderers call this so neither can quietly feed the rule a shorter list
+    than the other -- a missing comparand does not raise, it just stops a drop
+    from firing (MXG-100)."""
+    out = []
+    for c in (src.get("customerArticleNumbers") or []):
+        v = (c or {}).get("value")
+        if isinstance(v, dict):
+            v = v.get("raw") or v.get("normalized")
+        if v:
+            out.append(v)
+    return out
+
+
+def article_parts(offers, custnos=()):
+    """The settled §14/§15 output for one article, before rendering.
+
+    `render_article` is this plus the joins and the caps. Split out for
+    `ph.esci_es_enrich` (MXG-100), whose readers want the parts: `train_id_gate`
+    matches identifiers against keyword MEMBERS, and the lexical-coverage
+    features count tokens -- neither has a token budget the 600/300 caps exist
+    to protect, so capping in the stored value would destroy signal for free.
+
+    What a consumer must NOT do is re-derive the parts by calling the two
+    unions itself: the arguments below are the arm `feat_kw_ce_ab.py` priced,
+    and they are pinned in exactly one place."""
+    merged = union_features(offers, bool_keys=bool_keys())
+    kept, _ = union_keywords({"offers": offers, "custnos": list(custnos or ())})
+    return merged, kept
+
+
 def render_article(offers, custnos=(), terminator=""):
     """(features_text, keywords_text) for one article, under the settled rules.
 
@@ -618,8 +654,7 @@ def render_article(offers, custnos=(), terminator=""):
     `build_cheap_features` that happens once, in `ArticleDoc.__init__`, for
     every field and both adapters.
     """
-    merged = union_features(offers, bool_keys=bool_keys())
-    kept, _ = union_keywords({"offers": offers, "custnos": list(custnos or ())})
+    merged, kept = article_parts(offers, custnos)
     return (render_features(merged, cap_chars=CAP_FEATURES,
                             terminator=terminator),
             render_keywords(kept, cap_chars=CAP_KEYWORDS))
