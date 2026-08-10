@@ -32,8 +32,12 @@ Three defects in the deployed path that this module fixes:
      of the 21,687 observed codes are in the 4,381-entry map. Measured on a
      random slice: the `Classification:` line is non-empty on 76% of
      s2-carrying docs today, and on ~100% once an unmapped leaf falls back to
-     its deepest NAMED ancestor. `esci_v4.s2_type` already does this walk, so
-     the LLM judge saw a name where the served document has none.
+     its deepest NAMED ancestor. Moot for the RENDER since MXG-48 -- §17 rule
+     6 removed it -- and it turned out to be moot for the judge prompt too:
+     `s2classGroups` is stored as a full closure, so `esci_v4.s2_type`'s
+     deepest-first exact lookup already found a named ancestor. Measured over
+     8.09M enrich articles when it moved onto `resolve_s2`: 0 gained a name.
+     The rollup pays off only where a code arrives WITHOUT its ancestors.
   2. INTERIM CODES. The deployed path filters `S2_JUNK` but has no interim
      filter, so ~5% of served documents carry the contentless string
      "Interimsklassifikation (Sonstige, nicht spezifiziert)".
@@ -259,8 +263,10 @@ def load_lexicon(artifact=ARTIFACT_PATH, tree_path=TREE_PATH):
         for code, node in (art.get("nodes") or {}).items():
             if node.get("status") == "interim":
                 interim.add(code)
-    # Fallback + belt-and-braces: the widened prefix (`esci_v4.py:341` uses the
-    # narrow "Interimsklassifikation", which misses "Interimsklasse ...").
+    # Fallback + belt-and-braces: the widened prefix. `esci_v4.s2_type` used
+    # the narrow "Interimsklassifikation", which misses "Interimsklasse (nicht
+    # spezifiziert)" -- 4.5% of the enrich frame. It calls `resolve_s2` since
+    # MXG-48, so this is now the only prefix in the repo.
     for code, name in tree.items():
         if name.startswith("Interimsklass"):
             interim.add(code)
