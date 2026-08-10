@@ -1,27 +1,50 @@
 """Build prod_soup inputs from an Elasticsearch article ``_source``.
 
-The assembly rules mirror the historical article catalog and SPLADE extras
-builders.  Text normalization and German folding remain the renderer's job.
+The four article-wide text fields — ``features_text``, ``keywords_text``,
+``category_leaf_text``, ``s2class_text`` — are produced by the settled
+per-field rules of ``field_preprocessing.md`` §14/§15/§16/§17, imported from
+``rules/``, which is a byte-identical vendored copy of the research repo's rule
+modules (see ``rules/VENDORED.md``).  Before MXG-48 they were re-implemented by
+hand here, which is how they drifted: ``features`` came off a name-matched
+record pick and ``keywords`` was a bare union carrying none of §15's drops,
+while the training-side twin ``pipeline/build_article_extras.py`` had already
+moved to the rules.  ``pipeline/tests/test_renderer_parity.py`` now asserts the
+two produce the same six values for the same article.
+
+The head identity fields are unchanged: they still come from one representative
+record, chosen by ``aggregation``.
+
+``textnorm.floor`` — encoding hygiene, §4.1/§4.3 — is applied here, to the
+prose fields only.  German folding and template rendering remain the renderer's
+job (``rendering.render_from_nul``); ``floor`` neither lowercases nor folds, so
+it composes ahead of them.
 """
 
 import hashlib
 import json
+import os
+import sys
 
-from constants import FIELD_ORDER
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "rules"))
+
+import category_rules as CR  # noqa: E402
+import feat_kw_rules as FKR  # noqa: E402
+from textnorm import floor  # noqa: E402
+
+from constants import FIELD_ORDER  # noqa: E402
 
 
 S2CLASS_MAPPING_PATH = "/data/s2class-categories.json"
 S2CLASS_MAPPING_SHA256 = (
     "900a5ac0c9a9cfcdd578a43770b5981b47eca29f0e874761b98bd8ddc2f4fd87"
 )
-# The s2class junk lexicon is normatively /workspace/pipeline/contracts/
-# s2_junk.json (MXG-50), which confirms SEVEN dumping-ground codes. This
-# literal is the `encoded_in_splade_v1` pin: it is what the live index was
-# actually encoded with, and widening it changes served documents, so it moves
-# with the re-encode (MXG-48) together with the training-side twin
-# pipeline/build_article_extras.py. Kept inline because this is a separate
-# repository and cannot import from /workspace/pipeline.
-S2_JUNK = {"27274091"}
+# `S2_JUNK` used to live here: the `encoded_in_splade_v1` pin, one code, kept
+# narrow because widening it alone would desync serving from what the live
+# index was encoded with. §17 rule 6 removed the render it protected, so there
+# is no junk list left to apply and no dated successor pin to mint. The
+# mapping loader below stays for the callers that still import it; this module
+# no longer needs it.
 IDENTITY_UNION_FIELDS = (
     "ean",
     "article_number",
@@ -83,47 +106,13 @@ def _append_distinct(values, value):
         values.append(value)
 
 
-def _leaf_paths(category_paths):
-    if not category_paths:
-        return []
-    if isinstance(category_paths, list):
-        paths = []
-        for entry in category_paths:
-            paths.extend(_leaf_paths(entry))
-        return paths
-    if not isinstance(category_paths, dict):
-        return []
-    for level in range(5, 0, -1):
-        paths = category_paths.get(f"upToLevel{level}") or []
-        if paths:
-            return [path for path in _items(paths) if path]
-    return []
-
-
-def _s2_leaf_labels(codes, mapping):
-    distinct = []
-    for code in _items(codes):
-        code = _text(code)
-        if code and code not in S2_JUNK and code not in distinct:
-            distinct.append(code)
-
-    def significant(code):
-        while code.endswith("00") and len(code) > 2:
-            code = code[:-2]
-        return code
-
-    leaves = [
-        code
-        for code in distinct
-        if not any(
-            other != code and other.startswith(significant(code))
-            for other in distinct
-        )
-    ]
-    return [mapping[code] for code in leaves if code in mapping]
-
-
 def _render_features(features):
+    """The pre-§14 rendering of ONE record's features.
+
+    Retained only as a completeness signal for the ``v3`` representative choice
+    below — it has to score records, and "carries features at all" is one of the
+    seven signals it counts.  It is no longer what gets emitted.
+    """
     rendered = []
     for feature in _items(features):
         if not isinstance(feature, dict):
@@ -137,6 +126,24 @@ def _render_features(features):
         if name and values:
             rendered.append(f"{name}: {', '.join(values)}.")
     return " ".join(rendered)
+
+
+def _category_leaf_text(offers, vendors):
+    """§16: deepest level, segment hygiene, union, prefix subsumption, cap.
+
+    ``vendors`` is every record's vendor name, not the representative's: rule 4
+    drops a path segment equal to *the article's* vendor name, and a path from
+    one record can be rooted in a name only another record carries.
+    """
+    vendor_norms = {CR._norm_seg(v) for v in vendors}
+    vendor_norms.discard("")
+    paths = []
+    for offer in offers:
+        for raw_path in CR.deepest_paths(offer.get("categoryPaths")):
+            segments = CR.clean_path(raw_path, vendor_norms)
+            if segments:
+                paths.append(segments)
+    return CR.render_paths(CR.subsume_paths(paths), cap=CR.CAT_CAP)
 
 
 def _normalized_ean(value):
@@ -220,8 +227,13 @@ def _bounded_identity_union(offers, representative, cap=3):
     return result
 
 
-def assemble_fields(source, s2_mapping, aggregation="v1"):
-    """Build an article aggregation variant from the full current source."""
+def assemble_fields(source, s2_mapping=None, aggregation="v1"):
+    """Build an article aggregation variant from the full current source.
+
+    ``s2_mapping`` is accepted and ignored — §17 rule 6 stopped the
+    classification being rendered, so nothing here resolves a code to a name.
+    The parameter stays because callers pass it positionally.
+    """
     offers = source.get("offers") or []
     if not offers:
         return None
@@ -229,54 +241,45 @@ def assemble_fields(source, s2_mapping, aggregation="v1"):
     if aggregation not in AGGREGATION_MODES:
         raise ValueError(f"unknown aggregation mode: {aggregation}")
     core = _most_complete_offer(offers) if aggregation == "v3" else _historical_offer(offers)
-    core_name = _text(core.get("name"))
-    feature_source = core if aggregation == "v3" else next(
-        (offer for offer in offers if _text(offer.get("name")) == core_name),
-        offers[0],
-    )
 
     fields = {field: "" for field in FIELD_ORDER}
     fields.update(_identity_from_offer(core))
-    fields["features_text"] = _render_features(feature_source.get("features"))
     if aggregation == "v1-v2-all4-cap3":
         fields.update(_bounded_identity_union(offers, core))
 
-    keywords = []
-    categories = []
     vendors = []
-    s2_labels = []
     for offer in offers:
-        for keyword in _items(offer.get("keywords")):
-            _append_distinct(keywords, _text(keyword))
-        for raw_path in _leaf_paths(offer.get("categoryPaths")):
-            path = " > ".join(
-                part.strip() for part in _text(raw_path).split("¦") if part.strip()
-            )
-            _append_distinct(categories, path)
-        vendor = _text(offer.get("vendorName") or "").strip()
-        _append_distinct(vendors, vendor)
-        for label in _s2_leaf_labels(offer.get("s2classGroups"), s2_mapping):
-            _append_distinct(s2_labels, label)
+        _append_distinct(vendors, _text(offer.get("vendorName") or "").strip())
 
     customer_numbers = []
     for entry in _items(source.get("customerArticleNumbers")):
         value = entry.get("value") if isinstance(entry, dict) else entry
-        value = _text(value or "").strip()
-        _append_distinct(customer_numbers, value)
+        _append_distinct(customer_numbers, _text(value or "").strip())
+
+    # §14/§15. The terminator keeps the `Name: v1, v2.` shape this module has
+    # always emitted, so the template does not move — only the content does.
+    features_text, keywords_text = FKR.render_article(
+        offers, custnos=customer_numbers, terminator="."
+    )
 
     fields.update(
         {
+            # NOT floored: identifiers belong to idnorm, and §19 measured the
+            # floor's whitespace collapse breaking exact-term resolution
+            # 520/566 -> 0/566.
             "customer_artnos_text": " ".join(customer_numbers),
-            "vendor_text": UNION_SEPARATOR.join(vendors),
-            "category_leaf_text": UNION_SEPARATOR.join(categories),
-            "s2class_text": UNION_SEPARATOR.join(s2_labels),
-            "keywords_text": " ".join(keywords),
+            "vendor_text": floor(UNION_SEPARATOR.join(vendors)),
+            "category_leaf_text": floor(_category_leaf_text(offers, vendors)),
+            # §17 rule 6: the classification is a structured facet, not text.
+            "s2class_text": "",
+            "keywords_text": floor(keywords_text),
+            "features_text": floor(features_text),
         }
     )
     return fields
 
 
-def assemble_nul(source, s2_mapping, aggregation="v1"):
+def assemble_nul(source, s2_mapping=None, aggregation="v1"):
     """Return the exact 14-field prod_soup wire input for an article source."""
     fields = assemble_fields(source, s2_mapping, aggregation)
     if fields is None:

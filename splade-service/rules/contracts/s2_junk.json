@@ -1,0 +1,88 @@
+{
+  "_comment": "THE list of s2class dumping-ground ('junk') codes. Owned by /workspace; implemented here by pipeline/s2_junk_contract.py, consumed by category_rules.load_lexicon and every filtering site in pipeline/, and normative for the splade-service source assembler and the /next-gen indexer, neither of which can read pipeline/out/. This file exists because the built artifact pipeline/out/category_tree.json is GITIGNORED (.gitignore: pipeline/**/out/) and build_category_tree.load_or_init_artifact re-seeds `junk` from a one-code seed whenever it is absent -- so until now a `rm -rf pipeline/out` silently discarded six human confirmations. Edit this file and pipeline/s2_junk_contract.py in the SAME commit -- pipeline/tests/test_s2_junk_contract.py is the gate. Bootstrapped from the post-add_junk scan 2026-08-09 (MXG-50).",
+  "contract_version": 1,
+
+  "junk": [
+    "15069090",
+    "15090903",
+    "22270100",
+    "26040700",
+    "27274091",
+    "40240200",
+    "51560105"
+  ],
+
+  "seed": ["27274091"],
+  "_seed_comment": "The original hand-found code, and the one build_category_tree seeds a fresh artifact with. It predates the scan and cannot be reproduced by it -- see rule.seed_cannot_rank.",
+
+  "rule": {
+    "_comment": "How a code gets onto the list. NOTE: there is NO z threshold. z ranks; a human decides. Writing the rule as `z >= tau AND human-confirmed` would be false -- ten codes inside the accepted z band were rejected, four of them ABOVE every accepted code but the top two.",
+    "gate": "n >= 200 rough-labeled articles AND code_depth >= 3 AND code is in /data/s2class-categories.json",
+    "_gate_comment": "MIN_JUNK_N = 200 (build_category_tree.py). Depth 1-2 nodes are shallow-consensus backoff labels, not vendor dumping grounds, and the own-L2 comparison is degenerate at depth 1.",
+    "rank": "z = z(hetero) + z(catdis), over the gated nodes only",
+    "hetero": "1 - (articles under the node whose name lead-token is in the node's top-10 lead tokens) / n -- name-token heterogeneity",
+    "catdis": "disagreeing / (agreeing + disagreeing) vendor breadcrumbs, where a breadcrumb agrees if the majority L2 of its OTHER articles is the node's own L2 (self-excluded, needs >= 20 votes)",
+    "decide": "print the top 50 with 5 sample article names each; a human sample-verifies and confirms via --add-junk",
+    "accepted_z_range": [3.51, 4.39],
+    "accepted_ranks": [1, 2, 7, 10, 14, 16],
+    "rejected_in_band": {
+      "_comment": "Ranked at or above the LOWEST accepted code (z 3.51) and NOT confirmed. Four of them (ranks 3-6) outrank four of the six accepted codes. This is the evidence that no z cutoff exists.",
+      "32160600": "Mikrobiologie (Einsatzstoff, Labor)",
+      "32090100": "Thermostatisiergerät (elektrisch, Labor)",
+      "27242307": "Befehls- Steuer- , Meldegerät",
+      "38010300": "Sauerstoff-Wasserstoff-Verbindung",
+      "51020590": "Komponente für Handhabung (Pneumatik, nicht spezifiziert)",
+      "32029090": "Laborausstattung, Laboreinrichtung (Sonstige, nicht spezifiziert)",
+      "27060400": "Konfektionierte Niederspannungsleitung",
+      "15060101": "Wälz-, Gleitlager (Inspektion)",
+      "37200100": "Rohrverschraubung (Metall)",
+      "21069090": "Druckluftwerkzeug (Sonstige, nicht spezifiziert)"
+    },
+    "rejected_named": {
+      "16149090": "Fertiggericht, Halbfertiggericht (Sonstige, nicht spezifiziert) -- rank 29, z 3.24. Explicitly sample-verified as NOT junk in report/catclass_junk_v1.md: it is real canteen food."
+    },
+    "known_false_positives": "`*9090` \"(Sonstige, nicht spezifiziert)\" codes are legitimate eclass catch-alls and are heterogeneous BY DESIGN; catdis is inflated by multilingual breadcrumb variants. Both inflate z without implying a dumping ground, which is exactly why the human skim exists.",
+    "seed_cannot_rank": "27274091 does not appear in the ranking at all. --step scan already drops signatures containing it, so it contributes no rows to ph.catclass_rough and the scan cannot see it. Its rank prints as None; that is correct, not a bug."
+  },
+
+  "provenance": {
+    "scan": "pipeline/out/junk_ranking_full.txt",
+    "scanned_on": "2026-07-17T17:33Z",
+    "n_ranked": 3109,
+    "min_n": 200,
+    "min_depth": 3,
+    "printed_top": 50,
+    "_earlier_scan_comment": "report/catclass_junk_v1.md records an EARLIER scan -- the one the human skim was actually done on, before --add-junk. Its z and n differ throughout because confirming a code removes its signatures from the next scan's input. Most consequentially 22270100 was #19 z=3.46 there, i.e. BELOW 3.5: a second, independent reason the rule cannot be written as a threshold. The per-code numbers below are the LATER (post-add_junk) scan."
+  },
+
+  "codes": {
+    "51560105": {"name": "Flanschverbindung (Hydraulik)", "source": "scan", "rank": 1, "z": 4.39, "n": 23070, "hetero": 0.89, "catdis": 0.98},
+    "40240200": {"name": "Verbandkasten-/tasche", "source": "scan", "rank": 2, "z": 4.17, "n": 6396, "hetero": 0.88, "catdis": 0.91,
+                 "_comment": "\"first-aid kit\" -- holds plasters AND PE zip bags."},
+    "15069090": {"name": "Maschinenelement (Instandhaltung, Sonstige, nicht spezifiziert)", "source": "scan", "rank": 7, "z": 3.73, "n": 3804, "hetero": 0.76, "catdis": 1.0},
+    "15090903": {"name": "Elektroinstallationsanlage, -gerät (Instandsetzung)", "source": "scan", "rank": 10, "z": 3.55, "n": 33176, "hetero": 0.72, "catdis": 1.0,
+                 "_comment": "The largest of the six: cleaning spray and rotary encoders under one \"electrical installation repair\" label."},
+    "26040700": {"name": "Strom", "source": "scan", "rank": 14, "z": 3.52, "n": 3140, "hetero": 0.72, "catdis": 1.0},
+    "22270100": {"name": "Dachergänzungselement", "source": "scan", "rank": 16, "z": 3.51, "n": 1997, "hetero": 0.72, "catdis": 1.0,
+                 "_comment": "Was #19 z=3.46 in the earlier scan -- see provenance._earlier_scan_comment."},
+    "27274091": {"name": "Induktiver Sensor (Teile)", "source": "seed", "rank": null, "z": null, "n": 3595,
+                 "_comment": "Found by hand for esci_v4: 3,595 catalog articles, 97.7% of which are not sensor parts. Unrankable by construction -- see rule.seed_cannot_rank."}
+  },
+
+  "pins": {
+    "_comment": "Subsets that specific sites apply ON PURPOSE, instead of the full `junk` list. Each pinned site reads its subset by name so the pin is deliberate and greppable rather than an inline constant nobody remembers deciding.",
+
+    "encoded_in_splade_v1": ["27274091"],
+    "_encoded_in_splade_v1_comment": "IMMUTABLE HISTORICAL FACT -- never edit this key. The live SPLADE index and the V1 aggregate were built with exactly this set; pipeline/agg_bakeoff replicates that build bit-exactly and build_manifest.py records it as provenance. Widening it here would make the manifest claim a build that never happened. When MXG-48 re-encodes with the full list, it adds a NEW dated key (e.g. `encoded_in_splade_v2`) and repoints the renderers at it.",
+
+    "deployed_renderers_now": ["27274091"],
+    "_deployed_renderers_now_comment": "What the deployed document renderers apply TODAY (splade-service/source_assembler.py and its training-side twin pipeline/build_article_extras.py). Mutable: MXG-48 widens it to the full list together with the re-encode -- widening either renderer alone puts training and serving out of sync. The control arm (category_universe.today_s2_text) and the incumbent baseline (category_accuracy.S2_JUNK_DEPLOYED) read this key because their job is to model deployed behaviour, not correct behaviour."
+  },
+
+  "granularity": {
+    "_comment": "The junk lexicon is one thing; what a site DOES with a match is another, and the three differ. Widening the list without knowing which one you are in is the trap MXG-50 found.",
+    "record_drop": "category_rules.resolve_s2 -- if any code of a record is junk, raw OR after resolution, the record's whole classification is dropped. Its parent codes are the same junk, so blacklisting the leaf is not enough. This is the correct one (field_preprocessing.md §17 rule 1).",
+    "closure_element_filter": "The behavioural SQL over ph.article_catalog.s2class, which stores the full ancestor CLOSURE ('27274091' -> ['27000000','27274000','27270000','27274091']). Filtering the code out of the array leaves its three junk parents behind, so it is close to a no-op. Fixed in MXG-50 to `if(hasAny(col, junk), [], col)`.",
+    "leaf_filter": "The document renderers (build_article_extras.s2_leaf_labels, agg_bakeoff/s2map.py, source_assembler.py): drop the junk code, then leaf-select -- which promotes the junk PARENT to leaf and renders its name. Still outstanding; MXG-48 owns it."
+  }
+}

@@ -62,12 +62,18 @@ def test_assembles_historical_identity_and_exact_field_order():
     assert fields["article_number"] == "A" * 120
     assert fields["ean"] == "12345678901234567890"
     assert fields["manufacturer_article_type"] == "Type"
-    assert fields["features_text"] == "Size: 10, 20."
+    # §14, MXG-48: BOTH records' features, not the representative's. The old
+    # rendering was "Size: 10, 20." — `Wrong: offer.` came off a record the
+    # name-match pick discarded.
+    assert fields["features_text"] == "Size: 10, 20. Wrong: offer."
     assert fields["description"] == ""
     assert fields["category_paths"] == ""
 
 
-def test_core_fallback_ean_blank_and_truncated_name_feature_selection():
+def test_core_fallback_and_ean_blank():
+    """The identity representative is still a pick; only the article-wide text
+    fields moved off it. Named `..._feature_selection` until MXG-48, when the
+    feature pick it also covered stopped existing."""
     long_name = "N" * 401
     source = {
         "offers": [
@@ -87,7 +93,7 @@ def test_core_fallback_ean_blank_and_truncated_name_feature_selection():
 
     assert fields["name"] == long_name[:400]
     assert fields["ean"] == ""
-    assert fields["features_text"] == "Wrong: core."
+    assert fields["features_text"] == "Selected: yes. Wrong: core."
 
 
 def test_v3_representative_is_complete_and_order_invariant():
@@ -98,13 +104,13 @@ def test_v3_representative_is_complete_and_order_invariant():
         "ean": "123",
         "articleNumber": "A",
         "manufacturerArticleNumber": "M",
-        "features": [{"name": "Size", "values": ["1"]}],
+        "features": [{"name": "Size", "values": ["10"]}],
     }
     first = assembler.assemble_fields({"offers": [poor, rich]}, S2_MAPPING, "v3")
     second = assembler.assemble_fields({"offers": [rich, poor]}, S2_MAPPING, "v3")
     assert first == second
     assert first["name"] == "a"
-    assert first["features_text"] == "Size: 1."
+    assert first["features_text"] == "Size: 10."
 
 
 def test_v2_identifier_union_is_representative_first_distinct_and_cap3():
@@ -135,20 +141,26 @@ def test_unknown_aggregation_is_rejected():
 def test_v3_tie_break_includes_type_and_features():
     left = {
         "name": "same", "manufacturerName": "M", "manufacturerArticleType": "Z",
-        "features": [{"name": "F", "values": ["2"]}],
+        "features": [{"name": "F", "values": ["20"]}],
     }
     right = {
         "name": "same", "manufacturerName": "M", "manufacturerArticleType": "A",
-        "features": [{"name": "F", "values": ["1"]}],
+        "features": [{"name": "F", "values": ["10"]}],
     }
     first = assembler.assemble_fields({"offers": [left, right]}, S2_MAPPING, "v3")
     second = assembler.assemble_fields({"offers": [right, left]}, S2_MAPPING, "v3")
     assert first == second
+    # the tie-break still decides the IDENTITY fields...
     assert first["manufacturer_article_type"] == "A"
-    assert first["features_text"] == "F: 1."
+    # ...and no longer decides `features_text`, because §14 keeps both values
+    # of a contradicting key rather than letting a pick arbitrate (G2).
+    assert first["features_text"] == "F: 10, 20."
 
 
 def test_scalar_keywords_and_feature_values_are_not_split_into_characters():
+    """A bare scalar where the index normally carries a list. Guarded here
+    since before MXG-48 and preserved through the move to the shared rules by
+    `feat_kw_rules.listed`."""
     source = {"offers": [{
         "name": "x", "keywords": "drill",
         "features": {"name": "Size", "values": "10"},
@@ -167,7 +179,7 @@ def test_article_unions_preserve_historical_order_and_shapes():
                 "vendorName": " Vendor A ",
                 "categoryPaths": {
                     "upToLevel1": ["Ignored"],
-                    "upToLevel5": [" Root ¦ Leaf ", "Root¦Other"],
+                    "upToLevel5": [" Werkzeug ¦ Zange ", "Werkzeug¦Schere"],
                 },
                 "s2classGroups": [
                     "27100000",
@@ -183,9 +195,9 @@ def test_article_unions_preserve_historical_order_and_shapes():
                 "categoryPaths": [
                     {
                         "upToLevel1": ["Ignored too"],
-                        "upToLevel3": ["Root¦Leaf"],
+                        "upToLevel3": ["Werkzeug¦Zange"],
                     },
-                    {"upToLevel2": ["Second ¦ Path"]},
+                    {"upToLevel2": ["Elektro ¦ Kabel"]},
                 ],
                 "s2classGroups": ["27100000"],
             },
@@ -207,11 +219,53 @@ def test_article_unions_preserve_historical_order_and_shapes():
 
     assert fields["customer_artnos_text"] == "C-1 C-2"
     assert fields["vendor_text"] == "Vendor A | Vendor B"
+    # §16: union across records, then G5 order — deepest first, then
+    # lexicographic. Insertion order was the rule until MXG-48.
     assert fields["category_leaf_text"] == (
-        "Root > Leaf | Root > Other | Second > Path"
+        "Elektro > Kabel | Werkzeug > Schere | Werkzeug > Zange"
     )
-    assert fields["keywords_text"] == "first spaced last"
-    assert fields["s2class_text"] == "Screwdrivers | Tools | Office"
+    # §15's own deterministic order, not insertion order.
+    assert fields["keywords_text"] == "spaced first last"
+    # §17 rule 6 — the classification is a facet, never document text. The
+    # junk code 27274091 in the first record used to drop only itself, which
+    # promoted its junk parent to leaf; there is nothing left to promote.
+    assert fields["s2class_text"] == ""
+
+
+def test_category_path_hygiene_is_applied():
+    """§16 rules 2-4 and 6, which the deployed renderer had none of."""
+    source = {"offers": [
+        {
+            "name": "Zange", "vendorName": "RS Components",
+            "categoryPaths": {"upToLevel3": [
+                "RS Components¦06 - Elektromechanische Bauelemente¦Sonstige",
+                "Werkzeug\r¦Zange",
+            ]},
+        },
+        {"name": "Zange", "categoryPaths": {"upToLevel1": ["Werkzeug"]}},
+    ]}
+    fields = assembler.assemble_fields(source, S2_MAPPING)
+    # vendor-name root dropped, numbering prefix stripped, contentless leaf
+    # `Sonstige` promoted to its parent, control character removed, and the
+    # bare `Werkzeug` subsumed by `Werkzeug > Zange`.
+    assert fields["category_leaf_text"] == (
+        "Werkzeug > Zange | Elektromechanische Bauelemente"
+    )
+
+
+def test_markup_and_entities_are_floored_out():
+    """§4.1/§4.3. The training-side twin has floored since MXG-64; this side
+    did not, so served documents carried `<br>` and `&uuml;` into the encoder.
+    """
+    source = {"offers": [{
+        "name": "Rohr",
+        "keywords": ["&uuml;berwurf"],
+        "features": [{"name": "Material", "values": ["V2A<br>Stahl"]}],
+    }]}
+    fields = assembler.assemble_fields(source, S2_MAPPING)
+    assert fields["keywords_text"] == "überwurf"
+    assert "<br>" not in fields["features_text"]
+    assert fields["features_text"] == "Material: V2A Stahl."
 
 
 def test_mapping_sha_and_validation(tmp_path):
