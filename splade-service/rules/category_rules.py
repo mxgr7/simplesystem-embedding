@@ -428,7 +428,18 @@ def union_category(offers, vendor_names=(), lex=None, max_depth=None,
         if cleaned:
             n_path_records += 1
         for segs in cleaned:
-            path_rec.setdefault(tuple(_norm_seg(s) for s in segs), [segs, 0])[1] += 1
+            # Same G5 choice `subsume_paths` makes -- but it must ALSO happen
+            # here: paths reach `subsume_paths` through this dict with only one
+            # spelling left per key, so keeping the first-seen one (MXG-105
+            # found a `setdefault` here) made the CE render depend on
+            # `offers[]` order for exactly the two-spelling articles the
+            # tie-break exists for. The SPLADE seam feeds `subsume_paths`
+            # directly and never had the hole.
+            key = tuple(_norm_seg(s) for s in segs)
+            rec = path_rec.setdefault(key, [segs, 0])
+            if RENDER_SEP.join(segs) < RENDER_SEP.join(rec[0]):
+                rec[0] = segs
+            rec[1] += 1
 
         leaves, fates = resolve_s2(off.get("s2classGroups"), lex)
         _merge_fates(all_fates, fates)
