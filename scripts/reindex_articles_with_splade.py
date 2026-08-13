@@ -169,6 +169,46 @@ def portable_settings(settings):
     }
 
 
+def deep_merge_settings(base, patch):
+    """Merge patch into base in place: dicts recurse, everything else replaces.
+
+    Lists replace wholesale on purpose -- an analyzer's filter chain is
+    ordered, so element-wise merging could only produce a chain nobody wrote.
+    """
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            deep_merge_settings(base[key], value)
+        else:
+            base[key] = copy.deepcopy(value)
+    return base
+
+
+def assert_patch_applied(actual, patch, path=""):
+    """Fail create if any leaf of the settings patch did not land verbatim.
+
+    ES normalizes scalars to strings in _settings, so scalars compare via str().
+    """
+    for key, value in patch.items():
+        here = f"{path}.{key}" if path else key
+        if isinstance(value, dict):
+            got = actual.get(key)
+            if not isinstance(got, dict):
+                raise ValueError(f"settings patch not applied at {here}")
+            assert_patch_applied(got, value, here)
+        elif isinstance(value, list):
+            if actual.get(key) != value:
+                raise ValueError(
+                    f"settings patch not applied at {here}: "
+                    f"{actual.get(key)!r} != {value!r}"
+                )
+        else:
+            if str(actual.get(key)) != str(value):
+                raise ValueError(
+                    f"settings patch not applied at {here}: "
+                    f"{actual.get(key)!r} != {value!r}"
+                )
+
+
 def dropped_settings(settings):
     """Source settings that are neither cloned nor deliberately excluded.
 
@@ -979,6 +1019,12 @@ async def command_create(args):
         elif exists.status_code != 404:
             exists.raise_for_status()
         settings = portable_settings(source_settings)
+        settings_patch = None
+        settings_patch_sha = None
+        if args.settings_patch:
+            settings_patch = json.loads(Path(args.settings_patch).read_text())
+            settings_patch_sha = canonical_digest(settings_patch)
+            deep_merge_settings(settings, settings_patch)
         restore = {
             "number_of_replicas": settings.get("number_of_replicas", "1"),
             "refresh_interval": settings.get("refresh_interval", "1s"),
@@ -1034,6 +1080,8 @@ async def command_create(args):
                 f"destination codec is {actual_settings.get('codec')!r}, "
                 f"expected {args.codec!r}"
             )
+        if settings_patch:
+            assert_patch_applied(actual_settings, settings_patch)
         residue = dropped_settings(source_settings)
         print(json.dumps({
             "created": args.dst,
@@ -1041,6 +1089,8 @@ async def command_create(args):
             "mapping_digest": canonical_digest(mapping),
             "restore_settings": restore,
             "source_settings_not_carried": residue,
+            "settings_patch": args.settings_patch or None,
+            "settings_patch_sha256": settings_patch_sha,
         }, indent=2, sort_keys=True))
         if residue:
             print(
@@ -1428,6 +1478,13 @@ def parse_args(argv=None):
     create_parser.add_argument("--floor-segment", default="64mb")
     create_parser.add_argument("--max-merged-segment", default="2gb")
     create_parser.add_argument("--merge-threads", type=int, default=2)
+    create_parser.add_argument(
+        "--settings-patch", default="",
+        help="JSON file deep-merged into the cloned source settings before "
+             "creation (MXG-79/95: the settled analysis changes cannot come "
+             "from the source index, which predates them). Leaves are "
+             "verified against _settings after creation.",
+    )
     run_parser = commands.add_parser("run", parents=[common])
     run_parser.add_argument("--backend-urls", default=os.environ.get("SPLADE_BACKEND_URLS", ""))
     run_parser.add_argument("--backend-key", default=os.environ.get("SPLADE_BACKEND_API_KEY", ""))
