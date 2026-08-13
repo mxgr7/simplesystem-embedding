@@ -892,17 +892,39 @@ async def slice_worker(slice_id, args, source_client, destination_client, backen
                 return
             if cap:
                 hits = hits[:max(0, cap - already)]
-            actions, page_stats = await process_page(
-                hits, backends, slice_id % len(backends), s2_mapping, args
-            )
+            todo = hits
+            skipped = 0
+            if args.skip_existing:
+                # Recovery mode: a slice that lost its PIT restarts from zero,
+                # but everything it already wrote is in the destination --
+                # same static source, same render, same model, explicit _id.
+                # An existence check makes the redone region cost one mget per
+                # page instead of render+encode+bulk. ONLY valid while every
+                # doc in the destination came from this run's configuration.
+                response, mget_retries = await request_with_retries(
+                    destination_client, "POST", f"/{args.dst}/_mget",
+                    json={"ids": [h["_id"] for h in hits]},
+                    params={"_source": "false"},
+                )
+                response.raise_for_status()
+                found = {d["_id"] for d in response.json()["docs"] if d.get("found")}
+                todo = [h for h in hits if h["_id"] not in found]
+                skipped = len(hits) - len(todo)
+            if todo:
+                actions, page_stats = await process_page(
+                    todo, backends, slice_id % len(backends), s2_mapping, args
+                )
+            else:
+                actions, page_stats = [], empty_stats()
             page_stats["retries"] += retries
             for chunk in chunk_actions(actions, args.bulk_bytes):
                 indexed, retries, sent_bytes = await send_bulk(destination_client, chunk)
                 page_stats["indexed"] += indexed
                 page_stats["retries"] += retries
                 page_stats["bytes"] += sent_bytes
-            if page_stats["indexed"] != len(hits):
+            if page_stats["indexed"] != len(todo):
                 raise RuntimeError("page was not fully durable")
+            page_stats["docs"] += skipped
             search_after = hits[-1]["sort"]
             async with state_lock:
                 add_stats(item["stats"], page_stats)
@@ -1519,6 +1541,13 @@ def parse_args(argv=None):
         help="required with --limit=0 after the user approves the full run",
     )
     run_parser.add_argument("--approval-report")
+    run_parser.add_argument(
+        "--skip-existing", action="store_true",
+        help="recovery mode: mget the destination per page and only "
+             "render/encode/index ids it does not already hold. Valid ONLY "
+             "while every destination doc was written by this run's exact "
+             "configuration (static source, same render + model).",
+    )
     finalize_parser = commands.add_parser("finalize", parents=[common])
     finalize_parser.add_argument("--state", default="reindex-splade-state.json")
     finalize_parser.add_argument("--replicas", type=int)
