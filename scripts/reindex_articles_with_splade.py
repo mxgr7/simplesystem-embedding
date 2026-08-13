@@ -60,8 +60,11 @@ DEFAULT_DST = "prod-article-index-v1-semantic-splade-20260726"
 DEFAULT_ES = "http://localhost:9200"
 DEFAULT_PROJECTION = '{"includes":["*"],"exclude_vectors":false}'
 TRANSFORM_VERSION = "article-splade-aggregation-bakeoff-v1"
-EXPECTED_SOURCE_COUNT = 125_755_244
-EXPECTED_OFFER_COUNT = 113_560_531
+# MXG-95: the source is semsearchprod's bf16 restore (2026-08-08 snapshot,
+# static -- nothing writes to it), measured 2026-08-13. The July constants
+# (125,755,244 / 113,560,531) described the dev copy, which no longer exists.
+EXPECTED_SOURCE_COUNT = 128_984_277
+EXPECTED_OFFER_COUNT = 115_485_224
 # The 8-hour bound is the actual constraint on a full run, and the minimum rate
 # is derived from it so the two cannot disagree. The previous hard-coded 4,900
 # assumed the GPU encoder was the limiter; measurement since then puts the limit
