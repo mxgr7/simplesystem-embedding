@@ -249,7 +249,7 @@ def bool_keys():
 
 
 def union_features(offers, bool_keys=(), key_norm=True, drop_junk=True,
-                   dedup="token"):
+                   dedup="token", flag_policy="drop"):
     """The rule under measurement. Returns
     {norm_key: {"disp": display key, "vals": [(raw, norm)], "n_recs": int}}
     with keys in deterministic order.
@@ -266,7 +266,29 @@ def union_features(offers, bool_keys=(), key_norm=True, drop_junk=True,
     deletes the same German head nouns (`handschuh` inside `schutzhandschuhe`)
     from the text SPLADE and the CE read, and turning it off costs under 1% of
     rendered characters, because the key merge -- not the operator -- is what
-    shrinks this field (§14 *The operator is not the lever*)."""
+    shrinks this field (§14 *The operator is not the lever*).
+
+    `flag_policy` is the MXG-108 per-consumer fork, and it is the ONLY place
+    the two consumers' feature CONTENT may differ:
+
+      "drop"      the settled §14 rule (search/SPLADE/enrich): a negative
+                  bool value deletes the entry, a positive one keeps the bare
+                  key. The rationale is lexical false positives -- `Dimmung
+                  DALI: nein` makes a non-DALI article matchable by a DALI
+                  query -- which is an argument about MATCHING.
+      "keep_raw"  the CE profile: bool-key entries render as ordinary valued
+                  entries with the raw vendor value, BOTH polarities
+                  (`Dimmung DALI: nein`, `SVHC-frei: false`, `Rostfrei: ja`).
+                  A pairwise reader needs the negation stated, not deleted --
+                  MXG-84 measured a fresh student trained on flag-less text
+                  scoring near-chance on the negation gate (0.30/0.49) where
+                  its old-text twin passed unaided. No canonicalization (emit
+                  what the vendor wrote, MXG-47 rule 4) and no junk test
+                  inside the bool branch (the pinned lexicon vouches the
+                  key); only a raw value that strips to empty is skipped,
+                  because there is nothing to emit."""
+    if flag_policy not in ("drop", "keep_raw"):
+        raise ValueError(f"unknown flag_policy {flag_policy!r}")
     buckets = defaultdict(lambda: {"disp": "", "vals": [], "recs": set(),
                                    "flag": False})
     for i, o in enumerate(offers):
@@ -286,15 +308,21 @@ def union_features(offers, bool_keys=(), key_norm=True, drop_junk=True,
                     continue
             flag = False
             if nk in bool_keys:
-                # A negative flag renders its KEY into the document text, so
-                # `Dimmung DALI: nein` makes an article that explicitly does
-                # NOT dim over DALI matchable by a DALI query. Drop the whole
-                # entry. A positive flag keeps the key -- the property is real
-                # -- but drops the value, because `ja` is not a searchable
-                # token in any language a buyer types.
-                if nv in NEG_VALUES:
-                    continue
-                flag = True
+                if flag_policy == "keep_raw":
+                    # CE profile: the entry survives with its raw value, both
+                    # polarities. An empty raw value has nothing to emit.
+                    if not rv.strip():
+                        continue
+                else:
+                    # A negative flag renders its KEY into the document text,
+                    # so `Dimmung DALI: nein` makes an article that explicitly
+                    # does NOT dim over DALI matchable by a DALI query. Drop
+                    # the whole entry. A positive flag keeps the key -- the
+                    # property is real -- but drops the value, because `ja` is
+                    # not a searchable token in any language a buyer types.
+                    if nv in NEG_VALUES:
+                        continue
+                    flag = True
             elif drop_junk and is_junk_value(nv):
                 continue
             b = buckets[nk]
@@ -624,7 +652,7 @@ def custnos_from_source(src):
     return out
 
 
-def article_parts(offers, custnos=()):
+def article_parts(offers, custnos=(), flag_policy="drop"):
     """The settled §14/§15 output for one article, before rendering.
 
     `render_article` is this plus the joins and the caps. Split out for
@@ -635,13 +663,19 @@ def article_parts(offers, custnos=()):
 
     What a consumer must NOT do is re-derive the parts by calling the two
     unions itself: the arguments below are the arm `feat_kw_ce_ab.py` priced,
-    and they are pinned in exactly one place."""
-    merged = union_features(offers, bool_keys=bool_keys())
+    and they are pinned in exactly one place.
+
+    `flag_policy` is deliberately the ONE union argument a caller may set --
+    it is the MXG-108 per-consumer fork (see `union_features`), and the CE
+    seam (`build_cheap_features.ArticleDoc.from_es`) is its only legitimate
+    non-default caller."""
+    merged = union_features(offers, bool_keys=bool_keys(),
+                            flag_policy=flag_policy)
     kept, _ = union_keywords({"offers": offers, "custnos": list(custnos or ())})
     return merged, kept
 
 
-def render_article(offers, custnos=(), terminator=""):
+def render_article(offers, custnos=(), terminator="", flag_policy="drop"):
     """(features_text, keywords_text) for one article, under the settled rules.
 
     THE one entry point a renderer should call: it fixes every argument that
@@ -660,7 +694,18 @@ def render_article(offers, custnos=(), terminator=""):
     `build_cheap_features` that happens once, in `ArticleDoc.__init__`, for
     every field and both adapters.
     """
-    merged, kept = article_parts(offers, custnos)
+    merged, kept = article_parts(offers, custnos, flag_policy=flag_policy)
     return (render_features(merged, cap_chars=CAP_FEATURES,
                             terminator=terminator),
             render_keywords(kept, cap_chars=CAP_KEYWORDS))
+
+
+def render_features_ce(offers, terminator=""):
+    """The CE-profile §14 features render (MXG-108): identical pinned
+    arguments to `render_article`, with `flag_policy="keep_raw"`. Split out so
+    the CE seam (`ArticleDoc.from_es`, which also needs the search render for
+    the lexical features) does not pay the §15 keywords union twice."""
+    merged = union_features(offers, bool_keys=bool_keys(),
+                            flag_policy="keep_raw")
+    return render_features(merged, cap_chars=CAP_FEATURES,
+                           terminator=terminator)
