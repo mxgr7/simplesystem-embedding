@@ -14,7 +14,7 @@ from backend_pool import BackendPool
 from cache import SparseCache
 from codec import pack_sparse, unpack_sparse
 from config import Config
-from constants import VOCAB_SIZE
+from constants import VOCAB_SIZE, model_metadata
 from fold_de import fold_de
 from hashing import input_hash
 from rendering import canonical_input, render_from_nul
@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
-PUBLIC_PATHS = {"/healthz", "/readyz", "/metrics", "/docs", "/openapi.json"}
+PUBLIC_PATHS = {"/healthz", "/readyz", "/metadata", "/metrics", "/docs", "/openapi.json"}
 REQUESTS = Counter("splade_service_requests_total", "Requests", ("status",))
 CACHE_HITS = Counter("splade_service_cache_hits_total", "Cache hits")
 CACHE_MISSES = Counter("splade_service_cache_misses_total", "Cache misses")
@@ -102,6 +102,28 @@ async def readyz(request: Request):
             "checks": {"cache": cache_ok, "backend": backend_ok},
         },
     )
+
+
+@app.get("/metadata")
+async def metadata(request: Request):
+    """Which checkpoint this service is actually serving.
+
+    A client that only calls /embed cannot otherwise tell. That matters more than it sounds: this
+    service is deliberately able to serve any checkpoint through one contract (`SPLADE_MODEL_ID` and
+    `SPLADE_MODEL_SHA256` are env-overridable on both sides so a second checkpoint gets its own cache
+    namespace), and `Backend.verify` only ensures the frontend and its backends *agree* — a pool
+    consistently labelled as the wrong checkpoint is perfectly healthy and answers /readyz with 200.
+    An indexer writing `spladeModelVersion` from its own config has no way to notice.
+
+    So: `expected` is what this frontend believes it serves, `backends` is what each verified
+    backend reports. Callers should assert on both. Public, like /healthz and /readyz — it discloses
+    a model name and two digests, and requiring a key would put the check behind the very
+    misconfiguration it exists to catch.
+    """
+    return {
+        "expected": model_metadata(),
+        "backends": request.app.state.pool.contracts(),
+    }
 
 
 @app.get("/admin/backends")
