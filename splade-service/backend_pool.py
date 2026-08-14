@@ -4,12 +4,21 @@ import logging
 
 import httpx
 
-from constants import model_metadata
+from constants import ENCODING_VERSION, model_metadata
 
 
 log = logging.getLogger(__name__)
 EXPECTED_METADATA = model_metadata()
 TRANSIENT = {408, 429, 500, 502, 503, 504}
+
+# `model_metadata()` pins WHICH CHECKPOINT a backend serves. It says nothing about
+# HOW that checkpoint is executed, so two backends can pass it while producing
+# different vectors -- an H100 on bf16 and a T4 on fp16 differ here and agree on
+# every key above. The reindex client already pins these across backends
+# (`validate_backends`); the serving pool did not, which is how a burst backend
+# could land in the pool and write its vectors into the shared cache keyspace.
+ENCODER_CONTRACT = ("document_compute_dtype", "document_encoding_version",
+                    "fold_vocab_mask", "vocab_mask_sha256")
 
 
 class Backend:
@@ -31,6 +40,11 @@ class Backend:
         self.healthy = False
         self.draining = False
         self.failures = 0
+        # Last payload seen by verify(). Kept rather than discarded so the frontend can answer
+        # "which checkpoint is actually being served" without a second round trip: a client that
+        # only ever calls /embed has no other way to tell, and the encoder-identity fields
+        # (document_encoding_version, fold_vocab_mask, vocab_mask_sha256) exist only here.
+        self.metadata = {}
         self.sem = asyncio.Semaphore(max_concurrency)
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self.client = httpx.AsyncClient(
@@ -54,6 +68,7 @@ class Backend:
         }
         if mismatches:
             raise ValueError(f"backend model contract mismatch: {mismatches}")
+        self.metadata = metadata
         self.healthy = True
 
     async def probe(self):
@@ -127,12 +142,43 @@ class BackendPool:
         )
         try:
             await backend.verify()
+            self._check_encoder_contract(backend)
         except Exception:
             await backend.aclose()
             raise
         async with self.lock:
             self.backends[backend.id] = backend
         return backend.snapshot()
+
+    def _check_encoder_contract(self, backend):
+        """Reject a backend that executes the pinned checkpoint differently.
+
+        Two places can define the expected contract, and both are checked because
+        they fail in different ways. `SPLADE_ENCODING_VERSION` is the operator's
+        declaration and also what the cache keyspace is namespaced by, so a
+        mismatch there means cached vectors would be filed under a name that does
+        not describe them. An already-registered backend is the empirical one: the
+        first backend in defines the contract for the rest, exactly as
+        `validate_backends` does on the reindex side.
+        """
+        got = {key: backend.metadata.get(key) for key in ENCODER_CONTRACT}
+        declared = ENCODING_VERSION
+        if declared and got["document_encoding_version"] != declared:
+            raise ValueError(
+                f"backend {backend.url} encodes as "
+                f"{got['document_encoding_version']!r} but SPLADE_ENCODING_VERSION "
+                f"declares {declared!r}; the cache keyspace is namespaced by the "
+                "declared value, so this would file its vectors under the wrong name"
+            )
+        for other in self.backends.values():
+            expected = {key: other.metadata.get(key) for key in ENCODER_CONTRACT}
+            if got != expected:
+                differing = {k: (expected[k], got[k]) for k in got if got[k] != expected[k]}
+                raise ValueError(
+                    f"backend {backend.url} encoder contract differs from "
+                    f"{other.url}: {differing}"
+                )
+            break
 
     def start(self):
         self.probe_task = asyncio.create_task(self._probe_loop())
@@ -151,6 +197,36 @@ class BackendPool:
 
     def snapshots(self):
         return [backend.snapshot() for backend in self.backends.values()]
+
+    def contracts(self):
+        """Encoder identity per backend, for the frontend's GET /metadata.
+
+        Deliberately narrow: these are the keys that decide whether a vector produced now is
+        comparable with one already in the index. `model_id`/`model_sha256` name the checkpoint;
+        `document_encoding_version` names the encoder build (dtype, codec, compiled head);
+        `fold_vocab_mask` plus `vocab_mask_sha256` pin the exact kept-dimension set, which two
+        booleans could not. Tuning knobs (batch size, overlap, device) are left out on purpose —
+        a client asserting on those would break on a harmless redeploy.
+
+        Backends that have never verified report an empty contract rather than being omitted, so a
+        half-up pool is visible rather than silently looking like a healthy smaller one.
+        """
+        keys = (
+            "model_id",
+            "model_sha256",
+            "document_encoding_version",
+            "fold_vocab_mask",
+            "vocab_mask_sha256",
+        )
+        return [
+            {
+                "id": backend.id,
+                "healthy": backend.healthy,
+                "draining": backend.draining,
+                **{key: backend.metadata.get(key) for key in keys},
+            }
+            for backend in self.backends.values()
+        ]
 
     def ready(self):
         return any(

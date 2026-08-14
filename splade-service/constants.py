@@ -16,7 +16,24 @@ PROTOCOL_VERSION = 1
 VOCAB_SIZE = 31_102
 TOP_K = 256
 MAX_OFFER_LENGTH = 256
-CACHE_PREFIX = f"splade:{MODEL_ID}:"
+# Cached vectors are keyed by MODEL_ID *and* encoding version. The model id alone
+# is not enough: the encoding version carries the compute dtype and the fast-path
+# flags, and two backends can serve the same checkpoint under different ones. A
+# bf16 burst backend registered alongside an fp16 backend passes every check in
+# `model_metadata()` -- it is the same model -- and then writes its vectors over
+# the other's under an identical key, with nothing downstream able to tell which
+# encoder produced a given cached entry.
+#
+# Left empty this degrades to the old model-only prefix, which is correct for a
+# single-encoder deployment and is what the pre-MXG-111 keyspace already holds.
+# Set it to the backend's `document_encoding_version`; `BackendPool` asserts every
+# backend agrees with it, so a mismatch is a startup error rather than a silent
+# poisoning.
+ENCODING_VERSION = os.environ.get("SPLADE_ENCODING_VERSION", "")
+CACHE_PREFIX = (
+    f"splade:{MODEL_ID}:{ENCODING_VERSION}:" if ENCODING_VERSION
+    else f"splade:{MODEL_ID}:"
+)
 
 # Extends the dense service's first eight fields with the six kitchen-sink
 # fields used by the production SPLADE checkpoint.

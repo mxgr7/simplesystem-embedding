@@ -58,6 +58,25 @@ def checkpoint_sha256(path):
     return digest.hexdigest()
 
 
+def _native_bf16():
+    """True only for a device with real bf16 tensor cores (compute capability >= 8.0).
+
+    `torch.cuda.is_bf16_supported()` defaults to `including_emulation=True`, so on
+    Turing (sm_75 -- the T4 that hosts the dense embedding service) it answers True
+    and the guard it was written for never fires. The backend then starts happily,
+    reports the same `document_encoding_version` an H100 would, and encodes on
+    EMULATED bf16: measured on a T4, 2.48 TFLOP/s against fp16's 25.50 and fp32's
+    4.46 -- 10x slower than fp16 and slower than fp32, with no error anywhere.
+    Silence is the whole problem, so this asks the question that has a useful answer.
+
+    The kwarg landed in torch 2.6; older builds get the capability check directly.
+    """
+    try:
+        return torch.cuda.is_bf16_supported(including_emulation=False)
+    except TypeError:
+        return torch.cuda.get_device_capability()[0] >= 8
+
+
 def build_vocab_mask(tokenizer, vocab_size, model_hp):
     """The trained model's output mask, rebuilt from its own hyper-parameters.
 
@@ -198,9 +217,13 @@ class SpladeEncoder:
         if (
             self.device.type == "cuda"
             and self.document_dtype_name == "bf16"
-            and not torch.cuda.is_bf16_supported()
+            and not _native_bf16()
         ):
-            raise ValueError("the selected CUDA device does not support bf16")
+            raise ValueError(
+                "the selected CUDA device has no native bf16 (compute capability "
+                f"{torch.cuda.get_device_capability(self.device)}); refusing to run "
+                "on emulated bf16 -- pick fp16 or fp32"
+            )
 
         # `weights_cast` holds the whole model in the compute dtype instead of
         # casting fp32 weights on every matmul. That also puts LayerNorm in bf16,

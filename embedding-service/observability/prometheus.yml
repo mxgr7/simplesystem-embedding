@@ -54,6 +54,22 @@ scrape_configs:
         labels:
           stack: embedding-service
 
+  # MXG-111: splade-service as a co-tenant on this same T4. The frontend on :8137
+  # carries the request/cache counters (splade_service_cache_hits_total etc.); it
+  # runs host-net like embedding-service, so it needs the host gateway. The backend
+  # on :8138 is loopback-bound and exposes no /metrics — watch it through the GPU
+  # job below and its /health instead.
+  #
+  # Scrape it as its own job rather than folding it into the embedding-service one:
+  # both stacks share this GPU, and the whole point of the co-tenancy is being able
+  # to attribute a query-latency regression to one of them.
+  - job_name: splade-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8137"]
+        labels:
+          stack: splade-service
+
   # redis_exporter is on the same bridge network as Prometheus — addressable
   # by service name. It pulls KVRocks's INFO/keyspace/command stats over
   # the Redis protocol on port 6666.
