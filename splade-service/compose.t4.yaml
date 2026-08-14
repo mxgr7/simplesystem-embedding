@@ -4,8 +4,11 @@
 # compose.gpu.yaml is sized for an H100 with the card to itself; this file is sized
 # for 15,360 MiB shared with two TEI replicas on a 15 GB / 0-swap host.
 #
-# Measured on a rented Tesla T4 (driver 560.35.03, sm_75, torch 2.8.0+cu128),
-# soup2b50, packed transport, 2,000 real articles sampled from the live index:
+# Measured first on a rented Tesla T4 (driver 560.35.03, sm_75, torch 2.8.0+cu128)
+# and then confirmed on this box itself, soup2b50, packed transport, 2,000 real
+# articles sampled from the live index. Deployed 2026-08-14 on
+# semantic-search.prod.nextgen: 283.5 docs/s, qnnz 5.09, query-embed latency on
+# :8080 unmoved under full SPLADE load (p50 3.08ms vs 3.11ms baseline).
 #
 #   batch |  docs/s | p50 ms | peak MiB     dtype @ batch 64 |  docs/s | peak MiB
 #       8 |   219.7 |   36.4 |      785       fp16           |   273.9 |     1785
@@ -21,7 +24,23 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: backend-cuda
+      # `backend`, NOT `backend-cuda`. Docker's root is /var/lib/docker on this
+      # box's 49 GB OS disk, which sits at 89% with 5.4 GB free; the backend-cuda
+      # base (pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime) is 4.29 GB compressed
+      # and ~9-11 GB unpacked, so pulling it would fill the root filesystem of a
+      # production host. `backend` is FROM frontend with PYTHONPATH=/runtime, and
+      # the CUDA torch is bind-mounted from /data (813 GB free) -- the same
+      # arrangement splade-service/README.md documents for storage-constrained
+      # hosts, and what the CPU dev backend already does. The image stays ~200 MB.
+      #
+      # Provision the runtime once, before first `up`:
+      #   docker run --rm -v /data/splade-service/runtime:/runtime \
+      #     ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+      #     uv pip install --target /runtime --no-cache \
+      #     --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0
+      #   (then the same again for transformers/huggingface-hub/tokenizers/
+      #    protobuf/sentencepiece -- see the runbook)
+      target: backend
     image: simplesystem-splade-backend:soup2b50-cuda-t4-v1
     # Loopback only. The frontend on :8137 is the public surface; the backend
     # speaks the packed transport and has no cache, so nothing outside this host
@@ -54,19 +73,37 @@ services:
       # 64, not 256. Throughput PEAKS at 64 and falls off after; 256 costs 6 GB of
       # a 15 GB card shared with two TEI replicas to go slower (251.5 vs 273.9).
       BACKEND_BATCH_SIZE: "64"
+      # weights_cast is the fast path and defaults to "0" in backend.py: leaving
+      # it unset silently drops the encoder to `-exact-v2`, which is correct but
+      # is not the configuration the numbers above were measured under.
+      DOCUMENT_WEIGHTS_CAST: "1"
+      # compile_head stays OFF here, unlike the H100 profile. torch.compile needs
+      # triton needs a C compiler, and this image is bookworm-slim with none, so
+      # with it on /encode-packed 500s with "Failed to find C compiler" while
+      # /health, /readyz and /embed all keep working -- the healthcheck does not
+      # exercise the compiled path, so it fails only where the bulk transport is
+      # used. Adding gcc to a production serving image to fix that buys nothing:
+      # on this T4 compile_head is 283.5 docs/s OFF vs 273.9 ON, and the output
+      # vectors are BIT-IDENTICAL (jaccard 1.0000, cosine 1.000000 over 2,000
+      # documents). It is pure cost here.
+      DOCUMENT_COMPILE_HEAD: "0"
       # One GPU stream. This is the co-tenancy lever: query embeds on :8080 are
       # ~7 ms of a ~1 s query and must stay that way, so SPLADE gets one in-flight
       # forward pass and cannot monopolise the card.
       BACKEND_MAX_CONCURRENCY: "1"
       MAX_INPUTS_PER_REQUEST: "256"
-      # The dense box has 8 cores' worth of headroom, not the 56 of the bench
-      # rental. Tokenization is the only CPU-bound stage and it is not the
-      # bottleneck at 274 docs/s.
-      TORCH_NUM_THREADS: "8"
+      # This box has FOUR cores total, shared with two TEI replicas, kvrocks,
+      # embedding-service and seven observability sidecars -- not the 56 of the
+      # bench rental. Half of them, so a SPLADE burst cannot starve query embeds
+      # on :8080. The encoder was GPU-bound at 274 docs/s anyway.
+      TORCH_NUM_THREADS: "2"
+      PYTHONPATH: /runtime
       BACKEND_API_KEY: ${SPLADE_BACKEND_API_KEY:?set SPLADE_BACKEND_API_KEY}
     volumes:
       - ${SPLADE_MODEL_DIR:-/data/splade-service/model}:/model:ro
       - ${SPLADE_HF_DIR:-/data/splade-service/huggingface}:/data/huggingface
+      # CUDA torch + the transformers stack, kept off the 89%-full root fs.
+      - ${SPLADE_RUNTIME_DIR:-/data/splade-service/runtime}:/runtime:ro
     deploy:
       resources:
         reservations:
@@ -76,8 +113,11 @@ services:
               capabilities: [gpu]
     # 1gb, not the 8gb of compose.gpu.yaml. shm is host RAM, this host has 15 GB
     # and no swap, and KVRocks is already deliberately capped at 5 GB for exactly
-    # that reason. Peak GPU use at batch 64 is 1,785 MiB; the dataloader shm need
-    # is far smaller than the H100 profile assumed.
+    # that reason; the dataloader shm need is far smaller than the H100 profile
+    # assumed. GPU-side, sustained load on the deployed stack peaks at 5,173 MiB
+    # of 15,360 total INCLUDING the two TEI replicas' 1,447 -- i.e. ~3.7 GB for
+    # SPLADE, more than the 1,785 the packed-path bench showed on an empty card,
+    # because the JSON /encode path the indexer uses holds more. 34% of the card.
     shm_size: 1gb
     restart: unless-stopped
     healthcheck:
@@ -103,6 +143,13 @@ services:
     network_mode: host
     environment:
       BACKEND_URLS: http://127.0.0.1:8138
+      # BOTH sides must declare the same pair. The frontend builds its own
+      # `model_metadata()` from these and compares it to the backend's /metadata
+      # on every probe, so leaving them at the default here fails startup with
+      # `backend model contract mismatch` even though the backend is healthy --
+      # which is the check doing its job, not a bug.
+      SPLADE_MODEL_ID: soup2b50-folde-top256-v1
+      SPLADE_MODEL_SHA256: e122967b4622e3d9487c18bedcb8d0b8f695a5bc3cd159c2a03424d572c0861a
       # db 1, NOT db 0. db 0 holds the dense `tei:v2:` keyspace -- 55 GB over ~46M
       # keys under a 5 GB cgroup. A SPLADE entry is 1,026 bytes (2-byte header +
       # 256 uint16 ids + 256 fp16 weights) against the dense side's 256, so this
@@ -114,7 +161,7 @@ services:
       # (bf16) registered for a re-encode writes its vectors over the T4's (fp16)
       # under identical keys -- same checkpoint, same sha, different vectors, and
       # nothing afterwards can tell which encoder produced a cached entry.
-      SPLADE_ENCODING_VERSION: prod-soup-top256-fp16-fp16codec-wcast-chead-v2
+      SPLADE_ENCODING_VERSION: prod-soup-top256-fp16-fp16codec-wcast-v2
       MAX_INPUTS_PER_REQUEST: "256"
       MAX_INFLIGHT: "32"
       # The indexer sends batches of SPLADE_MAX_BATCH_SIZE (128). At 274 docs/s a
