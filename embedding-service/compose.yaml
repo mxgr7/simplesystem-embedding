@@ -301,6 +301,14 @@ services:
       # commit. If the file is missing this one container fails to start, loudly, which is the
       # intended behaviour: a silently mute Alertmanager is the failure this ticket is about.
       # Everything else in this compose file keeps working, hence `:-` rather than `:?`.
+      #
+      # ⚠️ PERMISSIONS. This image runs as `nobody` (65534), so a 0600 file owned by the
+      # deploying user is unreadable to it -- and the resulting `permission denied` is an
+      # UNRECOVERABLE notify error: every alert is dropped with nothing but a line in
+      # Alertmanager's log to show for it. After writing or rotating the webhook:
+      #     sudo chgrp 65534 <file> && chmod 0640 <file>
+      # Then confirm from inside the container, not from the host:
+      #     docker exec embedding-service-alertmanager-1 head -c 8 /etc/alertmanager/slack_webhook_url
       - ${SLACK_WEBHOOK_FILE:-./observability/alertmanager/slack_webhook_url.local}:/etc/alertmanager/slack_webhook_url:ro
       - alertmanager_data:/alertmanager
     restart: unless-stopped

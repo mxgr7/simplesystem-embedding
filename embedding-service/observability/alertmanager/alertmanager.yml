@@ -58,7 +58,16 @@ receivers:
           {{ .Annotations.description }}
           {{ if .Annotations.action }}*Do:* {{ .Annotations.action }}{{ end }}
           {{ end }}
+        # Built by hand from .ExternalURL rather than with `{{ template "__alert_silenceURL" }}`
+        # -- that template does not exist in Alertmanager v0.27, and referencing an undefined
+        # template is an UNRECOVERABLE notify error: the whole message is dropped, retries are
+        # cancelled, and the only trace is a line in Alertmanager's own log. Caught by firing a
+        # deliberate test alert; it would otherwise have surfaced as silence during an incident.
+        # .ExternalURL comes from --web.external-url in compose.yaml.
         actions:
           - type: button
             text: Silence
-            url: '{{ template "__alert_silenceURL" . }}'
+            url: '{{ .ExternalURL }}/#/silences/new?filter={{ printf "{alertname=%q}" .CommonLabels.alertname | urlquery }}'
+          - type: button
+            text: Source
+            url: '{{ (index .Alerts 0).GeneratorURL }}'
