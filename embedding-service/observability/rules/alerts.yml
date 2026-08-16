@@ -1,0 +1,322 @@
+## MXG-115. Alert rules for the semantic GPU box (semantic-search.prod.nextgen).
+##
+## Before this file: eleven scrape jobs, `{"groups":[]}`, no alertmanager. Every failure on
+## this box was exported faithfully and continuously into nothing, for as long as it took
+## someone to go looking. Two were live when it was written -- dcgm_exporter had been
+## crashlooping since a driver upgrade, and the Elasticsearch exporter had spent weeks
+## reporting up=1 while resolving no host at all.
+##
+## That second one set the shape of this file. `up` measures whether Prometheus could scrape
+## the exporter's own HTTP endpoint. It says nothing about whether the exporter could reach
+## the thing it exports, so an exporter that answers 200 with zero series is green and blind.
+## Every backend-facing job therefore gets an `absent()` companion carrying `category: blind`;
+## alertmanager.yml inhibits those when the target is simply down, so a dead target pages once
+## on the cause rather than twice.
+##
+## Every expression here was evaluated against this Prometheus before being committed, and
+## every metric name was read off the live exporter rather than remembered. Thresholds are
+## calibrated against measurements taken 2026-08-16 and noted per rule; where a threshold
+## could not be calibrated yet, the rule says so instead of guessing quietly.
+
+groups:
+  - name: meta
+    interval: 30s
+    rules:
+      - alert: Watchdog
+        # Always firing, by construction. Its only job is to make the alert path itself
+        # observable: if this is not present in Alertmanager, then Prometheus is down, or the
+        # rules did not load, or Prometheus cannot reach Alertmanager -- and in every one of
+        # those cases the absence of other alerts means nothing. A monitoring stack that
+        # cannot prove it is alive is the state this box was already in.
+        #
+        # Routed to the `null` receiver in alertmanager.yml, so it never reaches Slack. Check
+        # it by hand, or point a dead-man's-snitch at it later:
+        #   curl -s localhost:9093/api/v2/alerts | grep -c Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "Alerting pipeline is alive"
+          description: "This alert always fires. Its absence means the alerting path is broken."
+
+  - name: targets
+    interval: 30s
+    rules:
+      - alert: TargetDown
+        # 15m, not 5m: a container restart or a compose recreate is not an incident, and this
+        # box's whole problem is a board nobody trusts. `indexer` is excluded and handled
+        # below -- it is legitimately absent until MXG-112 wires it.
+        expr: up{job!="indexer"} == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
+          description: "Target has been unreachable for 15 minutes. Everything downstream of this job is now unmonitored."
+          action: "docker ps -a | grep -i {{ $labels.job }}; docker logs --tail 50 <container>"
+
+      - alert: IndexerTargetDown
+        # Separate and only a warning, because until the indexer starts writing this is the
+        # expected state. Once it is live, promote this to critical and delete the note.
+        expr: up{job="indexer"} == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "article-search-indexer is not being scraped"
+          description: "Expected while MXG-112 is unfinished. After the indexer goes live this means it is down, and with SPLADE_REQUIRED=true a down indexer is a stalled pipeline, not a slow one."
+          action: "Check the indexer container on this host; ACTUATOR_PORT must be 9091."
+
+  - name: gpu
+    interval: 30s
+    rules:
+      - alert: GpuMetricsMissing
+        # The rule that would have caught dcgm_exporter's 2,970-restart crashloop even if the
+        # container had kept answering /metrics. Driver upgrades break GPU containers created
+        # before them, because the nvidia runtime injects driver libraries at container
+        # CREATION -- a restart loop can never recover, only a recreate can.
+        expr: absent(DCGM_FI_DEV_FB_USED)
+        for: 10m
+        labels:
+          severity: critical
+          job: gpu
+          category: blind
+        annotations:
+          summary: "No GPU metrics are being produced"
+          description: "DCGM_FI_DEV_FB_USED has no series. The card is shared by two TEI replicas and the SPLADE backend, and none of them can be seen."
+          action: "docker compose -f embedding-service/compose.yaml up -d --force-recreate dcgm_exporter -- a restart will NOT fix it."
+
+      - alert: GpuMemoryHigh
+        # Baseline 2026-08-16 under sustained SPLADE load: 5,172 MiB of 15,360 = 34%, with
+        # both TEI replicas resident. 85% leaves room for a burst without an OOM.
+        expr: DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU {{ $labels.gpu }} memory at {{ $value | humanizePercentage }}"
+          description: "Steady state is 34%. A CUDA OOM here takes out whichever tenant asks next -- query embeds, indexer embeds, or SPLADE."
+          action: "nvidia-smi; check BACKEND_BATCH_SIZE on splade-backend-t4 (64) and TEI's --max-batch-tokens."
+
+      - alert: GpuMemoryCritical
+        expr: DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) > 0.95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU {{ $labels.gpu }} memory at {{ $value | humanizePercentage }} -- OOM imminent"
+          description: "At this level an allocation failure is a matter of when. With SPLADE_REQUIRED=true a SPLADE OOM stalls indexing into retry then DLQ."
+          action: "nvidia-smi; consider dropping BACKEND_BATCH_SIZE or draining the SPLADE backend via PATCH /admin/backends {weight: 0}."
+
+      - alert: GpuXidErrors
+        # XID is the GPU's own hardware/driver fault code. On a T4 shared three ways, an Xid
+        # is the difference between "a job crashed" and "the card needs a reset".
+        expr: DCGM_FI_DEV_XID_ERRORS > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU {{ $labels.gpu }} reported Xid error {{ $value }}"
+          description: "A driver-level GPU fault. Processes using the card may be in an undefined state."
+          action: "nvidia-smi -q | grep -i xid; check dmesg; a card reset needs every CUDA container stopped first."
+
+      - alert: GpuTempHigh
+        expr: DCGM_FI_DEV_GPU_TEMP > 85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU {{ $labels.gpu }} at {{ $value }}C"
+          description: "The T4 throttles near 85C, which shows up as unexplained encode-throughput loss rather than as an error."
+          action: "Check for a co-tenant running hotter than expected; DCGM_FI_DEV_POWER_USAGE tells you which."
+
+  - name: services
+    interval: 30s
+    rules:
+      - alert: SpladeBackendUnhealthy
+        # splade_service_backend_healthy was added for this ticket. Nothing else covers the
+        # case: splade_service_requests_total{status="504"} only moves when a client asks, so
+        # a backend that dies while the indexer is idle stays invisible until the next batch
+        # -- and with SPLADE_REQUIRED=true that batch does not degrade, it dead-letters.
+        expr: splade_service_backend_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SPLADE backend {{ $labels.backend }} ({{ $labels.url }}) is failing its probe"
+          description: "The frontend on :8137 has no working encoder. Indexing cannot commit a document without a SPLADE vector."
+          action: "curl -s localhost:8137/readyz; docker logs --tail 50 splade-service-splade-backend-t4-1"
+
+      - alert: SpladeNoBackendAtAll
+        # Only the absent case -- a backend that is registered but failing is
+        # SpladeBackendUnhealthy above, and paging twice for one event is how a board
+        # stops being read. No series here means the pool is empty or the frontend is gone.
+        expr: absent(splade_service_backend_healthy)
+        for: 5m
+        labels:
+          severity: critical
+          job: splade-service
+          category: blind
+        annotations:
+          summary: "SPLADE service reports no backends at all"
+          description: "The pool is empty, or the frontend on :8137 is not serving /metrics. /embed will 504."
+          action: "curl -s localhost:8137/admin/backends; docker compose -f splade-service/compose.t4.yaml ps"
+
+      - alert: SpladeGatewayTimeouts
+        expr: rate(splade_service_requests_total{status="504"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SPLADE /embed is returning 504s"
+          description: "The frontend cannot get a vector out of its backend within REQUEST_BUDGET_S (120s). Every one of these is an indexer batch heading for retry."
+          action: "Check GPU contention first (DCGM_FI_DEV_GPU_UTIL), then the backend's own logs."
+
+      - alert: TeiBackendUnhealthy
+        expr: embedding_service_tei_backend_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dense embedding backend {{ $labels.backend }} ({{ $labels.url }}) is unhealthy"
+          description: "embedding-service on :9000 cannot reach this TEI replica."
+          action: "docker logs --tail 50 embedding-service-tei-indexer-1"
+
+      - alert: TeiRequestFailures
+        # TEI has no failure counter; it has a request counter and a success counter. The gap
+        # between their rates is the failure rate.
+        expr: rate(te_request_count[5m]) - rate(te_request_success[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TEI {{ $labels.job }} is failing requests ({{ $value | printf \"%.2f\" }}/s)"
+          description: "Sustained non-success responses from a TEI replica. On tei_indexer this is the dense half of indexing failing."
+          action: "docker logs --tail 100 embedding-service-tei-1 (or -tei-indexer-1); look for queue-Full."
+
+      - alert: KvrocksDown
+        expr: redis_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "KVRocks is unreachable"
+          description: "Both embedding caches live here. Cache misses degrade to real encodes, so this shows up as GPU load and latency before it shows up as errors."
+          action: "docker logs --tail 50 embedding-service-kvrocks-1; check /mnt/nvme free space."
+
+  - name: host
+    interval: 30s
+    rules:
+      - alert: DiskSpaceLow
+        # Measured 2026-08-16: / is 90% full (5.2 GB free of 49 GB), /mnt/nvme 52%, /data 20%.
+        # The root filesystem is the live risk -- it is Docker's storage root, and it is why
+        # splade-service builds from the slim `backend` target with CUDA torch bind-mounted
+        # from /data instead of pulling a 9-11 GB CUDA base. This rule fires on / today, and
+        # that is a true positive, not a miscalibration.
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes < 0.15
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.mountpoint }} is {{ $value | humanizePercentage }} free"
+          description: "On / this blocks image pulls and can wedge the docker daemon. On /mnt/nvme it starves KVRocks, whose SPLADE keyspace is projected at 60-120 GB fully populated against 57 GB free."
+          action: "docker system df; docker image prune; check /var/lib/docker and /mnt/nvme."
+
+      - alert: DiskSpaceCritical
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes < 0.06
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.mountpoint }} is {{ $value | humanizePercentage }} free"
+          description: "A full filesystem takes containers down in ways that look like unrelated bugs."
+          action: "docker system prune -a is the blunt option; check for a runaway log first (json-file logs are capped at 50m x 3 per service)."
+
+      - alert: HostMemoryLow
+        # 15 GB of RAM and ZERO swap: there is no soft failure mode here, the OOM killer picks
+        # a victim. KVRocks is capped at 5 GB for exactly this reason. Baseline 61% available.
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.12
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host memory {{ $value | humanizePercentage }} available"
+          description: "This host has no swap. The OOM killer will choose, and it does not know which of these containers matters."
+          action: "docker stats --no-stream; the usual suspects are KVRocks and a SPLADE batch."
+
+  - name: indexing
+    interval: 30s
+    rules:
+      - alert: ElasticsearchMetricsMissing
+        # The rule this whole file is shaped around. The exporter answered /metrics with 200
+        # and zero series for weeks after semantic-es-temp.prod.nextgen stopped resolving, so
+        # `up{job="semantic_es"}` stayed 1 the entire time. `up` cannot see this; absent() can.
+        expr: absent(elasticsearch_cluster_health_status)
+        for: 10m
+        labels:
+          severity: critical
+          job: semantic_es
+          category: blind
+        annotations:
+          summary: "The Elasticsearch exporter is up but exporting nothing"
+          description: "No cluster health series at all. The exporter's own endpoint is fine -- it cannot reach semsearchprod, or the credentials stopped working."
+          action: "docker logs --tail 20 embedding-service-elasticsearch_exporter-1; check ES_SEMANTIC2_URL resolves from the bridge network."
+
+      - alert: ElasticsearchClusterRed
+        expr: elasticsearch_cluster_health_status{color="red"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "semsearchprod is RED"
+          description: "At least one primary shard is unassigned. Writes to the affected shard fail; with SPLADE_REQUIRED=true the indexer retries and then dead-letters them."
+          action: "GET _cluster/allocation/explain"
+
+      - alert: ElasticsearchClusterYellow
+        # Yellow on 2026-08-16 with 6 initializing shards -- normal during a recovery, not
+        # normal for hours. 2h avoids paging on every routine relocation.
+        expr: elasticsearch_cluster_health_status{color="yellow"} == 1
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "semsearchprod has been YELLOW for 2 hours"
+          description: "Replicas unassigned for longer than a recovery should take."
+          action: "GET _cat/shards?v&h=index,shard,prirep,state,unassigned.reason | grep -v STARTED"
+
+      - alert: SemanticIndexerLagHigh
+        # UNCALIBRATED -- see the note at the end of this file. The threshold is derived from
+        # capacity, not from observed behaviour: SPLADE on this T4 does 283 docs/s, so 500k
+        # messages is roughly half an hour of work at full rate.
+        expr: kafka_group_lag_total{group="article-indexer-v1-semantic"} > 500000
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Semantic indexer is {{ $value | humanize }} messages behind"
+          description: "About half an hour of work at the T4's 283 docs/s ceiling. If it keeps climbing, the encoder is the bottleneck and this box is the wrong answer."
+          action: "Compare rate(kafka_group_partition_committed_offset) against the topic's end-offset rate."
+
+      - alert: SemanticIndexingStalled
+        # Lag alone cannot see a stall where the consumer commits offsets but nothing lands in
+        # ES. Lag climbing WHILE the index takes no writes at all is unambiguous.
+        expr: |
+          kafka_group_lag_total{group="article-indexer-v1-semantic"} > 10000
+          unless on()
+          (rate(elasticsearch_index_stats_indexing_index_total{index=~"article-splade-b50v2.*"}[15m]) > 0)
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Semantic indexer is behind and the index is taking no writes"
+          description: "Consumer lag above 10k while the article index has received zero documents for 15 minutes. This is a stall, not a slowdown."
+          action: "Check the indexer's DLQ and COUNTER_SPLADE_FAILURES; then curl localhost:8137/readyz."
+
+## Not yet covered, on purpose
+##
+## DLQ depth and COUNTER_SPLADE_FAILURES. Both are Micrometer metrics on the indexer's own
+## actuator endpoint, which has never been scraped from this box -- `up{job="indexer"}` has
+## been 0 since the job was written. Guessing at the exported metric names would produce rules
+## that silently never fire, which is the failure this ticket is about. Add them once the
+## indexer is live and the names can be read off /actuator/prometheus (MXG-112), and calibrate
+## SemanticIndexerLagHigh against a day of real lag at the same time.

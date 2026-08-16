@@ -1,5 +1,5 @@
 {
-  "title": "Semantic ES (temp) \u2014 semantic-es-temp",
+  "title": "Semantic ES \u2014 semsearchprod",
   "uid": "semantic-es-temp",
   "schemaVersion": 38,
   "version": 5,
@@ -46,7 +46,7 @@
       },
       "targets": [
         {
-          "expr": "up{job=\"semantic_es_temp\"}",
+          "expr": "up{job=\"semantic_es\"}",
           "refId": "A"
         }
       ],
@@ -1376,7 +1376,7 @@
     {
       "type": "row",
       "id": 900,
-      "title": "Index: prod-article-index-v1-semantic-bf16",
+      "title": "Index: article-splade-b50v2-ce-20260815",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -1402,12 +1402,12 @@
       },
       "targets": [
         {
-          "expr": "elasticsearch_indices_store_size_bytes_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "expr": "elasticsearch_indices_store_size_bytes_total{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}",
           "legendFormat": "total",
           "refId": "A"
         },
         {
-          "expr": "elasticsearch_indices_store_size_bytes_primary{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "expr": "elasticsearch_indices_store_size_bytes_primary{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}",
           "legendFormat": "primary",
           "refId": "B"
         }
@@ -1440,12 +1440,12 @@
       },
       "targets": [
         {
-          "expr": "elasticsearch_indices_docs_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "expr": "elasticsearch_indices_docs_total{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}",
           "legendFormat": "docs total",
           "refId": "A"
         },
         {
-          "expr": "elasticsearch_indices_docs_primary{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "expr": "elasticsearch_indices_docs_primary{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}",
           "legendFormat": "docs primary",
           "refId": "B"
         }
@@ -1477,12 +1477,12 @@
       },
       "targets": [
         {
-          "expr": "elasticsearch_indices_segment_count_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "expr": "elasticsearch_indices_segment_count_total{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}",
           "legendFormat": "total",
           "refId": "A"
         },
         {
-          "expr": "elasticsearch_indices_segment_count_primary{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "expr": "elasticsearch_indices_segment_count_primary{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}",
           "legendFormat": "primary",
           "refId": "B"
         }
@@ -1514,7 +1514,7 @@
       },
       "targets": [
         {
-          "expr": "elasticsearch_indices_deleted_docs_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "expr": "elasticsearch_indices_deleted_docs_total{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}",
           "legendFormat": "deleted",
           "refId": "A"
         }
@@ -1533,7 +1533,7 @@
     {
       "type": "timeseries",
       "id": 84,
-      "title": "bf16: indexing rate (docs/s)",
+      "title": "article index: indexing rate (docs/s)",
       "description": "rate(elasticsearch_index_stats_indexing_index_total{index=...}) \u2014 live backfill throughput into the bf16 index.",
       "datasource": {
         "type": "prometheus",
@@ -1547,7 +1547,7 @@
       },
       "targets": [
         {
-          "expr": "rate(elasticsearch_index_stats_indexing_index_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}[5m])",
+          "expr": "rate(elasticsearch_index_stats_indexing_index_total{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}[5m])",
           "legendFormat": "index docs/s",
           "refId": "A"
         }
@@ -1562,7 +1562,7 @@
     {
       "type": "timeseries",
       "id": 85,
-      "title": "bf16: merge time rate (s/s)",
+      "title": "article index: merge time rate (s/s)",
       "description": "rate(elasticsearch_index_stats_merge_time_seconds_total{index=...}) \u2014 merge pressure on this index.",
       "datasource": {
         "type": "prometheus",
@@ -1576,12 +1576,12 @@
       },
       "targets": [
         {
-          "expr": "rate(elasticsearch_index_stats_merge_time_seconds_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}[5m])",
+          "expr": "rate(elasticsearch_index_stats_merge_time_seconds_total{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}[5m])",
           "legendFormat": "merge s/s",
           "refId": "A"
         },
         {
-          "expr": "rate(elasticsearch_index_stats_merge_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}[5m])",
+          "expr": "rate(elasticsearch_index_stats_merge_total{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}[5m])",
           "legendFormat": "merges/s",
           "refId": "B"
         }
@@ -1596,7 +1596,7 @@
     {
       "type": "timeseries",
       "id": 86,
-      "title": "bf16: store size growth",
+      "title": "article index: store size growth",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1609,7 +1609,7 @@
       },
       "targets": [
         {
-          "expr": "elasticsearch_indices_store_size_bytes_total{cluster=\"semantic-es-temp\",index=\"prod-article-index-v1-semantic-bf16\"}",
+          "expr": "elasticsearch_indices_store_size_bytes_total{cluster=\"semantic-es-temp\",index=\"article-splade-b50v2-ce-20260815\"}",
           "legendFormat": "store size",
           "refId": "A"
         }
@@ -1620,426 +1620,7 @@
         },
         "overrides": []
       }
-    },
-    {
-      "id": 1100,
-      "type": "row",
-      "title": "Preprod synthetic prober \u2014 live health + end-to-end latency (client-side, every 10s)",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 107
-      },
-      "panels": []
-    },
-    {
-      "id": 92,
-      "type": "stat",
-      "title": "Preprod search UP",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 0,
-        "y": 108
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [
-            {
-              "type": "value",
-              "options": {
-                "0": {
-                  "text": "DOWN",
-                  "color": "red"
-                },
-                "1": {
-                  "text": "UP",
-                  "color": "green"
-                }
-              }
-            }
-          ]
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "probe_up{target=\"preprod\"}",
-          "legendFormat": ""
-        }
-      ]
-    },
-    {
-      "id": 93,
-      "type": "stat",
-      "title": "Last HTTP status",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 6,
-        "y": 108
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 200
-              },
-              {
-                "color": "red",
-                "value": 201
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "probe_last_status{target=\"preprod\"}",
-          "legendFormat": ""
-        }
-      ]
-    },
-    {
-      "id": 94,
-      "type": "stat",
-      "title": "Last hitCount",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 12,
-        "y": 108
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "probe_hit_count{target=\"preprod\"}",
-          "legendFormat": ""
-        }
-      ]
-    },
-    {
-      "id": 95,
-      "type": "stat",
-      "title": "Probe errors/min",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 6,
-        "x": 18,
-        "y": 108
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 2,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0.001
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "60*rate(probe_requests_total{target=\"preprod\",outcome=\"error\"}[$__rate_interval])",
-          "legendFormat": ""
-        }
-      ]
-    },
-    {
-      "id": 96,
-      "type": "timeseries",
-      "title": "Preprod search latency p50 / p90 / p99 (client-side)",
-      "description": "Live synthetic prober (search-prober job): one real semantic query at the PREPROD gateway every 10s, end-to-end (gateway+proxy+query-service+TEI+ES), CLIENT-side latency. Doubles as a health check and ES page-cache warm-keeper. This is the only source of real preprod p50/p90/p99 (the preprod pod's own actuator isn't scrapable).",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 112
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 0,
-            "showPoints": "never",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "last",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.50, sum(rate(probe_search_latency_seconds_bucket[10m])) by (le))",
-          "legendFormat": "p50"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.90, sum(rate(probe_search_latency_seconds_bucket[10m])) by (le))",
-          "legendFormat": "p90"
-        },
-        {
-          "refId": "C",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.99, sum(rate(probe_search_latency_seconds_bucket[10m])) by (le))",
-          "legendFormat": "p99"
-        },
-        {
-          "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "rate(probe_search_latency_seconds_sum[10m]) / clamp_min(rate(probe_search_latency_seconds_count[10m]),1)",
-          "legendFormat": "mean"
-        }
-      ]
-    },
-    {
-      "id": 97,
-      "type": "timeseries",
-      "title": "Probe rate by routing mode (warm-keeper activity)",
-      "description": "Probes/min by predicted mode \u2014 confirms the warm-keeper is firing and which paths it exercises.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 112
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "last",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "60*rate(probe_mode_requests_total{target=\"preprod\"}[$__rate_interval])",
-          "legendFormat": "{{mode}}"
-        },
-        {
-          "refId": "B",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "60*rate(probe_requests_total{target=\"preprod\",outcome=\"error\"}[$__rate_interval])",
-          "legendFormat": "errors"
-        }
-      ]
     }
-  ]
+  ],
+  "description": "The live semantic Elasticsearch cluster (semsearchprod) and the article index the next-gen indexer writes to. Retargeted 2026-08-16 (MXG-115) from the single-node semantic-es-temp cluster, which no longer exists; the exporter had been reporting up=1 with zero series ever since. The uid is left as semantic-es-temp so existing links keep working."
 }

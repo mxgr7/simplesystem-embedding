@@ -159,6 +159,7 @@ class StubCache:
 class StubPool:
     def __init__(self, *args):
         self.calls = 0
+        self.healthy = True
 
     async def add(self, *args, **kwargs):
         return {"id": "b1"}
@@ -173,7 +174,20 @@ class StubPool:
         return True
 
     def snapshots(self):
-        return [{"id": "b1", "healthy": True}]
+        # Mirrors BackendConnection.snapshot()'s real key set -- the metrics collector reads
+        # url/draining off it, and a stub that is narrower than the thing it stands in for is
+        # how a scrape-time KeyError reaches production green.
+        return [
+            {
+                "id": "b1",
+                "url": "http://backend-1:8138",
+                "weight": 1.0,
+                "healthy": self.healthy,
+                "draining": False,
+                "inflight": 0,
+                "max_client_batch": 32,
+            }
+        ]
 
     async def encode(self, texts, document=True):
         self.calls += 1
@@ -221,7 +235,53 @@ def test_readyz_checks_cache_and_backend(service_client):
 
 
 def test_admin_lists_backends(service_client):
-    client, _, _ = service_client
+    client, _, pool = service_client
     response = client.get("/admin/backends")
     assert response.status_code == 200
-    assert response.json() == [{"id": "b1", "healthy": True}]
+    assert response.json() == pool.snapshots()
+
+
+def _metric_lines(client, name):
+    body = client.get("/metrics").text
+    return [line for line in body.splitlines() if line.startswith(name)]
+
+
+def test_backend_healthy_metric_tracks_the_pool(service_client):
+    """The gauge MXG-115 alerts on. It has to read the pool at scrape time, not at startup."""
+    client, _, pool = service_client
+    assert _metric_lines(client, "splade_service_backend_healthy{") == [
+        'splade_service_backend_healthy{backend="b1",url="http://backend-1:8138"} 1.0'
+    ]
+    assert _metric_lines(client, "splade_service_backend_draining{") == [
+        'splade_service_backend_draining{backend="b1",url="http://backend-1:8138"} 0.0'
+    ]
+
+    pool.healthy = False
+    assert _metric_lines(client, "splade_service_backend_healthy{") == [
+        'splade_service_backend_healthy{backend="b1",url="http://backend-1:8138"} 0.0'
+    ]
+
+
+def test_backend_healthy_metric_survives_a_short_snapshot(service_client):
+    """A collector that raises turns /metrics into a 500, i.e. the whole job reads as down."""
+    client, _, pool = service_client
+    pool.snapshots = lambda: [{"id": "b2"}]
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    assert 'splade_service_backend_healthy{backend="b2",url=""} 0.0' in response.text
+
+
+def test_backend_health_collector_unregisters_on_shutdown(monkeypatch):
+    """Two sequential app lifespans must not collide on the default registry."""
+    from prometheus_client import REGISTRY
+
+    main = importlib.import_module("main")
+    monkeypatch.setattr(main, "Config", StubConfig)
+    monkeypatch.setattr(main, "SparseCache", lambda *args: StubCache())
+    monkeypatch.setattr(main, "BackendPool", lambda *args: StubPool())
+
+    before = len(REGISTRY._collector_to_names)
+    for _ in range(2):
+        with TestClient(main.app):
+            pass
+    assert len(REGISTRY._collector_to_names) == before

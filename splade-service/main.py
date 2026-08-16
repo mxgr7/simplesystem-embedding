@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from prometheus_client import Counter, Gauge
+from prometheus_client import REGISTRY, Counter, Gauge
+from prometheus_client.core import GaugeMetricFamily
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from backend_pool import BackendPool
@@ -34,6 +35,48 @@ INFLIGHT = Gauge("splade_service_inflight", "Miss requests being processed")
 MAX_QUERY_CHARS = 4096
 
 
+class BackendHealthCollector:
+    """Exports `splade_service_backend_healthy`, one sample per registered backend.
+
+    A scrape-time collector rather than a Gauge written from the probe loop, for two reasons.
+    Backends come and go through /admin/backends, so the label set is dynamic and a Gauge would
+    keep exporting a stale child for a backend that has been removed. And a Gauge is only as
+    fresh as whatever writes it: if `_probe_loop` died, the last value would sit there looking
+    healthy forever, which is precisely the failure mode this metric exists to catch.
+
+    The counters already here cannot cover this. `splade_service_requests_total{status="504"}`
+    only rises when a client asks for something, so a backend that dies while the indexer is
+    idle is invisible until the next batch -- and with SPLADE_REQUIRED=true that batch does not
+    degrade, it retries and dead-letters. Shape matches the dense side's
+    `embedding_service_tei_backend_healthy` so both stacks alert the same way.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    def collect(self):
+        healthy = GaugeMetricFamily(
+            "splade_service_backend_healthy",
+            "1 if the backend passed its most recent verify probe, 0 otherwise",
+            labels=["backend", "url"],
+        )
+        draining = GaugeMetricFamily(
+            "splade_service_backend_draining",
+            "1 if the backend is draining (weight 0, finishing in-flight work)",
+            labels=["backend", "url"],
+        )
+        pool = getattr(self.app.state, "pool", None)
+        # `.get` on everything but the id: a KeyError in a collector makes /metrics return 500,
+        # which Prometheus reads as the whole job being down -- a false alarm that would mask
+        # the real ones. Degrading to a blank label is strictly better than that.
+        for snapshot in pool.snapshots() if pool is not None else []:
+            labels = [snapshot["id"], snapshot.get("url", "")]
+            healthy.add_metric(labels, float(snapshot.get("healthy", False)))
+            draining.add_metric(labels, float(snapshot.get("draining", False)))
+        yield healthy
+        yield draining
+
+
 @asynccontextmanager
 async def lifespan(app):
     config = Config()
@@ -50,9 +93,14 @@ async def lifespan(app):
     app.state.cache = cache
     app.state.pool = pool
     app.state.inflight = 0
+    # Registered here, not at import, so repeated app construction in tests does not collide on
+    # the default registry -- and unregistered on the way out for the same reason.
+    collector = BackendHealthCollector(app)
+    REGISTRY.register(collector)
     try:
         yield
     finally:
+        REGISTRY.unregister(collector)
         await pool.aclose()
         await cache.aclose()
 
