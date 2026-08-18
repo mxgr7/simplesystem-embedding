@@ -1,0 +1,46 @@
+# CPU development profile. Not servable in anger -- CE_ALLOW_CPU=1 exists so the
+# fp32 parity cell of the score-agreement check and the local smoke loop can run
+# without a GPU, and `scorer.resolve_device` refuses CPU without it precisely
+# because a 120-candidate window costs seconds there while every healthcheck
+# stays green.
+services:
+  ce-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: service-bundled
+    image: simplesystem-ce-service:dev
+    ports:
+      - "127.0.0.1:8139:8139"
+    environment:
+      CE_MODEL_DIR: /model
+      CE_DEVICE: cpu
+      CE_ALLOW_CPU: "1"
+      CE_DTYPE: fp32
+      CE_MAX_LEN: "192"
+      MAX_INPUTS_PER_REQUEST: "32"
+      MAX_INFLIGHT: "1"
+      # 0.654 ms/candidate is a T4 number; CPU is an order of magnitude slower,
+      # so the boot-time budget assertion has to be given room or the dev
+      # profile refuses to start for the right reason at the wrong time.
+      REQUEST_BUDGET_S: "60"
+      TORCH_NUM_THREADS: "4"
+      API_KEY: ${CE_API_KEY:-}
+    volumes:
+      # The INNER directory: ship_mxg84.sh nests the run name inside the dated
+      # release dir, and resolve_model_dir will tell you so if you get it wrong.
+      - ${CE_MODEL_DIR:-/checkpoints/cross-encoder/d_mxg84_new108t_mxg66_s68-2026-08-14/d_mxg84_new108t_mxg66_s68}:/model:ro
+    restart: unless-stopped
+    healthcheck:
+      # /readyz, not /healthz: /healthz is liveness only and would go green
+      # before the warmup forward has proved the model can actually run.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8139/readyz', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 30
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "3"
