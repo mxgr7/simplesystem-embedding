@@ -12,17 +12,22 @@
 # it. The "which box, and why" decision is that measurement's output, not this
 # file's premise.
 #
-# Sizing, from report/pipeline_v2/ce_latency_t4_v1.md (T4, sm_75, 4 pinned
-# cores, fp16, sdpa, pad-to-longest, 300 real 120-item windows):
+# Sizing, measured ON THIS BOX over 300 real windows whose article tokens were
+# read from the live index (report/pipeline_v2/mxg144_ce_service.md).
 #
-#     k |  p50 ms          fit: 0.654 ms/candidate + 0.3 ms fixed, R^2 >= .9976
-#    ---+--------          budget 150 ms  ->  k = 229
-#    64 |    42.6          window 120     ->  78.1 ms
-#   100 |    65.4          window 200     ->  131.1 ms
-#   120 |    78.1
-#   160 |   104.9          fp16 vs fp32: 4.1x, and quality-free (all nDCG@10
-#   200 |   131.4          deltas <= 0.0001, CIs spanning zero)
-#   240 |   157.0
+# ⚠️ Serving width is CE_MAX_LEN=128 since 2026-08-18, so the 0.654 ms/candidate
+# slope from ce_latency_t4_v1.md no longer applies -- that was width 192. At 128
+# the measured slope is 0.408 ms/candidate + ~2 ms fixed.
+#
+#   window |  p95 @192 |  p95 @128 |  @128 under SPLADE saturation (x1.5)
+#   -------+-----------+-----------+-------------------------------------
+#      120 |   80.4 ms |   52.9 ms |   79.4 ms
+#      200 |  134.0 ms |   85.7 ms |  128.5 ms   <- inside the 150 ms budget
+#      256 |  167.4 ms |  108.1 ms |  162.1 ms   <- outside; do not raise the cap
+#
+# Co-tenancy costs a flat ~1.5x across the whole distribution. At width 192 a
+# 200-deep window was 201 ms projected and did NOT fit; at 128 it does, which is
+# why the query service's max-window-size moved 120 -> 200 in the same change.
 services:
   ce-service-t4:
     build:
@@ -112,16 +117,34 @@ services:
       # refuses that explicitly. fp16 is also quality-free for this model: all
       # nDCG@10 deltas against fp32 are <= 0.0001 with CIs spanning zero.
       CE_DTYPE: fp16
-      # The serving profile the student was selected at (text_es / L192).
-      # max_len is a free serve-time dial per request -- quality is flat
-      # 128->256 -- so this is the CEILING, not the only value.
-      CE_MAX_LEN: "192"
+      # 128, not the 192 the student was selected at. This is the CEILING and the
+      # default; a request may still ask for less.
+      #
+      # Decided 2026-08-18 (Max) to buy back latency headroom, and it is a better
+      # lever than anything GPU scheduling could offer here -- see
+      # report/pipeline_v2/mxg144_ce_service.md §3a. Co-tenancy on this card is a
+      # flat ~1.5x across the whole latency distribution (fair SM time-slicing, not
+      # head-of-line blocking), and there is no way to take a bigger share: CUDA
+      # stream priority is intra-context, Turing has no MIG, and MPS caps rather
+      # than reserves. Perfect GPU isolation would have recovered 40 ms at window
+      # 120; dropping the width to 128 recovers 42.
+      #
+      #   max_len |  p50 |  p95   (k=120, measured on this box)
+      #       192 | 78.8 | 80.4
+      #       128 | 51.0 | 52.9   <- 0.65x, and what unlocks window 200
+      #
+      # Cost is near-linear in width because padded width is SATURATED on real
+      # windows: 46.8% of stored blobs exceed even the 192 budget, so almost every
+      # window pads to the ceiling. Quality price is 0.26 pp nDCG@10 against a
+      # ±0.4 pp seed spread (ce_distill_v2.md), i.e. inside noise.
+      CE_MAX_LEN: "128"
       # One forward at k <= 256, which is the shape 0.654 ms/candidate was
       # measured in. Above that it is a memory guard, not a batching strategy.
       CE_FORWARD_CHUNK: "256"
-      # 256, which is ~167 ms of GPU at the measured slope. The query service's
-      # max-window-size must be <= this and is set to 200 (~131 ms); the
-      # remaining headroom is deliberate.
+      # 256, which is ~105 ms of GPU at the slope measured for CE_MAX_LEN=128
+      # (0.408 ms/candidate + 2 ms fixed; it was 0.654 at width 192). The query
+      # service's max-window-size must be <= this and is 200 (~84 ms idle,
+      # ~128 ms under co-tenancy); the remaining headroom is deliberate.
       MAX_INPUTS_PER_REQUEST: "256"
       # NOT 32 (splade's value). 32 would queue ~2.5 s of latent work behind a
       # 150 ms budget. The caller degrades to upstream order on a 429 but WAITS
