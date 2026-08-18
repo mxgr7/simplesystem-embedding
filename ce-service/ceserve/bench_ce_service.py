@@ -17,7 +17,7 @@ Run it TWICE on a co-tenanted box — idle, and with splade under load. They are
 co-tenants on one card, Turing has no MIG, and the interaction has never been
 measured with a latency-sensitive consumer present.
 
-    python -m ceserve.bench_ce_service --url http://127.0.0.1:8139 \\
+    python -m ceserve.bench_ce_service --url http://127.0.0.1:8140 \\
         --windows ce_bench_windows.jsonl.gz --out bench_ce_service.json
 
 Dependencies: stdlib only. Deliberately — this runs on the serving box, and
@@ -144,7 +144,7 @@ def cell(url, windows, k, api_key, warmup, iters, budget_s, timeout, seed):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--url", default="http://127.0.0.1:8139")
+    parser.add_argument("--url", default="http://127.0.0.1:8140")
     parser.add_argument("--windows", default="ce_bench_windows.jsonl.gz")
     parser.add_argument("--out", default="bench_ce_service.json")
     parser.add_argument("--api-key", default="")

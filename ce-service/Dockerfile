@@ -21,11 +21,11 @@ RUN uv pip install --system --no-cache \
       "prometheus-fastapi-instrumentator>=7,<8"
 ENV PYTHONPATH=/runtime
 COPY . /app
-EXPOSE 8139
+EXPOSE 8140
 # --limit-concurrency is a second, cruder bound than MAX_INFLIGHT: it caps the
 # ASGI server's own queue so a burst is refused at the socket rather than
 # accumulating handlers waiting on a GPU that can only run one forward.
-CMD ["uvicorn", "ceserve.app:app", "--host", "0.0.0.0", "--port", "8139", \
+CMD ["uvicorn", "ceserve.app:app", "--host", "0.0.0.0", "--port", "8140", \
      "--limit-concurrency", "16", "--no-access-log"]
 
 # Self-contained CPU image: CI, local development, and the fp32 parity cell of
@@ -57,6 +57,6 @@ RUN uv pip install --system --no-cache \
       "prometheus-client==0.24.1" \
       "prometheus-fastapi-instrumentator==7.1.0"
 COPY . /app
-EXPOSE 8139
-CMD ["uvicorn", "ceserve.app:app", "--host", "0.0.0.0", "--port", "8139", \
+EXPOSE 8140
+CMD ["uvicorn", "ceserve.app:app", "--host", "0.0.0.0", "--port", "8140", \
      "--limit-concurrency", "16", "--no-access-log"]

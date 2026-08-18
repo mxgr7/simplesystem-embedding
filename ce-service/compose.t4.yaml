@@ -51,11 +51,38 @@ services:
       # indexer dependency. 6.5 GB of 802 is the right price for independence.
       target: service
     image: simplesystem-ce-service:d_mxg84_new108t_mxg66_s68-fp16-t4-v1
-    # Loopback only, and deliberately so while this is dark. :8139 is free here
-    # (8080/8081 TEI, 8137/8138 SPLADE, 9000 dense, 6666 kvrocks, 9090 prom,
-    # 9093 alertmanager, 9114/9121/9400 exporters, 3000 grafana).
+    # Loopback only, and deliberately so while this is dark.
+    #
+    # ⚠️ 8140, NOT 8139. 8139 looks free from the compose side and is not:
+    # `mxg121-splade-auth` is an nginx running with host networking and binds
+    # 127.0.0.1:8139, so it does not appear in `docker port` output for any
+    # container. Worse, Docker accepted the `127.0.0.1:8139:8139` mapping and
+    # started the container ANYWAY -- `docker inspect` showed the binding in
+    # HostConfig.PortBindings and an EMPTY NetworkSettings.Ports, with a healthy
+    # container (the healthcheck runs on the CONTAINER's loopback) answering
+    # nothing on the host. A curl to :8139 got splade-auth's /metadata, which is
+    # a well-formed JSON document describing a completely different model.
+    # Check with `ss -lntp`, never with `docker port`.
+    #
+    # Taken on this box: 8080/8081 TEI, 8137 SPLADE frontend, 8138 SPLADE
+    # backend, 8139 splade-auth nginx, 9000/9001 dense, 6666 + 8000 kvrocks,
+    # 9090 prom, 9093 alertmanager, 9100/9114/9121/9145/9150/9400 exporters,
+    # 3000 grafana, 20241 (local).
     ports:
-      - "127.0.0.1:8139:8139"
+      - "127.0.0.1:8140:8140"
+      # ...and the default-bridge gateway, so Prometheus can scrape it. Prometheus
+      # runs on a bridge network and reaches the host as `host.docker.internal`,
+      # which resolves to 172.17.0.1 — a loopback-only publish is invisible to it
+      # (`dial tcp 172.17.0.1:8140: connect: connection refused`). splade-service
+      # does not hit this because it uses host networking and binds 0.0.0.0:8137;
+      # this keeps the CE off every external interface instead, which is the point
+      # while it is dark.
+      #
+      # ⚠️ If the daemon's default bridge ever moves off 172.17/16 this line stops
+      # binding and the scrape goes dark — but self-detecting: CeServiceAbsent
+      # fires within 5m. (Bridge subnets do move here: a 172.19/16 bridge once
+      # collided with an Atlas PrivateLink route.)
+      - "172.17.0.1:8140:8140"
     environment:
       # The INNER directory. ship_mxg84.sh nests the run name inside the dated
       # release dir; pointing at the outer one used to raise a tokenizer backend
@@ -149,7 +176,7 @@ services:
       # /readyz and /embed green while /encode-packed 500'd, because nothing
       # exercised the path that was broken. /readyz here is gated on the warmup
       # forward having actually run.
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8139/readyz', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8140/readyz', timeout=5)"]
       interval: 10s
       timeout: 6s
       retries: 30

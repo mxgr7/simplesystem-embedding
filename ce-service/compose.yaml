@@ -11,7 +11,7 @@ services:
       target: service-bundled
     image: simplesystem-ce-service:dev
     ports:
-      - "127.0.0.1:8139:8139"
+      - "127.0.0.1:8140:8140"
     environment:
       CE_MODEL_DIR: /model
       CE_DEVICE: cpu
@@ -34,7 +34,7 @@ services:
     healthcheck:
       # /readyz, not /healthz: /healthz is liveness only and would go green
       # before the warmup forward has proved the model can actually run.
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8139/readyz', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8140/readyz', timeout=5)"]
       interval: 10s
       timeout: 6s
       retries: 30

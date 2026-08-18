@@ -172,6 +172,106 @@ groups:
           description: "The frontend cannot get a vector out of its backend within REQUEST_BUDGET_S (120s). Every one of these is an indexer batch heading for retry."
           action: "Check GPU contention first (DCGM_FI_DEV_GPU_UTIL), then the backend's own logs."
 
+      # --- MXG-144: the cross-encoder fine ranker -----------------------------------------
+      # The first query-path tenant on this GPU. Everything below is scoped by what a search
+      # request actually experiences, not by what the process reports about itself.
+      - alert: CeServiceNotReady
+        # ce_service_ready is a SCRAPE-TIME collector, not a gauge written by a loop: a gauge
+        # whose writer has died reports healthy forever, which is the failure this exists to
+        # catch. It only goes 1 after the warmup FORWARD ran -- splade kept /health, /readyz and
+        # /embed green while /encode-packed 500'd because nothing exercised the broken path.
+        expr: ce_service_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ce-service on :8140 is not ready"
+          description: "The fine ranker is unavailable. Search still answers -- the query service degrades to upstream order -- but the SERP is the unreranked control ranking."
+          action: "curl -s localhost:8140/readyz; docker logs --tail 50 src-ce-service-t4-1"
+
+      - alert: CeServiceAbsent
+        # Only the absent case; a loaded-but-degraded process is CeServiceNotReady above, and
+        # paging twice for one event is how a board stops being read.
+        expr: absent(ce_service_ready)
+        for: 5m
+        labels:
+          severity: critical
+          job: ce-service
+          category: blind
+        annotations:
+          summary: "ce-service is not exposing metrics at all"
+          description: "The process is gone, or :8140 is not serving /metrics. Note 8139 is splade-auth's nginx, not this."
+          action: "docker compose -f /data/ce-service/src/compose.t4.yaml ps; ss -lntp | grep 814"
+
+      - alert: CeServiceDegraded
+        # Set by an inference exception. A CUDA OOM or an illegal memory access poisons the
+        # context, and a process that keeps answering afterwards serves garbage, so the service
+        # marks itself degraded and stops accepting work rather than continuing.
+        expr: ce_service_degraded == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ce-service marked itself degraded after an inference failure"
+          description: "A forward raised; the CUDA context is presumed poisoned. It will 503 until restarted."
+          action: "docker logs --tail 100 src-ce-service-t4-1 | grep -A20 'inference failed'; then restart it."
+
+      - alert: CeFineRankerBudgetBreached
+        # The 150 ms fine-ranker budget, at the window the query service actually sends.
+        # Cross-check against ce_service_padded_width and ce_service_candidates_per_request
+        # before blaming the GPU: a window that grew, or a padded width that drifted from 154 to
+        # 192, explains a latency rise that no GPU metric shows.
+        expr: histogram_quantile(0.95, sum(rate(ce_service_request_seconds_bucket[5m])) by (le)) > 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ce-service p95 is {{ $value | printf \"%.3f\" }}s, over the 150 ms budget"
+          description: "Measured on this box: co-tenancy with a saturated SPLADE costs the CE ~1.5x (p95 80.6 -> 119.8 ms at window 120). A breach usually means a bulk encode is running, not that the model got slower."
+          action: "Check DCGM_FI_DEV_GPU_UTIL and the splade job's rate first; then ce_service_candidates_per_request."
+
+      - alert: CeServiceAtCapacity
+        # MAX_INFLIGHT is 2 on purpose -- a fast 429 beats a queue, because the caller degrades
+        # to upstream order on a refusal but WAITS on a queue. Sustained 429s mean the search
+        # rate has outgrown one T4's share of the card.
+        expr: rate(ce_service_requests_total{status="429"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ce-service is shedding requests at its concurrency limit"
+          description: "Every one of these is a search served in upstream order. Sustained, it is the signal to move the CE off this shared card."
+          action: "Compare the search rate against ~1,530 pairs/s (12.7 windows of 120 per second) idle, less under co-tenancy."
+
+      - alert: CeTokenizerVersionSkew
+        # Candidates whose stored ceTokenizerVersion is not the deployed one. THE ROLLOUT ALARM:
+        # it means a tokenizer bump landed without a completed backfill, or the query service's
+        # SEARCH_RERANK_CE_EXPECTED_TOKENIZER_VERSION is stale. Those candidates are demoted, not
+        # mis-scored -- but at a high enough rate the missing-content guard trips and reranking
+        # silently stops happening.
+        expr: |
+          rate(ce_service_candidates_total{outcome="skipped_version"}[15m])
+            / clamp_min(sum(rate(ce_service_candidates_total[15m])), 0.001) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | printf \"%.1%\" }} of CE candidates carry a stale ceTokenizerVersion"
+          description: "Steady state is 0: all 115,485,224 offer-bearing articles are stamped ce_dist_l12_v3-2026-07-18-fkr108."
+          action: "Compare CE_TOKENIZER_VERSION on ce-service against the indexer's, then check the backfill's progress."
+
+      - alert: CeDecodeFailures
+        # A stored blob that will not decode. Distinct from a version skew: that is a rollout,
+        # this is corruption.
+        expr: rate(ce_service_candidates_total{outcome="skipped_decode"}[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ce-service cannot decode some stored ceTokenIds blobs"
+          description: "Either a truncated _source (ceTokenCount disagreeing with the blob length) or a wire-format change."
+          action: "docker logs src-ce-service-t4-1 | grep decode_failed; then sample the article's _source directly."
+
       - alert: TeiBackendUnhealthy
         expr: embedding_service_tei_backend_healthy == 0
         for: 5m

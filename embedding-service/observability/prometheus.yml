@@ -89,6 +89,23 @@ scrape_configs:
         labels:
           stack: splade-service
 
+  # MXG-144: the cross-encoder fine ranker, a THIRD tenant on this T4 — and the
+  # first one that is latency-critical and on the query path. Its own job for
+  # the same attribution reason splade got one, and doubly so here: measured on
+  # this box, saturating either tenant costs the other ~35-50%
+  # (report/pipeline_v2/mxg144_ce_service.md), so a latency regression on one
+  # side is only diagnosable if the other side's rate is visible next to it.
+  #
+  # :8140, NOT :8139 — mxg121-splade-auth's nginx holds 8139 on the host
+  # loopback with host networking, so it shows up in `ss -lntp` and in nothing
+  # `docker port` prints.
+  - job_name: ce-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8140"]
+        labels:
+          stack: ce-service
+
   # redis_exporter is on the same bridge network as Prometheus — addressable
   # by service name. It pulls KVRocks's INFO/keyspace/command stats over
   # the Redis protocol on port 6666.
