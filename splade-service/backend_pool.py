@@ -657,7 +657,10 @@ class BackendPool:
         """
         message = "no healthy SPLADE backend available"
         if last_error is not None:
-            message = f"{message}: {last_error}"
+            # httpx's timeout exceptions stringify to "", so name the type: the
+            # drill log read "available: " and said nothing at all.
+            detail = str(last_error) or type(last_error).__name__
+            message = f"{message}: {detail}"
         error = NoHealthyBackendError(message)
         error.__cause__ = last_error
         return error

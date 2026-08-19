@@ -14,6 +14,14 @@ class Config:
             if value.strip()
         ]
         self.backend_api_key = os.environ.get("BACKEND_API_KEY", "")
+        # Per-request timeout to a backend. Must be well under REQUEST_BUDGET_S
+        # or the retry loop cannot run: BackendPool.add's default was 120, equal
+        # to the budget, so a frozen backend held the caller for the entire
+        # budget on ONE attempt and no failover or half-open trial was ever
+        # reached. Measured 2026-08-19 by pausing the backend: requests hung
+        # until the frontend gave up, rather than failing over. 30s is ~85x the
+        # slowest legitimate chunk (64 docs at 274 docs/s under co-tenancy).
+        self.backend_timeout_s = float(os.environ.get("BACKEND_TIMEOUT_S", "30"))
         self.api_key = os.environ.get("API_KEY", "")
         self.admin_api_key = os.environ.get("ADMIN_API_KEY", "")
         self.max_inputs = int(os.environ.get("MAX_INPUTS_PER_REQUEST", "256"))

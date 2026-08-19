@@ -275,10 +275,27 @@ def test_startup_registers_backends_with_the_configured_batch_and_concurrency(
         {
             "max_concurrency": 3,
             "max_client_batch": 64,
+            "timeout_s": 30.0,
             "api_key": "",
             "require_verify": False,
         }
     ]
+
+
+def test_backend_timeout_leaves_room_inside_the_request_budget(monkeypatch):
+    """One attempt must not be able to consume the whole budget.
+
+    `BackendPool.add`'s default timeout_s was 120, exactly REQUEST_BUDGET_S, so a
+    frozen backend held the caller for the full budget on a single attempt and
+    neither failover nor a half-open trial was ever reached. Measured on the box
+    by pausing the backend: requests hung until the frontend gave up.
+    """
+    config = config_module.Config()
+    assert config.backend_timeout_s == 30.0
+    assert config.backend_timeout_s < config.request_budget_s / 2
+
+    monkeypatch.setenv("BACKEND_TIMEOUT_S", "5")
+    assert config_module.Config().backend_timeout_s == 5.0
 
 
 def test_config_reads_pool_shape_from_the_environment(monkeypatch):

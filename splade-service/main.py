@@ -167,6 +167,7 @@ async def lifespan(app):
             url,
             max_concurrency=config.backend_pool_concurrency,
             max_client_batch=config.backend_max_client_batch,
+            timeout_s=config.backend_timeout_s,
             api_key=config.backend_api_key,
             require_verify=False,
         )

@@ -62,6 +62,7 @@ unhandled 500, and is counted as `splade_service_requests_total{status="503"}`.
 
 | var | default | |
 | --- | --- | --- |
+| `BACKEND_TIMEOUT_S` | 30 | per-request timeout to a backend; must stay well under `REQUEST_BUDGET_S` or one attempt eats the whole budget |
 | `BACKEND_PROBE_INTERVAL_S` | 5 | probe cadence |
 | `BACKEND_PROBE_TIMEOUT_S` | 2 | httpx timeout on one `/metadata` probe |
 | `BACKEND_PROBE_ROUND_TIMEOUT_S` | 10 | hard bound outside httpx; silence is a failure |
