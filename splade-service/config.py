@@ -28,3 +28,16 @@ class Config:
         self.probe_interval_s = float(
             os.environ.get("BACKEND_PROBE_INTERVAL_S", "5")
         )
+        # How BACKEND_URLS are registered at startup. These exist because the
+        # BackendPool.add defaults (8 / 1) are the wrong shape for a real client and
+        # were only ever corrected at runtime through POST /admin/backends, which a
+        # restart silently reverts. BackendPool.encode chunks by the min
+        # max_client_batch across non-draining backends, so a batch of 8 splits a
+        # 128-input indexer request into 16 chunks serialized behind a semaphore of
+        # 1, which pegs inflight at MAX_INFLIGHT and sheds the surplus as 429.
+        self.backend_max_client_batch = int(
+            os.environ.get("BACKEND_MAX_CLIENT_BATCH", "64")
+        )
+        self.backend_pool_concurrency = int(
+            os.environ.get("BACKEND_POOL_CONCURRENCY", "3")
+        )

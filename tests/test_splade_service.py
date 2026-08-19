@@ -137,6 +137,8 @@ class StubConfig:
     cache_read_timeout_s = 0.1
     cache_connections = 4
     probe_interval_s = 5
+    backend_max_client_batch = 64
+    backend_pool_concurrency = 3
 
 
 class StubCache:
@@ -160,8 +162,10 @@ class StubPool:
     def __init__(self, *args):
         self.calls = 0
         self.healthy = True
+        self.added = []
 
     async def add(self, *args, **kwargs):
+        self.added.append((args, kwargs))
         return {"id": "b1"}
 
     def start(self):
@@ -232,6 +236,38 @@ def test_readyz_checks_cache_and_backend(service_client):
     response = client.get("/readyz")
     assert response.status_code == 200
     assert response.json()["ready"] is True
+
+
+def test_startup_registers_backends_with_the_configured_batch_and_concurrency(
+    service_client,
+):
+    """A restart must not quietly undo the pool's tuning.
+
+    BackendPool.add's defaults (max_client_batch 8, max_concurrency 1) are a fallback,
+    not an operating point: encode() chunks by the min max_client_batch across
+    non-draining backends, so 8 splits a 128-input indexer batch into 16 chunks
+    serialized behind one semaphore. On the T4 that measured ~13 s per request with
+    inflight pinned at MAX_INFLIGHT and ~40% of requests shed as 429. Correcting it
+    through POST /admin/backends works but dies with the process, so startup has to
+    carry it.
+    """
+    _, _, pool = service_client
+    assert [kwargs for _, kwargs in pool.added] == [
+        {"max_concurrency": 3, "max_client_batch": 64, "api_key": ""}
+    ]
+
+
+def test_config_reads_pool_shape_from_the_environment(monkeypatch):
+    config_module = importlib.import_module("config")
+    monkeypatch.setenv("BACKEND_MAX_CLIENT_BATCH", "16")
+    monkeypatch.setenv("BACKEND_POOL_CONCURRENCY", "2")
+    tuned = config_module.Config()
+    assert (tuned.backend_max_client_batch, tuned.backend_pool_concurrency) == (16, 2)
+
+    monkeypatch.delenv("BACKEND_MAX_CLIENT_BATCH")
+    monkeypatch.delenv("BACKEND_POOL_CONCURRENCY")
+    default = config_module.Config()
+    assert (default.backend_max_client_batch, default.backend_pool_concurrency) == (64, 3)
 
 
 def test_admin_lists_backends(service_client):

@@ -164,9 +164,18 @@ services:
       SPLADE_ENCODING_VERSION: prod-soup-top256-fp16-fp16codec-wcast-v2
       MAX_INPUTS_PER_REQUEST: "256"
       MAX_INFLIGHT: "32"
+      # 64 is the card's best batch (MXG-111: 8 -> 219.7 docs/s, 64 -> 273.9) and
+      # the pool chunks by the min across non-draining backends, so leaving this at
+      # the add() default of 8 cut every 128-input indexer batch into 16 serialized
+      # chunks: ~13 s per request, inflight pinned at MAX_INFLIGHT, ~40% of requests
+      # answered 429. Concurrency 3 keeps the backend's own semaphore (1) fed.
+      BACKEND_MAX_CLIENT_BATCH: "64"
+      BACKEND_POOL_CONCURRENCY: "3"
       # The indexer sends batches of SPLADE_MAX_BATCH_SIZE (128). At 274 docs/s a
       # 128-doc batch is ~0.5 s, so 120 s is ~240x headroom -- generous on purpose,
       # because SPLADE_REQUIRED=true turns a timeout into a stalled indexer.
+      # NOTE: that ~0.5 s assumes the batch reaches the card whole, which is exactly
+      # what BACKEND_MAX_CLIENT_BATCH above buys.
       REQUEST_BUDGET_S: "120"
       KVROCKS_READ_TIMEOUT_MS: "100"
       API_KEY: ${SPLADE_API_KEY:?set SPLADE_API_KEY}

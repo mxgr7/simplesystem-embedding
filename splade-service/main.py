@@ -87,7 +87,12 @@ async def lifespan(app):
     )
     pool = BackendPool(config.probe_interval_s)
     for url in config.backend_urls:
-        await pool.add(url, api_key=config.backend_api_key)
+        await pool.add(
+            url,
+            max_concurrency=config.backend_pool_concurrency,
+            max_client_batch=config.backend_max_client_batch,
+            api_key=config.backend_api_key,
+        )
     pool.start()
     app.state.config = config
     app.state.cache = cache
