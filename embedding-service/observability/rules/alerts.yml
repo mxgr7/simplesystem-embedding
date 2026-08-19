@@ -159,7 +159,7 @@ groups:
           category: blind
         annotations:
           summary: "SPLADE service reports no backends at all"
-          description: "The pool is empty, or the frontend on :8137 is not serving /metrics. /embed will 504."
+          description: "The pool is empty, or the frontend on :8137 is not serving /metrics. /embed answers 503."
           action: "curl -s localhost:8137/admin/backends; docker compose -f splade-service/compose.t4.yaml ps"
 
       - alert: SpladeAtCapacity
@@ -189,6 +189,64 @@ groups:
           summary: "SPLADE /embed is returning 504s"
           description: "The frontend cannot get a vector out of its backend within REQUEST_BUDGET_S (120s). Every one of these is an indexer batch heading for retry."
           action: "Check GPU contention first (DCGM_FI_DEV_GPU_UTIL), then the backend's own logs."
+
+      # --- MXG-166: the sparse pool's own recovery loop -----------------------------------
+      - alert: SpladeProbeLoopStalled
+        # splade_service_backend_healthy is written only BY the probe loop, so a loop that dies
+        # leaves it frozen at its last value and the outage looks like steady state. The gauge is
+        # a scrape-time collector here, which does not help: it faithfully re-exports the stale
+        # boolean. This is the one signal a frozen loop cannot fake. MXG-159 is the same failure
+        # on the dense side, where it cost four hours across a restart of the backend itself.
+        expr: time() - splade_service_probe_loop_last_iteration_timestamp > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SPLADE probe loop has not run for {{ $value | humanizeDuration }}"
+          description: "Nothing is re-probing the SPLADE backends, so an unhealthy backend can no longer recover on its own. The semantic query arm and the indexer both depend on it."
+          action: "docker logs --tail 100 splade-service-splade-service-t4-1 | grep -i probe; docker restart splade-service-splade-service-t4-1"
+
+      - alert: SpladeProbeLoopMetricMissing
+        # The threshold rule above cannot fire on a loop that never published anything, and an
+        # exporter answering 200 with no series reads as green -- the same blind spot every
+        # backend-facing job here gets an absent() twin for.
+        expr: absent(splade_service_probe_loop_last_iteration_timestamp)
+        for: 5m
+        labels:
+          severity: critical
+          job: splade-service
+          category: blind
+        annotations:
+          summary: "SPLADE probe-loop liveness metric is absent"
+          description: "The frontend on :8137 is not publishing its probe-loop stamp, so SpladeProbeLoopStalled cannot fire either way."
+          action: "curl -s localhost:8137/metrics | grep splade_service_probe_loop"
+
+      - alert: SpladeClientRecycling
+        # Recycling means the backend answers but our HTTP client to it is wedged. Self-healing,
+        # so warning not critical, but repeated recycles say the underlying cancellation/pool
+        # problem is back. REQUEST_BUDGET_S is 120 here against the dense side's 5, which makes
+        # the cancellations that poison a pool rarer, not impossible.
+        expr: changes(splade_service_backend_client_generation[30m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "splade-service is repeatedly recycling its client for backend {{ $labels.backend }}"
+          description: "{{ $value }} client recycles in 30m: the connection pool keeps wedging even though the backend is reachable."
+          action: "docker logs --tail 200 splade-service-splade-service-t4-1 | grep -i recycl"
+
+      - alert: SpladeNoHealthyBackendServed
+        # The 503 MXG-166 introduced. It used to be an unhandled 500: uncounted by
+        # splade_service_requests_total and invisible to every alert built on it, so a total
+        # outage of the encoder showed up nowhere until someone read the tracebacks.
+        expr: rate(splade_service_requests_total{status="503"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "splade-service is rejecting requests with no healthy backend"
+          description: "Every one of these is a query served without its semantic arm, or an indexer batch heading for retry."
+          action: "curl -s localhost:8137/admin/backends | python3 -m json.tool"
 
       # --- MXG-144: the cross-encoder fine ranker -----------------------------------------
       # The first query-path tenant on this GPU. Everything below is scoped by what a search
