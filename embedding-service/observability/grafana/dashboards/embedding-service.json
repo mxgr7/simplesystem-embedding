@@ -2,7 +2,7 @@
   "title": "Embedding Service",
   "uid": "embedding-service",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "30s",
   "time": {"from": "now-1h", "to": "now"},
@@ -50,9 +50,77 @@
 
     {
       "type": "row",
+      "id": 150,
+      "title": "Backend health + recovery",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 70,
+      "title": "TEI backend healthy",
+      "description": "1 = selectable. Two consecutive failures take a backend out of the pool. It comes back on its own three ways: the probe loop, a half-open trial request, or a client recycle. A drop that does not come back within a minute or two is a bug, not backpressure.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 6},
+      "targets": [
+        {"expr": "embedding_service_tei_backend_healthy", "legendFormat": "{{backend}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 71,
+      "title": "Probe loop age",
+      "description": "Seconds since the last completed probe round; normally under 10. This panel exists because the health gauge to its left is written BY the probe loop, so a loop that dies freezes the gauge at its last value and an outage reads as steady state. That is what hid the 2026-08-18 outage for four hours. Alert fires above 60s.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 6},
+      "targets": [
+        {"expr": "time() - embedding_service_tei_probe_loop_last_iteration_timestamp", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}, {"color": "red", "value": 60}]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 72,
+      "title": "Client recycles",
+      "description": "How many times the HTTP client for this backend has been replaced. A connection pool can wedge independently of the backend (cancelled requests hold slots that never free), and then only a fresh client recovers it. Steps here are the service healing itself; repeated steps mean the underlying cause is back.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 6},
+      "targets": [
+        {"expr": "embedding_service_tei_backend_client_generation", "legendFormat": "{{backend}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter"}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
       "id": 200,
       "title": "/embed traffic + latency",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
       "collapsed": false,
       "panels": []
     },
@@ -62,7 +130,7 @@
       "title": "Request rate by status",
       "description": "Per-second request rate from the app-level counter, broken out by HTTP status.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
       "targets": [
         {"expr": "sum by (status) (rate(embedding_service_requests_total[1m]))", "legendFormat": "{{status}}", "refId": "A"}
       ],
@@ -74,7 +142,7 @@
       "title": "/embed latency (p50 / p95 / p99)",
       "description": "End-to-end latency on the /embed handler, derived from the FastAPI instrumentator's request-duration histogram.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
       "targets": [
         {"expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{handler=\"/embed\"}[5m])))", "legendFormat": "p50", "refId": "A"},
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{handler=\"/embed\"}[5m])))", "legendFormat": "p95", "refId": "B"},
@@ -87,7 +155,7 @@
       "type": "row",
       "id": 300,
       "title": "Backpressure + batch shape",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23},
       "collapsed": false,
       "panels": []
     },
@@ -97,7 +165,7 @@
       "title": "Inflight requests",
       "description": "Concurrent /embed requests after the MGET gate. Approaches MAX_INFLIGHT (default 128) → 429 path activates.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 15},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
       "targets": [{"expr": "embedding_service_inflight", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
     },
@@ -107,7 +175,7 @@
       "title": "Batch size (inputs per request)",
       "description": "Distribution of N = len(inputs) per request. Buckets aligned with the TEI client batch (8) and the request cap (256).",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 15},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
       "targets": [
         {"expr": "sum by (le) (rate(embedding_service_inputs_per_request_bucket[1m]))", "refId": "A", "format": "heatmap", "legendFormat": "{{le}}"}
       ],
@@ -120,7 +188,7 @@
       "title": "Cache hit ratio (EWMA)",
       "description": "Service-side EWMA of (hits / total) per request.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 23},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
       "targets": [{"expr": "embedding_service_cache_hit_ratio", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []}
     },
@@ -130,7 +198,7 @@
       "title": "TEI semaphore wait (per chunk)",
       "description": "Time chunks spend waiting for a TEI concurrency slot. Rising = TEI saturating.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 23},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
       "targets": [
         {"expr": "sum by (le) (rate(embedding_service_tei_semaphore_wait_seconds_bucket[1m]))", "refId": "A", "format": "heatmap", "legendFormat": "{{le}}"}
       ],
@@ -142,7 +210,7 @@
       "type": "row",
       "id": 400,
       "title": "KVRocks (via redis_exporter)",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 31},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 40},
       "collapsed": false,
       "panels": []
     },
@@ -152,7 +220,7 @@
       "title": "Command rate",
       "description": "Per-second Redis-protocol command rate against KVRocks. Aggregate only — KVRocks's cmdstat_* lines omit trailing fields (rejected_calls / failed_calls) that redis_exporter expects for per-command breakdown, so we use redis_commands_processed_total.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 41},
       "targets": [{"expr": "rate(redis_commands_processed_total[1m])", "legendFormat": "commands/s", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps"}, "overrides": []}
     },
@@ -162,7 +230,7 @@
       "title": "Process memory (RSS)",
       "description": "KVRocks process RSS — the in-memory working set serving SST reads. The 49 GB disk-backed cache is *not* this number; it's used_db_size in INFO keyspace.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 41},
       "targets": [{"expr": "redis_memory_used_rss_bytes", "legendFormat": "RSS", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}
     },
@@ -172,7 +240,7 @@
       "title": "Keyspace size",
       "description": "Number of keys in db0 — total cached embeddings.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 49},
       "targets": [{"expr": "redis_db_keys", "legendFormat": "{{db}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
     },
@@ -182,7 +250,7 @@
       "title": "TEI request count",
       "description": "Per-second TEI request rate from TEI's own /metrics. Should be << embedding-service request rate when cache hits dominate. Pinned to the local TEI; remote TEI has its own section.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 49},
       "targets": [{"expr": "rate(te_request_count{job=\"tei\"}[1m])", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
     },
@@ -191,7 +259,7 @@
       "type": "row",
       "id": 500,
       "title": "GPU (via DCGM exporter)",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 48},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 57},
       "collapsed": false,
       "panels": []
     },
@@ -201,7 +269,7 @@
       "title": "GPU utilization",
       "description": "Percent of time the GPU was doing useful work during the last sample window.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 49},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 58},
       "targets": [{"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "GPU {{gpu}} ({{modelName}})", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []}
     },
@@ -211,7 +279,7 @@
       "title": "GPU memory (stacked = total VRAM)",
       "description": "Stacked used + free = total VRAM. Stack height shows board capacity; the lower band is what's actively held by TEI + driver.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 49},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 58},
       "targets": [
         {"expr": "DCGM_FI_DEV_FB_USED * 1024 * 1024", "legendFormat": "used (GPU {{gpu}})", "refId": "A"},
         {"expr": "DCGM_FI_DEV_FB_FREE * 1024 * 1024", "legendFormat": "free (GPU {{gpu}})", "refId": "B"}
@@ -223,7 +291,7 @@
       "id": 42,
       "title": "GPU temperature",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 57},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 66},
       "targets": [{"expr": "DCGM_FI_DEV_GPU_TEMP", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "celsius"}, "overrides": []}
     },
@@ -233,7 +301,7 @@
       "title": "GPU power",
       "description": "Instantaneous power draw. T4 TDP is 70 W.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 57},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 66},
       "targets": [{"expr": "DCGM_FI_DEV_POWER_USAGE", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "watt"}, "overrides": []}
     },
@@ -243,7 +311,7 @@
       "title": "GPU SM clock",
       "description": "Streaming Multiprocessor clock frequency. Drops indicate thermal/power throttling.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 57},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 66},
       "targets": [{"expr": "DCGM_FI_DEV_SM_CLOCK", "legendFormat": "GPU {{gpu}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "rotmhz"}, "overrides": []}
     },
@@ -252,7 +320,7 @@
       "type": "row",
       "id": 600,
       "title": "Host system (via node_exporter)",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 65},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 74},
       "collapsed": false,
       "panels": []
     },
@@ -262,7 +330,7 @@
       "title": "CPU usage by mode",
       "description": "Fraction of total CPU time per mode (user, system, iowait, idle, etc.). Sum across all cores.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 66},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 75},
       "targets": [
         {"expr": "sum by (mode) (rate(node_cpu_seconds_total{mode!=\"idle\"}[1m])) / scalar(count(count by (cpu) (node_cpu_seconds_total)))", "legendFormat": "{{mode}}", "refId": "A"}
       ],
@@ -274,7 +342,7 @@
       "title": "Memory (stacked = total RAM)",
       "description": "Stacked used + buffers + cached + free = MemTotal. Stack height shows host RAM; the bottom band is non-reclaimable in-use memory. Cached/buffers are reclaimable on pressure.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 66},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 75},
       "targets": [
         {"expr": "node_memory_MemTotal_bytes - node_memory_MemFree_bytes - node_memory_Buffers_bytes - node_memory_Cached_bytes", "legendFormat": "used", "refId": "A"},
         {"expr": "node_memory_Buffers_bytes", "legendFormat": "buffers", "refId": "B"},
@@ -289,7 +357,7 @@
       "title": "Disk I/O bytes/s (reads ↑, writes ↓)",
       "description": "Per-device read/write throughput on a mirrored axis: reads positive, writes negative. KVRocks compaction shows up on /mnt/nvme.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 74},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 83},
       "targets": [
         {"expr": "rate(node_disk_read_bytes_total[1m])", "legendFormat": "{{device}} read", "refId": "A"},
         {"expr": "-rate(node_disk_written_bytes_total[1m])", "legendFormat": "{{device}} write", "refId": "B"}
@@ -302,7 +370,7 @@
       "title": "Filesystem usage (% of capacity)",
       "description": "Per-mount used as a fraction of that filesystem's total capacity. KVRocks lives on /mnt/nvme (see fstype label).",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 74},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 83},
       "targets": [
         {"expr": "100 * (node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\"} - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs\"}) / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs\"}", "legendFormat": "{{mountpoint}}", "refId": "A"}
       ],
@@ -314,7 +382,7 @@
       "title": "Network throughput (rx ↑, tx ↓)",
       "description": "Per-interface throughput on a mirrored axis: receive positive, transmit negative. Loopback / docker / veth interfaces excluded.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 82},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
       "targets": [
         {"expr": "rate(node_network_receive_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m])", "legendFormat": "{{device}} rx", "refId": "A"},
         {"expr": "-rate(node_network_transmit_bytes_total{device!~\"lo|docker.*|veth.*|br-.*\"}[1m])", "legendFormat": "{{device}} tx", "refId": "B"}
@@ -327,7 +395,7 @@
       "title": "Load average",
       "description": "1 / 5 / 15-minute load averages. Plotted against the CPU-core count (a healthy box stays well below 1.0 × cores).",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 82},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
       "targets": [
         {"expr": "node_load1", "legendFormat": "1m", "refId": "A"},
         {"expr": "node_load5", "legendFormat": "5m", "refId": "B"},
@@ -341,7 +409,7 @@
       "type": "row",
       "id": 600,
       "title": "Remote TEI (88.207.86.141:41661)",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 90},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 99},
       "collapsed": false,
       "panels": []
     },
@@ -351,7 +419,7 @@
       "title": "Request rate by method",
       "description": "Per-second request rate from the remote TEI's own /metrics, split by client batch vs single endpoint.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 100},
       "targets": [
         {"expr": "sum by (method) (rate(te_request_count{job=\"tei_remote\"}[1m]))", "legendFormat": "{{method}}", "refId": "A"}
       ],
@@ -363,7 +431,7 @@
       "title": "Inference latency (p50 / p95 / p99)",
       "description": "GPU-side inference time from te_request_inference_duration. Excludes tokenization and queue wait.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 100},
       "targets": [
         {"expr": "histogram_quantile(0.50, sum by (le) (rate(te_request_inference_duration_bucket{job=\"tei_remote\"}[1m])))", "legendFormat": "p50", "refId": "A"},
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(te_request_inference_duration_bucket{job=\"tei_remote\"}[1m])))", "legendFormat": "p95", "refId": "B"},
@@ -377,7 +445,7 @@
       "title": "Queue depth",
       "description": "te_queue_size — requests waiting for a batch slot. Sustained >0 means the remote TEI is saturating.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 99},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 108},
       "targets": [{"expr": "te_queue_size{job=\"tei_remote\"}", "legendFormat": "queue", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []}
     },
@@ -387,7 +455,7 @@
       "title": "Effective batch size",
       "description": "te_batch_next_size — actual batch sizes the scheduler is forming. Should approach the configured --max-batch-tokens / mean-seq-len when traffic is heavy.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 99},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 108},
       "targets": [
         {"expr": "sum by (le) (rate(te_batch_next_size_bucket{job=\"tei_remote\"}[1m]))", "legendFormat": "{{le}}", "refId": "A", "format": "heatmap"}
       ],
