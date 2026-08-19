@@ -88,6 +88,10 @@ services:
       # fires within 5m. (Bridge subnets do move here: a 172.19/16 bridge once
       # collided with an Atlas PrivateLink route.)
       - "172.17.0.1:8140:8140"
+      # Query-service experiment host. The host firewall admits only
+      # 172.16.20.115/32 on this interface; keep the source rule paired with
+      # this publish when moving the service.
+      - "172.16.10.92:8140:8140"
     environment:
       # The INNER directory. ship_mxg84.sh nests the run name inside the dated
       # release dir; pointing at the outer one used to raise a tokenizer backend
