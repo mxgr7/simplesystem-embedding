@@ -1,0 +1,253 @@
+{
+  "title": "SPLADE + Cross-Encoder Services",
+  "uid": "splade-ce-service",
+  "schemaVersion": 38,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {"from": "now-3h", "to": "now"},
+  "timezone": "browser",
+  "tags": ["splade-service", "ce-service", "t4"],
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "SPLADE service (:8137)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 1,
+      "title": "Request rate by status",
+      "description": "429 is the service refusing work because MAX_INFLIGHT is reached, not an error on its side. Sustained 429 means whatever is calling it is asking for more than it will take, and (if the caller retries whole batches) most of that traffic is the same work going round. On 2026-08-19 this sat at 83% 429 for hours with nothing to show it.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "targets": [
+        {"expr": "sum by (status) (rate(splade_service_requests_total[1m]))", "legendFormat": "{{status}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "fillOpacity": 25, "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 2,
+      "title": "Rejected share",
+      "description": "Fraction of requests turned away with 429. The SpladeAtCapacity alert fires above 20% held for 10 minutes. A few percent during bursts is the gate working; a sustained high share is a mismatch between caller concurrency and MAX_INFLIGHT.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "targets": [
+        {"expr": "sum(rate(splade_service_requests_total{status=\"429\"}[5m])) / clamp_min(sum(rate(splade_service_requests_total[5m])), 0.001)", "legendFormat": "rejected", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "fillOpacity": 15, "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.2}]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 3,
+      "title": "Inflight vs capacity",
+      "description": "Concurrent encode requests. Pinned at MAX_INFLIGHT (32 on this box) means every further caller gets a 429.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 9},
+      "targets": [
+        {"expr": "splade_service_inflight", "legendFormat": "inflight", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 32}]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 4,
+      "title": "Backend healthy",
+      "description": "1 = the backend passed its most recent verify probe. Unlike the dense wrapper this is computed at scrape time, so a stalled probe loop cannot leave a stale 1 sitting here. There is still no heartbeat for the loop itself (MXG-166).",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 9},
+      "targets": [
+        {"expr": "splade_service_backend_healthy", "legendFormat": "{{backend}}", "refId": "A"},
+        {"expr": "splade_service_backend_draining", "legendFormat": "{{backend}} draining", "refId": "B"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 5,
+      "title": "Cache hit ratio",
+      "description": "Hits over hits plus misses. Re-encoding work that is already cached is cheap, which is why replayed batches drain far faster than new articles.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 9},
+      "targets": [
+        {"expr": "rate(splade_service_cache_hits_total[5m]) / clamp_min(rate(splade_service_cache_hits_total[5m]) + rate(splade_service_cache_misses_total[5m]), 0.001)", "legendFormat": "hit ratio", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"drawStyle": "line", "fillOpacity": 10}},
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 200,
+      "title": "Cross-encoder service (:8140)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 17},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Request rate by status",
+      "description": "429 here is the same capacity gate as SPLADE's, and it has its own alert (CeServiceAtCapacity).",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+      "targets": [
+        {"expr": "sum by (status) (rate(ce_service_requests_total[1m]))", "legendFormat": "{{status}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 25, "stacking": {"mode": "normal"}}},
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Rerank latency (p50 / p95 / p99)",
+      "description": "End-to-end handler time. The fine-ranker budget alert fires when p95 passes 150 ms.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(ce_service_request_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(ce_service_request_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(ce_service_request_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "fillOpacity": 0, "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.15}]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Ready / degraded",
+      "description": "ready = model loaded and warm. degraded = a forward raised and the CUDA context is presumed poisoned, which does not clear by itself.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 26},
+      "targets": [
+        {"expr": "ce_service_ready", "legendFormat": "ready", "refId": "A"},
+        {"expr": "ce_service_degraded", "legendFormat": "degraded", "refId": "B"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "min": 0, "max": 1, "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 20}},
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Candidates by disposition",
+      "description": "scored is the useful work. skipped_version means tokenizer skew, skipped_decode means malformed input; both have alerts and both mean candidates silently went unranked.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 26},
+      "targets": [
+        {"expr": "sum by (outcome) (rate(ce_service_candidates_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "custom": {"drawStyle": "line", "fillOpacity": 25, "stacking": {"mode": "normal"}}},
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "GPU memory (this service)",
+      "description": "torch allocated and reserved. The T4 is shared with both TEI instances and the SPLADE backend, so reserved memory here is capacity the others cannot have.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 26},
+      "targets": [
+        {"expr": "ce_service_gpu_memory_allocated_bytes", "legendFormat": "allocated", "refId": "A"},
+        {"expr": "ce_service_gpu_memory_reserved_bytes", "legendFormat": "reserved", "refId": "B"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 10}},
+        "overrides": []
+      }
+    },
+    {
+      "type": "row",
+      "id": 300,
+      "title": "Shared T4",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 34},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "GPU utilization",
+      "description": "One T4 carries four processes: both TEI instances, the SPLADE backend and the cross-encoder. Read every panel above against this one, because a service that looks slow may simply be waiting its turn.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 35},
+      "targets": [
+        {"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "gpu {{gpu}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"drawStyle": "line", "fillOpacity": 10}},
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "GPU memory used",
+      "description": "Total VRAM in use across all four tenants.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 35},
+      "targets": [
+        {"expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "gpu {{gpu}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "decmbytes", "custom": {"drawStyle": "line", "fillOpacity": 10}},
+        "overrides": []
+      }
+    }
+  ]
+}
