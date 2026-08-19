@@ -124,6 +124,10 @@ async def _make_pool(*, health=None, policy=None) -> "ec.TEIPool":
         "http://tei.stub", weight=1.0, max_concurrency=2,
         max_client_batch=8, timeout_s=1.0,
     )
+    # `add_backend` fires a one-shot confirmation probe as a task. Let it
+    # land here, or it lands in the middle of a test and rewrites the health
+    # state under it.
+    await asyncio.sleep(0.01)
     return pool
 
 
@@ -242,6 +246,44 @@ def test_client_is_recycled_after_prolonged_unhealth() -> None:
 
             stub.mode = "ok"
             assert await _wait_until(lambda: backend.healthy)
+            await pool.aclose()
+
+    asyncio.run(body())
+
+
+def test_pool_timeouts_recycle_the_client_early() -> None:
+    """A pool timeout says our own connection pool is full of requests that
+    will never finish, so waiting out the recycle timer is waiting for
+    information we already have. Measured on the box: it cost another 35s
+    of downtime after TEI was already serving again."""
+    stub = StubTEI("ok")
+
+    async def body():
+        with stubbed(stub):
+            pool = await _make_pool(
+                health=_health(
+                    client_recycle_after_s=600.0,   # timer must not be what fires
+                    pool_timeout_recycle_after=3,
+                    probe_interval_s=0.001,         # spacing floor = 0.003s
+                ),
+            )
+            backend = _only(pool)
+            await backend.probe()
+
+            for _ in range(3):
+                backend.mark_failure(httpx.PoolTimeout(""), source="probe")
+            assert not backend.healthy
+            assert backend.consecutive_pool_timeouts == 3
+            await asyncio.sleep(0.01)
+            assert backend.recycle_due(asyncio.get_event_loop().time())
+
+            # A non-pool failure must not take the fast path.
+            backend.mark_success()
+            backend.mark_failure(httpx.ConnectError(""), source="probe")
+            backend.mark_failure(httpx.ConnectError(""), source="probe")
+            backend.mark_failure(httpx.ConnectError(""), source="probe")
+            assert backend.consecutive_pool_timeouts == 0
+            assert not backend.recycle_due(asyncio.get_event_loop().time())
             await pool.aclose()
 
     asyncio.run(body())

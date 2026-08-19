@@ -28,6 +28,7 @@ class Config:
     tei_unhealthy_after: int
     tei_half_open_interval_s: float
     tei_client_recycle_after_s: float
+    tei_pool_timeout_recycle_after: int
     tei_drain_timeout_s: float
     log_level: str
     kvrocks_read_timeout_ms: int
@@ -76,6 +77,7 @@ def load_config() -> Config:
         tei_unhealthy_after=_int("TEI_UNHEALTHY_AFTER", 2),
         tei_half_open_interval_s=_float("TEI_HALF_OPEN_INTERVAL_S", 5.0),
         tei_client_recycle_after_s=_float("TEI_CLIENT_RECYCLE_AFTER_S", 60.0),
+        tei_pool_timeout_recycle_after=_int("TEI_POOL_TIMEOUT_RECYCLE_AFTER", 3),
         tei_drain_timeout_s=_float("TEI_DRAIN_TIMEOUT_S", 30.0),
         # Root log level. Unset, the root logger has no handler at all and
         # everything below WARNING is dropped.

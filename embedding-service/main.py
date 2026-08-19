@@ -231,6 +231,7 @@ async def lifespan(app: FastAPI):
             probe_round_timeout_s=cfg.tei_probe_round_timeout_s,
             half_open_interval_s=cfg.tei_half_open_interval_s,
             client_recycle_after_s=cfg.tei_client_recycle_after_s,
+            pool_timeout_recycle_after=cfg.tei_pool_timeout_recycle_after,
         ),
         drain_timeout_s=cfg.tei_drain_timeout_s,
         on_change=_refresh_backend_metrics,

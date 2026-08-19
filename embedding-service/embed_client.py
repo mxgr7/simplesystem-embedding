@@ -84,6 +84,11 @@ class HealthPolicy:
     half_open_interval_s: float = 5.0
     # How long a backend stays unhealthy before its client is replaced.
     client_recycle_after_s: float = 60.0
+    # A pool timeout is not evidence about the backend, it is evidence about
+    # us: every connection slot is held by a request that will never finish.
+    # Waiting out the full recycle timer for that is waiting for information
+    # we already have, so recycle after this many consecutive pool timeouts.
+    pool_timeout_recycle_after: int = 3
 
 
 class NoHealthyBackendError(RuntimeError):
@@ -141,6 +146,7 @@ class TEIBackend:
         self.healthy = False         # unhealthy until the first probe succeeds
         self.draining = False        # set on remove → excluded from selection
         self.consecutive_failures = 0
+        self.consecutive_pool_timeouts = 0
         self.unhealthy_since: float | None = None   # monotonic, None while healthy
         self.last_probe_error: str | None = None
         # Half-open bookkeeping: at most one trial request in flight per
@@ -182,6 +188,7 @@ class TEIBackend:
 
     def mark_success(self, *, source: str = "request") -> None:
         self.consecutive_failures = 0
+        self.consecutive_pool_timeouts = 0
         self.last_probe_error = None
         if not self.healthy:
             if self.unhealthy_since is None:
@@ -205,6 +212,10 @@ class TEIBackend:
 
     def mark_failure(self, exc: BaseException | None = None, *, source: str = "request") -> None:
         self.consecutive_failures += 1
+        if isinstance(exc, httpx.PoolTimeout):
+            self.consecutive_pool_timeouts += 1
+        else:
+            self.consecutive_pool_timeouts = 0
         if source == "probe":
             self.last_probe_error = (
                 f"{type(exc).__name__}: {exc}" if exc is not None else "unknown"
@@ -239,11 +250,24 @@ class TEIBackend:
     def recycle_due(self, now: float) -> bool:
         """A backend can be unreachable because *our* client is wedged, not
         because it is down. When probes have been failing for long enough,
-        replace the client and let the next probe tell us which it was."""
+        replace the client and let the next probe tell us which it was.
+
+        Pool timeouts short-circuit that wait: they say the connection pool
+        is full of requests that will never finish, which is a statement
+        about this client and not about the backend. Measured on the box
+        (MXG-159): with only the timer, a paused-then-resumed TEI took
+        another 35s to come back; the pool-timeout path cuts that to the
+        probe interval times the threshold."""
         if self.healthy or self.draining or self.unhealthy_since is None:
             return False
+        since_recycle = now - self._recycled_at
+        if (
+            self.consecutive_pool_timeouts >= self.health.pool_timeout_recycle_after
+            and since_recycle >= self.health.probe_interval_s * 3
+        ):
+            return True
         after = self.health.client_recycle_after_s
-        return self.unhealthy_for() >= after and (now - self._recycled_at) >= after
+        return self.unhealthy_for() >= after and since_recycle >= after
 
     def recycle_client(self) -> None:
         """Swap in a fresh client; close the old one in the background.
@@ -322,6 +346,7 @@ class TEIBackend:
             "max_client_batch": self.max_client_batch,
             # Why a backend is out, and whether recovery is being attempted.
             "consecutive_failures": self.consecutive_failures,
+            "consecutive_pool_timeouts": self.consecutive_pool_timeouts,
             "unhealthy_for_s": round(self.unhealthy_for(), 1),
             "last_probe_error": self.last_probe_error,
             "client_generation": self.client_generation,
