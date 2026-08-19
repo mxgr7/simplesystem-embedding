@@ -162,6 +162,24 @@ groups:
           description: "The pool is empty, or the frontend on :8137 is not serving /metrics. /embed will 504."
           action: "curl -s localhost:8137/admin/backends; docker compose -f splade-service/compose.t4.yaml ps"
 
+      - alert: SpladeAtCapacity
+        # The cross-encoder has had CeServiceAtCapacity since MXG-144; SPLADE never got the
+        # equivalent, so on 2026-08-19 it refused 83% of the indexer's calls for hours and
+        # nothing said so. A 429 is not an error on the service's side, it is the service
+        # telling the caller to ask for less, and nobody was listening.
+        # Proportion, not rate: a few rejections during a burst are the gate working. This
+        # fires only when most traffic is being turned away and stays that way.
+        expr: |
+          sum(rate(splade_service_requests_total{status="429"}[5m]))
+            / clamp_min(sum(rate(splade_service_requests_total[5m])), 0.001) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SPLADE service is refusing {{ $value | humanizePercentage }} of requests"
+          description: "splade-service is at MAX_INFLIGHT and returning 429. If the caller retries whole batches, most of the traffic is the same work repeating; lower the caller's concurrency before raising the cap."
+          action: "curl -s localhost:8137/metrics | grep -E 'splade_service_(requests_total|inflight)'"
+
       - alert: SpladeGatewayTimeouts
         expr: rate(splade_service_requests_total{status="504"}[5m]) > 0
         for: 10m
@@ -281,6 +299,33 @@ groups:
           summary: "Dense embedding backend {{ $labels.backend }} ({{ $labels.url }}) is unhealthy"
           description: "embedding-service on :9000 cannot reach this TEI replica."
           action: "docker logs --tail 50 embedding-service-tei-indexer-1"
+
+      - alert: TeiProbeLoopStalled
+        # The health gauge above is only ever written BY the probe loop, so a loop that dies
+        # leaves it frozen at its last value and the outage looks like steady state. MXG-159:
+        # that is exactly what happened, for four hours, across a restart of TEI itself.
+        # This is the one signal a frozen push-gauge cannot fake.
+        expr: time() - embedding_service_tei_probe_loop_last_iteration_timestamp > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "embedding-service TEI probe loop has not run for {{ $value | humanizeDuration }}"
+          description: "Nothing is re-probing the TEI backends, so an unhealthy backend can no longer recover on its own."
+          action: "docker logs --tail 100 embedding-service-embedding-service-1 | grep -i probe; docker restart embedding-service-embedding-service-1"
+
+      - alert: TeiClientRecycling
+        # Recycling means the backend answers but our HTTP client to it is wedged (MXG-159).
+        # Self-healing, so warning not critical, but repeated recycles say the underlying
+        # cancellation/pool problem is back.
+        expr: changes(embedding_service_tei_backend_client_generation[30m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "embedding-service is repeatedly recycling its client for backend {{ $labels.backend }}"
+          description: "{{ $value }} client recycles in 30m: the connection pool keeps wedging even though the backend is reachable."
+          action: "docker logs --tail 200 embedding-service-embedding-service-1 | grep -i recycl"
 
       - alert: TeiRequestFailures
         # TEI has no failure counter; it has a request counter and a success counter. The gap
