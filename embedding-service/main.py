@@ -213,6 +213,10 @@ async def lifespan(app: FastAPI):
         level=cfg.log_level.upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # httpx logs one INFO line per request, which at indexing rates is tens
+    # of thousands a minute of "200 OK" burying anything worth reading.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     app.state.cfg = cfg
     app.state.cache = EmbeddingCache(
         cfg.kvrocks_url,
