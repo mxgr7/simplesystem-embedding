@@ -2,7 +2,7 @@
   "title": "SPLADE + Cross-Encoder Services",
   "uid": "splade-ce-service",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "30s",
   "time": {"from": "now-3h", "to": "now"},
@@ -85,7 +85,7 @@
       "type": "timeseries",
       "id": 4,
       "title": "Backend healthy",
-      "description": "1 = the backend passed its most recent verify probe. Unlike the dense wrapper this is computed at scrape time, so a stalled probe loop cannot leave a stale 1 sitting here. There is still no heartbeat for the loop itself (MXG-166).",
+      "description": "1 = the backend passed its most recent verify probe. Computed at scrape time, but that is narrower than it sounds: the boolean is still written only BY the probe loop, so a loop that has died freezes it here and the outage reads as steady state. The panel below is what shows that (MXG-166).",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 9},
       "targets": [
@@ -118,10 +118,49 @@
       }
     },
     {
+      "type": "timeseries",
+      "id": 6,
+      "title": "Probe loop age",
+      "description": "Seconds since the last completed probe round; normally under 10. This exists because \"Backend healthy\" above is written BY that loop, so a loop that dies freezes the gauge at its last value and the collector re-exports it. On the dense side that hid a four-hour outage across a restart of the backend itself. SpladeProbeLoopStalled fires above 60s.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 17},
+      "targets": [
+        {"expr": "time() - splade_service_probe_loop_last_iteration_timestamp", "legendFormat": "age", "refId": "A"},
+        {"expr": "splade_service_probe_loop_errors_total", "legendFormat": "rounds timed out or raised", "refId": "B"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 60}]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 7,
+      "title": "Client recycles",
+      "description": "A backend can be unreachable because our HTTP client to it is wedged rather than because it is down, and only a new client clears that -- restarting the backend does not. Each step is one automatic replacement. Steps that keep coming mean the cancellation that poisons the pool is back; SpladeClientRecycling warns at 3 in 30m.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 17},
+      "targets": [
+        {"expr": "splade_service_backend_client_generation", "legendFormat": "{{backend}}", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10}
+        },
+        "overrides": []
+      }
+    },
+    {
       "type": "row",
       "id": 200,
       "title": "Cross-encoder service (:8140)",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 17},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
       "collapsed": false,
       "panels": []
     },
@@ -131,7 +170,7 @@
       "title": "Request rate by status",
       "description": "429 here is the same capacity gate as SPLADE's, and it has its own alert (CeServiceAtCapacity).",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 18},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
       "targets": [
         {"expr": "sum by (status) (rate(ce_service_requests_total[1m]))", "legendFormat": "{{status}}", "refId": "A"}
       ],
@@ -146,7 +185,7 @@
       "title": "Rerank latency (p50 / p95 / p99)",
       "description": "End-to-end handler time. The fine-ranker budget alert fires when p95 passes 150 ms.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 18},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
       "targets": [
         {"expr": "histogram_quantile(0.50, sum by (le) (rate(ce_service_request_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A"},
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(ce_service_request_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B"},
@@ -170,7 +209,7 @@
       "title": "Ready / degraded",
       "description": "ready = model loaded and warm. degraded = a forward raised and the CUDA context is presumed poisoned, which does not clear by itself.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 26},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 34},
       "targets": [
         {"expr": "ce_service_ready", "legendFormat": "ready", "refId": "A"},
         {"expr": "ce_service_degraded", "legendFormat": "degraded", "refId": "B"}
@@ -186,7 +225,7 @@
       "title": "Candidates by disposition",
       "description": "scored is the useful work. skipped_version means tokenizer skew, skipped_decode means malformed input; both have alerts and both mean candidates silently went unranked.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 26},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 34},
       "targets": [
         {"expr": "sum by (outcome) (rate(ce_service_candidates_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}
       ],
@@ -201,7 +240,7 @@
       "title": "GPU memory (this service)",
       "description": "torch allocated and reserved. The T4 is shared with both TEI instances and the SPLADE backend, so reserved memory here is capacity the others cannot have.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 26},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 34},
       "targets": [
         {"expr": "ce_service_gpu_memory_allocated_bytes", "legendFormat": "allocated", "refId": "A"},
         {"expr": "ce_service_gpu_memory_reserved_bytes", "legendFormat": "reserved", "refId": "B"}
@@ -215,7 +254,7 @@
       "type": "row",
       "id": 300,
       "title": "Shared T4",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 34},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 42},
       "collapsed": false,
       "panels": []
     },
@@ -225,7 +264,7 @@
       "title": "GPU utilization",
       "description": "One T4 carries four processes: both TEI instances, the SPLADE backend and the cross-encoder. Read every panel above against this one, because a service that looks slow may simply be waiting its turn.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 35},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 43},
       "targets": [
         {"expr": "DCGM_FI_DEV_GPU_UTIL", "legendFormat": "gpu {{gpu}}", "refId": "A"}
       ],
@@ -240,7 +279,7 @@
       "title": "GPU memory used",
       "description": "Total VRAM in use across all four tenants.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 35},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 43},
       "targets": [
         {"expr": "DCGM_FI_DEV_FB_USED", "legendFormat": "gpu {{gpu}}", "refId": "A"}
       ],
