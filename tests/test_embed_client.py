@@ -23,7 +23,16 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "search-api"))
 
-from embed_client import EmbedClient, EmbedRetryPolicy  # noqa: E402
+from conftest import load_service_module  # noqa: E402
+
+# `embed_client` exists in both search-api/ and embedding-service/, so
+# whichever test module is imported first would otherwise decide which one
+# these names refer to (see conftest). Load this one by path.
+_embed_client = load_service_module(
+    "embed_client", REPO_ROOT / "search-api" / "embed_client.py",
+)
+EmbedClient = _embed_client.EmbedClient
+EmbedRetryPolicy = _embed_client.EmbedRetryPolicy
 
 
 def _client_with(handler, *, policy: EmbedRetryPolicy | None) -> EmbedClient:

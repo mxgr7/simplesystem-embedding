@@ -28,6 +28,30 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import hashing  # noqa: E402
 import rendering  # noqa: E402
+
+_service_main = None
+
+
+def _load_service_main():
+    """Load embedding-service's `main.py` under a name nobody else claims.
+
+    Both `main` and `embed_client` exist in `search-api/` too, so a bare
+    `import main` resolves to whichever test module was collected last (see
+    conftest). Loading by path makes these tests independent of that order.
+    Cached: re-executing `main.py` would re-register its Prometheus metrics
+    and fail on duplicate timeseries."""
+    global _service_main
+    if _service_main is None:
+        from conftest import load_service_module
+        load_service_module("embed_client", SERVICE_DIR / "embed_client.py")
+        sys.path.insert(0, str(SERVICE_DIR))
+        try:
+            _service_main = load_service_module(
+                "embedding_service_main", SERVICE_DIR / "main.py",
+            )
+        finally:
+            sys.path.remove(str(SERVICE_DIR))
+    return _service_main
 from indexer.embedding_text import article_to_text as indexer_article_to_text  # noqa: E402
 
 
@@ -168,12 +192,7 @@ def app_with_stubs(monkeypatch):
     """Build the FastAPI app with the cache + TEI client replaced by
     in-memory stubs so tests don't need a running KVRocks or TEI."""
     # Force imports of the service modules under SERVICE_DIR's sys.path.
-    # `embed_client` is a colliding module name (see conftest); load
-    # embedding-service's by path so `main`'s import cannot pick up
-    # search-api's.
-    from conftest import load_service_module
-    load_service_module("embed_client", SERVICE_DIR / "embed_client.py")
-    import main
+    main = _load_service_main()
     from cache import EmbeddingCache
 
     # Stub cache: in-memory dict, no network.
@@ -352,9 +371,7 @@ class StubReadyPool:
 def readyz_app(monkeypatch):
     """Patch the names `lifespan` actually constructs (EmbeddingCache /
     TEIPool)."""
-    from conftest import load_service_module
-    load_service_module("embed_client", SERVICE_DIR / "embed_client.py")
-    import main
+    main = _load_service_main()
 
     cache_stub = StubReadyCache()
     pool_stub = StubReadyPool()
