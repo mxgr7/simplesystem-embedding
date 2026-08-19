@@ -41,7 +41,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from cache import VECTOR_DIM, EmbeddingCache, fp16_from_bytes, vec_bytes_from_fp16
 from config import load_config
-from embed_client import TEIPool
+from embed_client import HealthPolicy, NoHealthyBackendError, TEIPool
 from hashing import article_hash
 from models import AddBackendRequest, EmbedRequest, PatchBackendRequest
 from rendering import N_FIELDS, render_from_nul
@@ -109,13 +109,28 @@ _BACKEND_WEIGHT = Gauge(
     "Routing weight per TEI backend (0 = fallback-only / draining).",
     ("backend", "url"),
 )
+_BACKEND_CLIENT_GENERATION = Gauge(
+    "embedding_service_tei_backend_client_generation",
+    "How many times this backend's HTTP client has been recycled.",
+    ("backend", "url"),
+)
+_PROBE_LOOP_LAST_ITERATION = Gauge(
+    "embedding_service_tei_probe_loop_last_iteration_timestamp",
+    "Unix time of the last completed TEI probe round. Stale = recovery is "
+    "not running, which the per-backend health gauge cannot show on its own "
+    "because it is only updated by that same loop.",
+)
+_PROBE_LOOP_ERRORS = Gauge(
+    "embedding_service_tei_probe_loop_errors_total",
+    "Probe rounds that timed out or raised (the loop keeps going).",
+)
 
 # Label sets currently published, so departed backends can be cleared from
 # the registry on the next refresh (otherwise stale series linger forever).
 _PUBLISHED_BACKEND_LABELS: set[tuple[str, str]] = set()
 
 
-def _refresh_backend_metrics(backends: list[dict]) -> None:
+def _refresh_backend_metrics(backends: list[dict], stats: dict | None = None) -> None:
     """on_change callback for the pool — mirror the live backend set into
     per-backend gauges and drop series for backends that have gone away."""
     live: set[tuple[str, str]] = set()
@@ -127,8 +142,13 @@ def _refresh_backend_metrics(backends: list[dict]) -> None:
             1 if (b["healthy"] and not b["draining"]) else 0
         )
         _BACKEND_WEIGHT.labels(*labels).set(b["weight"])
+        _BACKEND_CLIENT_GENERATION.labels(*labels).set(b.get("client_generation", 0))
+    if stats is not None:
+        _PROBE_LOOP_LAST_ITERATION.set(stats.get("probe_loop_last_iteration_at", 0.0))
+        _PROBE_LOOP_ERRORS.set(stats.get("probe_loop_errors", 0))
     for labels in _PUBLISHED_BACKEND_LABELS - live:
-        for g in (_BACKEND_INFLIGHT, _BACKEND_HEALTHY, _BACKEND_WEIGHT):
+        for g in (_BACKEND_INFLIGHT, _BACKEND_HEALTHY, _BACKEND_WEIGHT,
+                  _BACKEND_CLIENT_GENERATION):
             try:
                 g.remove(*labels)
             except KeyError:
@@ -136,6 +156,29 @@ def _refresh_backend_metrics(backends: list[dict]) -> None:
     _PUBLISHED_BACKEND_LABELS.clear()
     _PUBLISHED_BACKEND_LABELS.update(live)
     _BACKENDS_TOTAL.set(len(backends))
+
+
+_LOG_THROTTLE_S = 60.0
+_throttled_last: dict[str, float] = {}
+_throttled_suppressed: dict[str, int] = {}
+
+
+def _log_throttled(key: str, msg: str, *args) -> None:
+    """Log at most once per minute per key, carrying the suppressed count.
+
+    A condition that affects every request must be logged per *state*, not
+    per request."""
+    now = time.monotonic()
+    last = _throttled_last.get(key, float("-inf"))
+    if now - last < _LOG_THROTTLE_S:
+        _throttled_suppressed[key] = _throttled_suppressed.get(key, 0) + 1
+        return
+    suppressed = _throttled_suppressed.pop(key, 0)
+    _throttled_last[key] = now
+    if suppressed:
+        log.warning(msg + " (%d more in the last %.0fs)", *args, suppressed, _LOG_THROTTLE_S)
+    else:
+        log.warning(msg, *args)
 
 
 class _HitRatioEWMA:
@@ -162,6 +205,14 @@ class _HitRatioEWMA:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     cfg = load_config()
+    # Without this the root logger has no handler, so Python's `lastResort`
+    # handler emits WARNING and above only and every INFO line this service
+    # writes is silently dropped. uvicorn's own loggers do not propagate, so
+    # this does not double-log them.
+    logging.basicConfig(
+        level=cfg.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     app.state.cfg = cfg
     app.state.cache = EmbeddingCache(
         cfg.kvrocks_url,
@@ -169,7 +220,14 @@ async def lifespan(app: FastAPI):
         max_connections=cfg.kvrocks_max_connections,
     )
     pool = TEIPool(
-        probe_interval_s=cfg.tei_probe_interval_s,
+        health=HealthPolicy(
+            unhealthy_after=cfg.tei_unhealthy_after,
+            probe_interval_s=cfg.tei_probe_interval_s,
+            probe_timeout_s=cfg.tei_probe_timeout_s,
+            probe_round_timeout_s=cfg.tei_probe_round_timeout_s,
+            half_open_interval_s=cfg.tei_half_open_interval_s,
+            client_recycle_after_s=cfg.tei_client_recycle_after_s,
+        ),
         drain_timeout_s=cfg.tei_drain_timeout_s,
         on_change=_refresh_backend_metrics,
     )
@@ -377,6 +435,18 @@ async def embed(
     except asyncio.TimeoutError:
         _REQUESTS.labels(status="504").inc()
         raise HTTPException(status_code=504, detail="request budget exhausted")
+    except NoHealthyBackendError as e:
+        # An unhandled exception here is a 500 *with a traceback per
+        # request*: one outage wrote 268k of them and buried the single
+        # WARNING that said what had happened. 503 is also the honest
+        # status, and it tells the indexer to retry rather than DLQ.
+        _REQUESTS.labels(status="503").inc()
+        _log_throttled("no_backend", "embed rejected: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="no healthy TEI backend available",
+            headers={"Retry-After": f"{cfg.retry_after_s:.2f}"},
+        )
 
 
 async def _embed_handler(
@@ -456,7 +526,7 @@ async def _serve(
     truncate: bool,
     *,
     cache: EmbeddingCache,
-    tei: TEIClient,
+    tei: TEIPool,
     background: BackgroundTasks,
     hit_ratio: _HitRatioEWMA,
 ) -> list[list[float]]:

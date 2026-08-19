@@ -23,7 +23,13 @@ class Config:
     tei_weight: float
     tei_timeout_s: float
     tei_probe_interval_s: float
+    tei_probe_timeout_s: float
+    tei_probe_round_timeout_s: float
+    tei_unhealthy_after: int
+    tei_half_open_interval_s: float
+    tei_client_recycle_after_s: float
     tei_drain_timeout_s: float
+    log_level: str
     kvrocks_read_timeout_ms: int
     kvrocks_max_connections: int
     max_inflight: int
@@ -60,7 +66,20 @@ def load_config() -> Config:
         tei_weight=_float("TEI_WEIGHT", 1.0),
         tei_timeout_s=_float("TEI_TIMEOUT_S", 30.0),
         tei_probe_interval_s=_float("TEI_PROBE_INTERVAL_S", 5.0),
+        # Recovery knobs (MXG-159). A probe and a whole probe round are
+        # bounded so a wedged connection pool cannot stop recovery; a
+        # backend that stays unhealthy that long gets a fresh HTTP client;
+        # while nothing is selectable, one real chunk per interval is let
+        # through to find out whether the backend is back.
+        tei_probe_timeout_s=_float("TEI_PROBE_TIMEOUT_S", 2.0),
+        tei_probe_round_timeout_s=_float("TEI_PROBE_ROUND_TIMEOUT_S", 10.0),
+        tei_unhealthy_after=_int("TEI_UNHEALTHY_AFTER", 2),
+        tei_half_open_interval_s=_float("TEI_HALF_OPEN_INTERVAL_S", 5.0),
+        tei_client_recycle_after_s=_float("TEI_CLIENT_RECYCLE_AFTER_S", 60.0),
         tei_drain_timeout_s=_float("TEI_DRAIN_TIMEOUT_S", 30.0),
+        # Root log level. Unset, the root logger has no handler at all and
+        # everything below WARNING is dropped.
+        log_level=os.environ.get("LOG_LEVEL", "INFO"),
         kvrocks_read_timeout_ms=_int("KVROCKS_READ_TIMEOUT_MS", 50),
         kvrocks_max_connections=_int("KVROCKS_MAX_CONNECTIONS", 64),
         # 8× TEI concurrency = ~8 batch-rounds of buffering before we 429.

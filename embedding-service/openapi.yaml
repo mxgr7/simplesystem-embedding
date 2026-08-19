@@ -56,7 +56,11 @@ paths:
         "429":
           description: Service at concurrency limit. Includes `Retry-After`.
         "503":
-          description: Connection-level overload (uvicorn `--limit-concurrency`).
+          description: |
+            No healthy TEI backend (includes `Retry-After`; the pool keeps
+            probing and lets one trial request through per interval, so this
+            clears on its own once TEI is back), or connection-level overload
+            (uvicorn `--limit-concurrency`).
         "504":
           description: Per-request budget (5s default) exhausted.
 

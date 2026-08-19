@@ -168,9 +168,13 @@ def app_with_stubs(monkeypatch):
     """Build the FastAPI app with the cache + TEI client replaced by
     in-memory stubs so tests don't need a running KVRocks or TEI."""
     # Force imports of the service modules under SERVICE_DIR's sys.path.
+    # `embed_client` is a colliding module name (see conftest); load
+    # embedding-service's by path so `main`'s import cannot pick up
+    # search-api's.
+    from conftest import load_service_module
+    load_service_module("embed_client", SERVICE_DIR / "embed_client.py")
     import main
     from cache import EmbeddingCache
-    from embed_client import TEIClient
 
     # Stub cache: in-memory dict, no network.
     class StubCache:
@@ -195,6 +199,13 @@ def app_with_stubs(monkeypatch):
             self.texts_received: list[str] = []
             self.semaphore_wait_total_s = 0.0
 
+        # Pool surface the lifespan drives.
+        async def add_backend(self, url, **kwargs):
+            return {"id": "b1", "url": url}
+
+        def start(self):
+            pass
+
         async def embed(self, texts, *, truncate=True):
             import hashlib
             self.call_count += 1
@@ -216,7 +227,7 @@ def app_with_stubs(monkeypatch):
 
     monkeypatch.setattr(main, "EmbeddingCache",
                         lambda *a, **kw: StubCache())
-    monkeypatch.setattr(main, "TEIClient",
+    monkeypatch.setattr(main, "TEIPool",
                         lambda *a, **kw: StubTEI())
 
     with TestClient(main.app) as client:
@@ -340,7 +351,9 @@ class StubReadyPool:
 @pytest.fixture
 def readyz_app(monkeypatch):
     """Patch the names `lifespan` actually constructs (EmbeddingCache /
-    TEIPool — unlike the stale TEIClient stub above)."""
+    TEIPool)."""
+    from conftest import load_service_module
+    load_service_module("embed_client", SERVICE_DIR / "embed_client.py")
     import main
 
     cache_stub = StubReadyCache()

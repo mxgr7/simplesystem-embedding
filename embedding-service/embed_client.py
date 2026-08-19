@@ -18,6 +18,25 @@ Retry policy mirrored from `search-api/embed_client.py:EmbedRetryPolicy`
 Non-transient HTTP errors raise immediately (caller bug, no point
 retrying). With a multi-backend pool a transient failure first fails over
 to a *different* healthy backend before falling back to backoff-and-retry.
+
+Recovery (MXG-159). An unhealthy backend gets three independent ways back:
+
+1. The probe loop, which runs on the backend's *serving* client so a
+   success means "we can actually reach it", not just "it is up". Each
+   probe round is bounded by `wait_for`, and the loop body catches
+   everything, so a hung probe can no longer freeze recovery forever.
+2. Client recycling: once a backend has been unhealthy for
+   `client_recycle_after_s` the whole `httpx.AsyncClient` is replaced. A
+   connection pool can be poisoned independently of the backend (a
+   request cancelled by the caller's budget can leave httpcore's
+   bookkeeping wedged), in which case the backend is fine and only a
+   fresh client recovers it. This automates what an operator otherwise
+   does by hand with `POST /admin/backends`.
+3. Half-open admission: when no backend is selectable, one real chunk is
+   let through to the stalest unhealthy backend, rate-limited to one
+   trial in flight per `half_open_interval_s`. With a single-backend pool
+   "no healthy backend" and "service down" are the same event, so failing
+   fast forever is indistinguishable from being down.
 """
 
 from __future__ import annotations
@@ -50,6 +69,40 @@ _TRANSIENT_HTTP_STATUSES = frozenset({500, 502, 503, 504, 408, 429})
 _UNHEALTHY_AFTER = 2
 
 
+@dataclass(frozen=True)
+class HealthPolicy:
+    """Everything about how a backend leaves and re-enters the pool."""
+
+    unhealthy_after: int = _UNHEALTHY_AFTER
+    probe_interval_s: float = 5.0
+    # Hard ceiling on one probe and on a whole probe round. httpx timeouts
+    # do not cover every way a poisoned connection pool can block, so the
+    # loop enforces its own.
+    probe_timeout_s: float = 2.0
+    probe_round_timeout_s: float = 10.0
+    # Minimum spacing between half-open trial requests, per backend.
+    half_open_interval_s: float = 5.0
+    # How long a backend stays unhealthy before its client is replaced.
+    client_recycle_after_s: float = 60.0
+
+
+class NoHealthyBackendError(RuntimeError):
+    """No backend was selectable and no half-open trial was available.
+
+    Subclasses RuntimeError so existing callers that catch RuntimeError
+    (and the `/readyz` canary) behave exactly as before; `main.py` catches
+    the specific type to answer 503 instead of a 500 with a traceback.
+    """
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
 def _is_transient(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in _TRANSIENT_HTTP_STATUSES
@@ -74,6 +127,7 @@ class TEIBackend:
         max_client_batch: int,
         max_concurrency: int,
         timeout_s: float = 30.0,
+        health: HealthPolicy | None = None,
     ) -> None:
         self.id = backend_id
         self.base_url = base_url.rstrip("/")
@@ -81,22 +135,37 @@ class TEIBackend:
         self.max_client_batch = max_client_batch
         self.max_concurrency = max_concurrency
         self.timeout_s = timeout_s
+        self.health = health or HealthPolicy()
 
         self.inflight = 0            # assigned-or-running chunks (for load balancing)
         self.healthy = False         # unhealthy until the first probe succeeds
         self.draining = False        # set on remove → excluded from selection
         self.consecutive_failures = 0
+        self.unhealthy_since: float | None = None   # monotonic, None while healthy
+        self.last_probe_error: str | None = None
+        # Half-open bookkeeping: at most one trial request in flight per
+        # backend, at most one per `half_open_interval_s`.
+        self.trial_inflight = False
+        self.last_trial_at = float("-inf")
+        # Bumped on every client replacement, so operators and dashboards
+        # can see that recycling happened at all.
+        self.client_generation = 0
+        self._recycled_at = float("-inf")
 
         self._sem = asyncio.Semaphore(max_concurrency)
-        self._client = httpx.AsyncClient(
+        self._client = self._new_client()
+        self._sem_wait_total_s = 0.0
+        self._closing: set[asyncio.Task] = set()
+
+    def _new_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=timeout_s,
+            timeout=self.timeout_s,
             limits=httpx.Limits(
-                max_connections=max_concurrency * 2,
-                max_keepalive_connections=max_concurrency,
+                max_connections=self.max_concurrency * 2,
+                max_keepalive_connections=self.max_concurrency,
             ),
         )
-        self._sem_wait_total_s = 0.0
 
     # --- selection helpers ---------------------------------------------
 
@@ -111,20 +180,98 @@ class TEIBackend:
         skipped in favour of a lighter one."""
         return self.inflight / self.weight if self.weight > 0 else float("inf")
 
-    def mark_success(self) -> None:
+    def mark_success(self, *, source: str = "request") -> None:
         self.consecutive_failures = 0
+        self.last_probe_error = None
         if not self.healthy:
-            log.info("TEI backend %s (%s) healthy again", self.id, self.base_url)
+            if self.unhealthy_since is None:
+                # First confirmation after being added: not an incident.
+                log.info(
+                    "TEI backend %s (%s) healthy (via %s)",
+                    self.id, self.base_url, source,
+                )
+            else:
+                # WARNING, not INFO: nothing configures the root logger under
+                # uvicorn, so INFO from this module never reaches the log. A
+                # restore line nobody can see is how a four-hour outage gets
+                # diagnosed from the wrong end.
+                log.warning(
+                    "TEI backend %s (%s) restored after %s unhealthy (via %s)",
+                    self.id, self.base_url,
+                    _fmt_duration(self.unhealthy_for()), source,
+                )
         self.healthy = True
+        self.unhealthy_since = None
 
-    def mark_failure(self) -> None:
+    def mark_failure(self, exc: BaseException | None = None, *, source: str = "request") -> None:
         self.consecutive_failures += 1
-        if self.consecutive_failures >= _UNHEALTHY_AFTER and self.healthy:
-            log.warning(
-                "TEI backend %s (%s) marked unhealthy after %d failures",
-                self.id, self.base_url, self.consecutive_failures,
+        if source == "probe":
+            self.last_probe_error = (
+                f"{type(exc).__name__}: {exc}" if exc is not None else "unknown"
             )
+        if self.consecutive_failures >= self.health.unhealthy_after:
+            if self.healthy:
+                log.warning(
+                    "TEI backend %s (%s) marked unhealthy after %d failures (%s: %s)",
+                    self.id, self.base_url, self.consecutive_failures, source,
+                    type(exc).__name__ if exc is not None else "unknown",
+                )
             self.healthy = False
+            # Also stamped for a backend that was never healthy in the first
+            # place: "added and never answered" needs the same recovery as
+            # "was fine and broke".
+            if self.unhealthy_since is None:
+                self.unhealthy_since = time.monotonic()
+
+    def unhealthy_for(self) -> float:
+        """Seconds since this backend went unhealthy, 0.0 while healthy."""
+        if self.unhealthy_since is None:
+            return 0.0
+        return time.monotonic() - self.unhealthy_since
+
+    # --- half-open -------------------------------------------------------
+
+    def trial_due(self, now: float, interval_s: float) -> bool:
+        return not self.trial_inflight and (now - self.last_trial_at) >= interval_s
+
+    # --- client lifecycle ------------------------------------------------
+
+    def recycle_due(self, now: float) -> bool:
+        """A backend can be unreachable because *our* client is wedged, not
+        because it is down. When probes have been failing for long enough,
+        replace the client and let the next probe tell us which it was."""
+        if self.healthy or self.draining or self.unhealthy_since is None:
+            return False
+        after = self.health.client_recycle_after_s
+        return self.unhealthy_for() >= after and (now - self._recycled_at) >= after
+
+    def recycle_client(self) -> None:
+        """Swap in a fresh client; close the old one in the background.
+
+        Closing is deliberately not awaited: if the pool is wedged, the
+        close can block as thoroughly as the requests did. In-flight
+        requests on the old client are already doomed, and the caller
+        retries them."""
+        old = self._client
+        self._client = self._new_client()
+        self.client_generation += 1
+        self._recycled_at = time.monotonic()
+        log.warning(
+            "TEI backend %s (%s) client recycled (generation %d) after %s unhealthy",
+            self.id, self.base_url, self.client_generation,
+            _fmt_duration(self.unhealthy_for()),
+        )
+        task = asyncio.create_task(self._close_quietly(old))
+        # Keep a strong ref, otherwise the task can be collected mid-flight.
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
+    @staticmethod
+    async def _close_quietly(client: httpx.AsyncClient) -> None:
+        try:
+            await asyncio.wait_for(client.aclose(), timeout=5.0)
+        except Exception as e:  # noqa: BLE001 — a stuck close must not propagate
+            log.debug("closing recycled TEI client failed: %s", e)
 
     # --- IO ------------------------------------------------------------
 
@@ -145,17 +292,22 @@ class TEIBackend:
 
     async def probe(self) -> None:
         """Hit TEI's `/health`; feed the result into the same health
-        counter real requests use. Short timeout — a slow health check
-        shouldn't itself look like an outage."""
+        counter real requests use. Deliberately runs on the *serving*
+        client: a probe on a private connection would answer "TEI is up"
+        while the path we actually serve on stays wedged, and would flap
+        the backend healthy once per interval. Short timeout — a slow
+        health check shouldn't itself look like an outage."""
         try:
-            resp = await self._client.get("/health", timeout=2.0)
+            resp = await self._client.get("/health", timeout=self.health.probe_timeout_s)
             resp.raise_for_status()
-            self.mark_success()
+            self.mark_success(source="probe")
         except Exception as e:  # noqa: BLE001 — any failure = not healthy
-            self.mark_failure()
+            self.mark_failure(e, source="probe")
             log.debug("TEI backend %s probe failed: %s", self.id, e)
 
     async def aclose(self) -> None:
+        for task in list(self._closing):
+            task.cancel()
         await self._client.aclose()
 
     def to_dict(self) -> dict:
@@ -168,6 +320,11 @@ class TEIBackend:
             "inflight": self.inflight,
             "max_concurrency": self.max_concurrency,
             "max_client_batch": self.max_client_batch,
+            # Why a backend is out, and whether recovery is being attempted.
+            "consecutive_failures": self.consecutive_failures,
+            "unhealthy_for_s": round(self.unhealthy_for(), 1),
+            "last_probe_error": self.last_probe_error,
+            "client_generation": self.client_generation,
         }
 
 
@@ -180,23 +337,32 @@ class TEIPool:
         self,
         *,
         retry_policy: RetryPolicy | None = None,
-        probe_interval_s: float = 5.0,
+        health: HealthPolicy | None = None,
         drain_timeout_s: float = 30.0,
         on_change=None,
     ) -> None:
         self._backends: dict[str, TEIBackend] = {}
         self._ids = itertools.count(1)
         self._policy = retry_policy or RetryPolicy()
-        self._probe_interval_s = probe_interval_s
+        self._health = health or HealthPolicy()
         self._drain_timeout_s = drain_timeout_s
-        self._on_change = on_change  # callback(list[dict]) for metrics refresh
+        self._on_change = on_change  # callback(list[dict], dict) for metrics refresh
         self._mutate = asyncio.Lock()
         self._probe_task: asyncio.Task | None = None
+        self._pending: set[asyncio.Task] = set()
+        # Epoch seconds of the last completed probe round. Exported so a
+        # frozen loop is visible as a stale timestamp: the health gauge is
+        # push-updated, so a dead loop leaves it looking fine forever.
+        self.probe_loop_last_iteration_at = 0.0
+        self.probe_loop_errors = 0
 
     # --- lifecycle -----------------------------------------------------
 
     def start(self) -> None:
         if self._probe_task is None:
+            # Seed the liveness stamp so "loop never started" and "loop
+            # started and is behind" are not the same reading.
+            self.probe_loop_last_iteration_at = time.time()
             self._probe_task = asyncio.create_task(self._probe_loop())
 
     async def aclose(self) -> None:
@@ -230,10 +396,15 @@ class TEIPool:
                 max_client_batch=max_client_batch,
                 max_concurrency=max_concurrency,
                 timeout_s=timeout_s,
+                health=self._health,
             )
             self._backends[backend_id] = backend
         log.info("added TEI backend %s (%s) weight=%s", backend_id, url, weight)
-        asyncio.create_task(backend.probe())  # confirm health promptly
+        # Confirm health promptly. Keep a strong ref: a bare create_task can
+        # be garbage-collected before it runs.
+        task = asyncio.create_task(backend.probe())
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
         self._notify()
         return backend.to_dict()
 
@@ -275,10 +446,16 @@ class TEIPool:
     def list_backends(self) -> list[dict]:
         return [b.to_dict() for b in self._backends.values()]
 
+    def stats(self) -> dict:
+        return {
+            "probe_loop_last_iteration_at": self.probe_loop_last_iteration_at,
+            "probe_loop_errors": self.probe_loop_errors,
+        }
+
     def _notify(self) -> None:
         if self._on_change is not None:
             try:
-                self._on_change(self.list_backends())
+                self._on_change(self.list_backends(), self.stats())
             except Exception:  # noqa: BLE001 — metrics must never break routing
                 log.exception("TEIPool on_change callback failed")
 
@@ -316,6 +493,33 @@ class TEIPool:
             for b in self._backends.values()
         )
 
+    def _select_half_open(self, exclude: frozenset[str]) -> TEIBackend | None:
+        """Pick an unhealthy backend to send one *real* chunk to.
+
+        This is the only recovery path that proves the serving path works,
+        so it is what gets the service back when the probe path and the
+        request path disagree. Rate-limited to one trial in flight per
+        backend and one per `half_open_interval_s`, so a hard-down backend
+        costs one request per interval, not one per caller."""
+        now = time.monotonic()
+        candidates = [
+            b for b in self._backends.values()
+            if not b.draining
+            and b.id not in exclude
+            and b.trial_due(now, self._health.half_open_interval_s)
+        ]
+        if not candidates:
+            return None
+        backend = min(candidates, key=lambda b: b.last_trial_at)
+        backend.last_trial_at = now
+        backend.trial_inflight = True
+        backend.inflight += 1
+        log.warning(
+            "TEI backend %s (%s) half-open trial after %s unhealthy",
+            backend.id, backend.base_url, _fmt_duration(backend.unhealthy_for()),
+        )
+        return backend
+
     # --- embedding -----------------------------------------------------
 
     async def embed(self, texts: list[str], *, truncate: bool = True) -> np.ndarray:
@@ -347,72 +551,129 @@ class TEIPool:
 
         for attempt in range(self._policy.max_attempts):
             backend = self._select(exclude)
+            trial = False
+            if backend is None:
+                # Nothing selectable: try to claim a half-open trial before
+                # giving up, so a recovered backend is found by traffic and
+                # not only by the probe loop.
+                backend = self._select_half_open(exclude)
+                trial = backend is not None
             if backend is None:
                 if last_exc is not None:
                     raise last_exc
-                raise RuntimeError("no healthy TEI backend available")
+                raise NoHealthyBackendError("no healthy TEI backend available")
 
             try:
-                json_resp = await backend.post(chunk, truncate=truncate)
-                backend.mark_success()
-                return np.asarray(json_resp, dtype=np.float16)
-            except BaseException as e:  # noqa: BLE001 — classify then re-raise
-                if not _is_transient(e):
-                    log.warning(
-                        "TEI backend %s: non-transient error (%s) — not retrying",
-                        backend.id, e,
-                    )
-                    raise
-                backend.mark_failure()
-                last_exc = e
-                if attempt == self._policy.max_attempts - 1:
-                    log.warning(
-                        "TEI: exhausted %d attempts — %s",
-                        self._policy.max_attempts, e,
-                    )
-                    raise
+                try:
+                    json_resp = await backend.post(chunk, truncate=truncate)
+                    backend.mark_success(source="trial" if trial else "request")
+                    return np.asarray(json_resp, dtype=np.float16)
+                except BaseException as e:  # noqa: BLE001 — classify then re-raise
+                    if not _is_transient(e):
+                        log.warning(
+                            "TEI backend %s: non-transient error (%s) — not retrying",
+                            backend.id, e,
+                        )
+                        raise
+                    backend.mark_failure(e, source="trial" if trial else "request")
+                    last_exc = e
+                    if attempt == self._policy.max_attempts - 1:
+                        log.warning(
+                            "TEI: exhausted %d attempts — %s",
+                            self._policy.max_attempts, e,
+                        )
+                        raise
 
-                exclude = exclude | {backend.id}
-                if self._has_selectable(exclude):
-                    # Another healthy backend is available — fail over now,
-                    # no backoff.
+                    exclude = exclude | {backend.id}
+                    if self._has_selectable(exclude):
+                        # Another healthy backend is available — fail over now,
+                        # no backoff.
+                        log.info(
+                            "TEI backend %s failed (%s) — failing over", backend.id, e,
+                        )
+                        continue
+
+                    # No alternative left: back off, then allow any backend again.
+                    wait = min(
+                        self._policy.initial_backoff_s * (self._policy.multiplier ** attempt),
+                        self._policy.max_single_backoff_s,
+                    )
+                    elapsed = loop.time() - started
+                    if elapsed + wait > self._policy.total_budget_s:
+                        log.warning(
+                            "TEI: total budget %.1fs exhausted at attempt %d — %s",
+                            self._policy.total_budget_s, attempt + 1, e,
+                        )
+                        raise
                     log.info(
-                        "TEI backend %s failed (%s) — failing over", backend.id, e,
+                        "TEI attempt %d/%d failed (%s) — retrying in %.2fs",
+                        attempt + 1, self._policy.max_attempts, e, wait,
                     )
-                    continue
-
-                # No alternative left: back off, then allow any backend again.
-                wait = min(
-                    self._policy.initial_backoff_s * (self._policy.multiplier ** attempt),
-                    self._policy.max_single_backoff_s,
-                )
-                elapsed = loop.time() - started
-                if elapsed + wait > self._policy.total_budget_s:
-                    log.warning(
-                        "TEI: total budget %.1fs exhausted at attempt %d — %s",
-                        self._policy.total_budget_s, attempt + 1, e,
-                    )
-                    raise
-                log.info(
-                    "TEI attempt %d/%d failed (%s) — retrying in %.2fs",
-                    attempt + 1, self._policy.max_attempts, e, wait,
-                )
-                await asyncio.sleep(wait)
-                exclude = frozenset()
+                    await asyncio.sleep(wait)
+                    exclude = frozenset()
+            finally:
+                # Release the half-open slot on every exit path, including
+                # `continue` and the re-raises above.
+                if trial:
+                    backend.trial_inflight = False
 
         raise last_exc or RuntimeError("unreachable")
 
     # --- background ----------------------------------------------------
 
     async def _probe_loop(self) -> None:
+        """Probe every backend on an interval, forever.
+
+        Every step is defensive on purpose (MXG-159): this loop is the only
+        thing that brings a backend back when there is no traffic to run a
+        half-open trial, and when it stopped, health froze at "unhealthy"
+        for four hours across a TEI restart. It must not be stoppable by a
+        hung probe (hence the round timeout) or by any exception (hence the
+        catch-all), and its liveness must be observable (hence the
+        timestamp)."""
         while True:
-            await asyncio.sleep(self._probe_interval_s)
-            backends = list(self._backends.values())
-            if backends:
-                await asyncio.gather(
-                    *(b.probe() for b in backends), return_exceptions=True,
-                )
-                self._notify()
+            try:
+                await asyncio.sleep(self._health.probe_interval_s)
+                backends = list(self._backends.values())
+                if backends:
+                    now = time.monotonic()
+                    for b in backends:
+                        if b.recycle_due(now):
+                            b.recycle_client()
+                    await self._probe_round(backends)
+                self.probe_loop_last_iteration_at = time.time()
+                if backends:
+                    self._notify()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — the loop outlives every bug in it
+                self.probe_loop_errors += 1
+                self.probe_loop_last_iteration_at = time.time()
+                log.exception("TEI probe round failed — continuing")
+
+    async def _probe_round(self, backends: list[TEIBackend]) -> None:
+        """One probe per backend, each bounded by the round budget.
+
+        A probe that does not answer is a failure, not a reason to wait:
+        httpx's own timeout did not save us in production (a wedged
+        connection pool can block before any of it applies), so the round
+        enforces the bound itself and charges the silence to the backend."""
+        tasks = {b.id: asyncio.create_task(b.probe()) for b in backends}
+        await asyncio.wait(
+            tasks.values(), timeout=self._health.probe_round_timeout_s,
+        )
+        for backend in backends:
+            task = tasks[backend.id]
+            if task.done():
+                continue
+            task.cancel()
+            self.probe_loop_errors += 1
+            backend.mark_failure(
+                asyncio.TimeoutError(
+                    f"probe exceeded {self._health.probe_round_timeout_s:.1f}s"
+                ),
+                source="probe",
+            )
 
     @property
     def semaphore_wait_total_s(self) -> float:
