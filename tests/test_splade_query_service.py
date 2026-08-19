@@ -13,20 +13,30 @@ SERVICE = REPO / "splade-service"
 sys.path.insert(0, str(SERVICE))
 
 backend_pool = importlib.import_module("backend_pool")
+config_module = importlib.import_module("config")
 
 
-class StubConfig:
-    kvrocks_url = "redis://stub"
-    backend_urls = ["http://backend"]
-    backend_api_key = ""
-    api_key = "query-secret"
-    admin_api_key = ""
-    max_inputs = 2
-    max_inflight = 32
-    request_budget_s = 5
-    cache_read_timeout_s = 0.1
-    cache_connections = 4
-    probe_interval_s = 5
+class StubConfig(config_module.Config):
+    """The real Config with the test's overrides on top.
+
+    Subclassed rather than hand-listed: a flat stub goes stale silently every
+    time a knob is added to Config, and this file spent a release erroring on a
+    missing `backend_pool_concurrency` for exactly that reason.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.kvrocks_url = "redis://stub"
+        self.backend_urls = ["http://backend"]
+        self.backend_api_key = ""
+        self.api_key = "query-secret"
+        self.admin_api_key = ""
+        self.max_inputs = 2
+        self.max_inflight = 32
+        self.request_budget_s = 5
+        self.cache_read_timeout_s = 0.1
+        self.cache_connections = 4
+
 
 
 class StubCache:
@@ -62,6 +72,26 @@ class StubPool:
 
     def ready(self):
         return True
+
+    def stats(self):
+        # The collector reads probe-loop liveness off this. A stub narrower than
+        # the thing it stands in for is how a scrape-time AttributeError reaches
+        # production green.
+        return {"probe_loop_last_iteration_at": 1000.0, "probe_loop_errors": 0}
+
+    def snapshots(self):
+        return [
+            {
+                "id": "b1",
+                "url": "http://backend",
+                "weight": 1,
+                "healthy": True,
+                "draining": False,
+                "inflight": 0,
+                "max_client_batch": 8,
+                "client_generation": 0,
+            }
+        ]
 
     async def encode(self, texts, document=True):
         self.calls.append((texts, document))
@@ -154,7 +184,7 @@ def test_embed_document_path_still_sets_document_true(query_client):
 def test_embed_query_obeys_shared_admission_limit(query_client):
     client, _, pool = query_client
     import main
-    main.app.state.inflight = StubConfig.max_inflight
+    main.app.state.inflight = main.app.state.config.max_inflight
     response = auth_post(client, "/embed-query", "query")
     assert response.status_code == 429
     assert pool.calls == []
@@ -171,6 +201,28 @@ def test_embed_query_rejects_malformed_backend_vector(query_client):
         auth_post(client, "/embed-query", "query")
 
 
+def test_no_healthy_backend_is_a_503_not_a_500(query_client):
+    """An unhandled NoHealthyBackendError is a 500 with a traceback per request.
+
+    On the dense side that wrote 268k tracebacks and 2.3 GB of container log over
+    one outage, and buried the single line that said what had happened. It is
+    also invisible to every alert: `splade_service_requests_total` never counted
+    it, `SpladeGatewayTimeouts` watches 504, and `SpladeNoBackendAtAll` only
+    fires when the metric disappears entirely. 503 tells the indexer to retry
+    rather than dead-letter.
+    """
+    client, _, pool = query_client
+
+    async def no_backend(texts, document=True):
+        raise backend_pool.NoHealthyBackendError("no healthy SPLADE backend available")
+
+    pool.encode = no_backend
+    response = auth_post(client, "/embed-query", "query")
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
+    assert response.json()["detail"] == "no healthy SPLADE backend available"
+
+
 class FakeBackend:
     def __init__(self, backend_id, max_client_batch, fail=False):
         self.id = backend_id
@@ -180,12 +232,25 @@ class FakeBackend:
         self.inflight = 0
         self.healthy = True
         self.draining = False
-        self.failures = 0
+        self.trial_inflight = False
+        self.last_trial_at = float("-inf")
+        self.consecutive_failures = 0
         self.calls = []
+        self.marks = []
+
+    def mark_success(self, source="request"):
+        self.consecutive_failures = 0
+        self.marks.append(("success", source))
+
+    def mark_failure(self, exc=None, source="request"):
+        self.consecutive_failures += 1
+        self.marks.append(("failure", source))
+
+    def trial_due(self, now, interval_s):
+        return not self.trial_inflight and (now - self.last_trial_at) >= interval_s
 
     async def encode(self, texts, document=True):
         self.calls.append((texts, document))
-        self.inflight -= 1
         if self.fail:
             self.fail = False
             raise RuntimeError("temporary failure")
@@ -219,7 +284,6 @@ def test_backend_posts_document_flag():
         transport=httpx.MockTransport(handler),
         base_url="http://backend",
     )
-    backend.inflight = 1
     try:
         result = asyncio.run(backend.encode(["query"], document=False))
     finally:

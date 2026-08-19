@@ -2,16 +2,17 @@ import asyncio
 import logging
 import math
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import REGISTRY, Counter, Gauge
-from prometheus_client.core import GaugeMetricFamily
+from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from backend_pool import BackendPool
+from backend_pool import BackendPool, HealthPolicy, NoHealthyBackendError
 from cache import SparseCache
 from codec import pack_sparse, unpack_sparse
 from config import Config
@@ -33,6 +34,33 @@ CACHE_HITS = Counter("splade_service_cache_hits_total", "Cache hits")
 CACHE_MISSES = Counter("splade_service_cache_misses_total", "Cache misses")
 INFLIGHT = Gauge("splade_service_inflight", "Miss requests being processed")
 MAX_QUERY_CHARS = 4096
+LOG_THROTTLE_S = 60.0
+_throttled_last = {}
+_throttled_suppressed = {}
+
+
+def log_throttled(key, message, *args):
+    """Log at most once per minute per key, carrying the suppressed count.
+
+    A condition that affects every request has to be logged per *state*, not per
+    request: on the dense side the same condition wrote 268k tracebacks and
+    2.3 GB of container log over one outage, which buried the single line that
+    said what had happened.
+    """
+    now = time.monotonic()
+    last = _throttled_last.get(key, float("-inf"))
+    if now - last < LOG_THROTTLE_S:
+        _throttled_suppressed[key] = _throttled_suppressed.get(key, 0) + 1
+        return
+    suppressed = _throttled_suppressed.pop(key, 0)
+    _throttled_last[key] = now
+    if suppressed:
+        log.warning(
+            message + " (%d more in the last %.0fs)",
+            *args, suppressed, LOG_THROTTLE_S,
+        )
+    else:
+        log.warning(message, *args)
 
 
 class BackendHealthCollector:
@@ -41,8 +69,13 @@ class BackendHealthCollector:
     A scrape-time collector rather than a Gauge written from the probe loop, for two reasons.
     Backends come and go through /admin/backends, so the label set is dynamic and a Gauge would
     keep exporting a stale child for a backend that has been removed. And a Gauge is only as
-    fresh as whatever writes it: if `_probe_loop` died, the last value would sit there looking
-    healthy forever, which is precisely the failure mode this metric exists to catch.
+    fresh as whatever writes it, whereas this reads the pool on every scrape.
+
+    That second property is narrower than it looks, and this docstring used to overclaim it: the
+    boolean being read is still written only by `_probe_loop`, so a loop that has died freezes it
+    and the collector re-exports the stale value just as faithfully as a Gauge would.
+    `splade_service_probe_loop_last_iteration_timestamp` below is what actually catches that, and
+    it is the metric `SpladeProbeLoopStalled` alerts on.
 
     The counters already here cannot cover this. `splade_service_requests_total{status="504"}`
     only rises when a client asks for something, so a backend that dies while the indexer is
@@ -65,6 +98,11 @@ class BackendHealthCollector:
             "1 if the backend is draining (weight 0, finishing in-flight work)",
             labels=["backend", "url"],
         )
+        generation = GaugeMetricFamily(
+            "splade_service_backend_client_generation",
+            "How many times this backend's HTTP client has been recycled",
+            labels=["backend", "url"],
+        )
         pool = getattr(self.app.state, "pool", None)
         # `.get` on everything but the id: a KeyError in a collector makes /metrics return 500,
         # which Prometheus reads as the whole job being down -- a false alarm that would mask
@@ -73,8 +111,32 @@ class BackendHealthCollector:
             labels = [snapshot["id"], snapshot.get("url", "")]
             healthy.add_metric(labels, float(snapshot.get("healthy", False)))
             draining.add_metric(labels, float(snapshot.get("draining", False)))
+            generation.add_metric(labels, float(snapshot.get("client_generation", 0)))
         yield healthy
         yield draining
+        yield generation
+
+        # The freshness of everything above. `healthy` is written only by the
+        # probe loop, so a loop that dies leaves it frozen at its last value and
+        # the outage reads as steady state -- a scrape-time collector re-exports
+        # that stale value just as faithfully as a push gauge would. This is the
+        # one signal a frozen loop cannot fake.
+        stats = pool.stats() if pool is not None else {}
+        last_iteration = GaugeMetricFamily(
+            "splade_service_probe_loop_last_iteration_timestamp",
+            "Unix time of the last completed probe round; stale = recovery is "
+            "not running",
+        )
+        last_iteration.add_metric(
+            [], float(stats.get("probe_loop_last_iteration_at", 0.0))
+        )
+        yield last_iteration
+        errors = CounterMetricFamily(
+            "splade_service_probe_loop_errors",
+            "Probe rounds that timed out or raised (the loop keeps going)",
+        )
+        errors.add_metric([], float(stats.get("probe_loop_errors", 0)))
+        yield errors
 
 
 @asynccontextmanager
@@ -85,13 +147,28 @@ async def lifespan(app):
         config.cache_read_timeout_s,
         config.cache_connections,
     )
-    pool = BackendPool(config.probe_interval_s)
+    pool = BackendPool(
+        HealthPolicy(
+            unhealthy_after=config.unhealthy_after,
+            probe_interval_s=config.probe_interval_s,
+            probe_timeout_s=config.probe_timeout_s,
+            probe_round_timeout_s=config.probe_round_timeout_s,
+            half_open_interval_s=config.half_open_interval_s,
+            client_recycle_after_s=config.client_recycle_after_s,
+            pool_timeout_recycle_after=config.pool_timeout_recycle_after,
+        )
+    )
     for url in config.backend_urls:
+        # `require_verify=False`: a backend that is down or still loading its
+        # checkpoint at boot must not take the frontend down with it. It is
+        # registered unhealthy, /readyz stays 503, and the probe loop brings it
+        # in. POST /admin/backends keeps the strict form.
         await pool.add(
             url,
             max_concurrency=config.backend_pool_concurrency,
             max_client_batch=config.backend_max_client_batch,
             api_key=config.backend_api_key,
+            require_verify=False,
         )
     pool.start()
     app.state.config = config
@@ -132,6 +209,24 @@ async def authenticate(request, call_next):
     ):
         return await call_next(request)
     return JSONResponse(status_code=401, content={"detail": "invalid api key"})
+
+
+def no_backend_error(config, path, exc):
+    """503 instead of the unhandled 500 this used to be.
+
+    Unhandled, `NoHealthyBackendError` surfaced as a bare 500: uncounted by
+    `splade_service_requests_total` and invisible to every alert built on it --
+    `SpladeGatewayTimeouts` watches 504, `SpladeNoBackendAtAll` only fires when
+    the metric disappears entirely. 503 is also the honest status, and it tells
+    the indexer to retry rather than dead-letter.
+    """
+    REQUESTS.labels("503").inc()
+    log_throttled("no_backend", "%s rejected: %s", path, exc)
+    return HTTPException(
+        status_code=503,
+        detail="no healthy SPLADE backend available",
+        headers={"Retry-After": f"{config.retry_after_s:.0f}"},
+    )
 
 
 @app.get("/healthz")
@@ -226,6 +321,8 @@ async def embed(body: EmbedRequest, request: Request, background: BackgroundTask
     except asyncio.TimeoutError:
         REQUESTS.labels("504").inc()
         raise HTTPException(status_code=504, detail="request budget exhausted")
+    except NoHealthyBackendError as exc:
+        raise no_backend_error(config, "/embed", exc)
 
 
 @app.post("/embed-query")
@@ -239,6 +336,8 @@ async def embed_query(body: EmbedRequest, request: Request):
     except asyncio.TimeoutError:
         REQUESTS.labels("504").inc()
         raise HTTPException(status_code=504, detail="request budget exhausted")
+    except NoHealthyBackendError as exc:
+        raise no_backend_error(config, "/embed-query", exc)
 
 
 async def _embed_query(body, request):

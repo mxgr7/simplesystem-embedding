@@ -28,6 +28,33 @@ class Config:
         self.probe_interval_s = float(
             os.environ.get("BACKEND_PROBE_INTERVAL_S", "5")
         )
+        # Recovery knobs (MXG-166), ported from the dense wrapper's MXG-159 fix.
+        # A probe is bounded outside httpx so a wedged connection pool cannot
+        # stop recovery; a backend that stays unhealthy that long gets a fresh
+        # HTTP client; while nothing is selectable, one trial per interval is let
+        # through to find out whether the backend is back. Defaults are the
+        # intended production values, so compose does not set them.
+        self.probe_timeout_s = float(
+            os.environ.get("BACKEND_PROBE_TIMEOUT_S", "2")
+        )
+        self.probe_round_timeout_s = float(
+            os.environ.get("BACKEND_PROBE_ROUND_TIMEOUT_S", "10")
+        )
+        self.unhealthy_after = int(
+            os.environ.get("BACKEND_UNHEALTHY_AFTER", "2")
+        )
+        self.half_open_interval_s = float(
+            os.environ.get("BACKEND_HALF_OPEN_INTERVAL_S", "5")
+        )
+        self.client_recycle_after_s = float(
+            os.environ.get("BACKEND_CLIENT_RECYCLE_AFTER_S", "60")
+        )
+        self.pool_timeout_recycle_after = int(
+            os.environ.get("BACKEND_POOL_TIMEOUT_RECYCLE_AFTER", "3")
+        )
+        # Retry-After on the 503 a no-healthy-backend request now gets instead of
+        # an unhandled 500.
+        self.retry_after_s = float(os.environ.get("RETRY_AFTER_S", "1"))
         # How BACKEND_URLS are registered at startup. These exist because the
         # BackendPool.add defaults (8 / 1) are the wrong shape for a real client and
         # were only ever corrected at runtime through POST /admin/backends, which a

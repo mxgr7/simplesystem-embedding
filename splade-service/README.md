@@ -29,6 +29,51 @@ The frontend can route misses across multiple compatible backends. Add, reweight
 or drain them with `/admin/backends`; every backend must report the exact model
 contract and checkpoint SHA from `/metadata`.
 
+## Backend recovery
+
+A backend leaves the pool after two consecutive failures and comes back only
+through `verify()` -- `/metadata` plus the checkpoint and encoder-contract check.
+A successful `/encode` clears the failure counter but does not promote: a backend
+restarted onto a different dtype behind the same URL answers `/encode` perfectly
+well, and readmitting it on that alone files its vectors under another encoder's
+cache key.
+
+Three independent ways back, so no single wedged component is fatal (MXG-166,
+porting the dense wrapper's MXG-159 fix):
+
+* The probe loop is bounded per probe and guarded, and stamps
+  `splade_service_probe_loop_last_iteration_timestamp` on every iteration
+  including the failing ones. A probe that outlives its bound is cancelled and
+  charged as a failure -- httpx's own timeout provably does not bound a wedged
+  connection pool. Without this, one silent probe stops recovery for good and
+  `splade_service_backend_healthy` freezes at its last value, so the outage reads
+  as steady state.
+* The HTTP client is recycled after a backend has been unhealthy for
+  `BACKEND_CLIENT_RECYCLE_AFTER_S`, or after
+  `BACKEND_POOL_TIMEOUT_RECYCLE_AFTER` consecutive `PoolTimeout`s. A poisoned
+  connection pool is indistinguishable from a dead backend from the outside, and
+  it is why restarting the *backend* does not help: only a new client does.
+* Half-open admission lets one trial per `BACKEND_HALF_OPEN_INTERVAL_S` through
+  to an unhealthy backend, verify first and then a real chunk. With one entry in
+  `BACKEND_URLS`, failing fast forever and being down are the same event.
+
+A request that finds no healthy backend gets **503** with `Retry-After`, not an
+unhandled 500, and is counted as `splade_service_requests_total{status="503"}`.
+
+| var | default | |
+| --- | --- | --- |
+| `BACKEND_PROBE_INTERVAL_S` | 5 | probe cadence |
+| `BACKEND_PROBE_TIMEOUT_S` | 2 | httpx timeout on one `/metadata` probe |
+| `BACKEND_PROBE_ROUND_TIMEOUT_S` | 10 | hard bound outside httpx; silence is a failure |
+| `BACKEND_UNHEALTHY_AFTER` | 2 | consecutive failures before a backend leaves the pool |
+| `BACKEND_HALF_OPEN_INTERVAL_S` | 5 | spacing of half-open trials, per backend |
+| `BACKEND_CLIENT_RECYCLE_AFTER_S` | 60 | unhealthy duration before the client is replaced |
+| `BACKEND_POOL_TIMEOUT_RECYCLE_AFTER` | 3 | consecutive `PoolTimeout`s that recycle early |
+| `RETRY_AFTER_S` | 1 | `Retry-After` on the 503 |
+
+These defaults are the intended production values, so `compose.t4.yaml` does not
+set them.
+
 CUDA backends also expose `POST /encode-packed` for bulk document indexing. It
 runs document inference under BF16 autocast, applies the special-token mask and
 top-256 on GPU, and returns versioned batches of the existing uint16-token/

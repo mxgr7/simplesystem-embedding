@@ -16,6 +16,7 @@ sys.path.insert(0, str(SERVICE))
 codec = importlib.import_module("codec")
 constants = importlib.import_module("constants")
 hashing = importlib.import_module("hashing")
+config_module = importlib.import_module("config")
 rendering = importlib.import_module("rendering")
 
 
@@ -125,20 +126,27 @@ def test_backend_tokenizer_uses_wordpiece_fallback_on_missing_dependency(
     assert tokenizer("TEST")["input_ids"] == [2, 5, 3]
 
 
-class StubConfig:
-    kvrocks_url = "redis://stub"
-    backend_urls = ["http://backend"]
-    backend_api_key = ""
-    api_key = ""
-    admin_api_key = ""
-    max_inputs = 256
-    max_inflight = 32
-    request_budget_s = 5
-    cache_read_timeout_s = 0.1
-    cache_connections = 4
-    probe_interval_s = 5
-    backend_max_client_batch = 64
-    backend_pool_concurrency = 3
+class StubConfig(config_module.Config):
+    """The real Config with the test's overrides on top.
+
+    Subclassed rather than hand-listed: a flat stub goes stale silently every
+    time a knob is added to Config, and this file spent a release erroring on a
+    missing `backend_pool_concurrency` for exactly that reason.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.kvrocks_url = "redis://stub"
+        self.backend_urls = ["http://backend"]
+        self.backend_api_key = ""
+        self.api_key = ""
+        self.admin_api_key = ""
+        self.max_inputs = 256
+        self.max_inflight = 32
+        self.request_budget_s = 5
+        self.cache_read_timeout_s = 0.1
+        self.cache_connections = 4
+
 
 
 class StubCache:
@@ -176,6 +184,12 @@ class StubPool:
 
     def ready(self):
         return True
+
+    def stats(self):
+        # The collector reads probe-loop liveness off this. A stub narrower than
+        # the thing it stands in for is how a scrape-time AttributeError reaches
+        # production green.
+        return {"probe_loop_last_iteration_at": 1000.0, "probe_loop_errors": 0}
 
     def snapshots(self):
         # Mirrors BackendConnection.snapshot()'s real key set -- the metrics collector reads
@@ -250,10 +264,20 @@ def test_startup_registers_backends_with_the_configured_batch_and_concurrency(
     inflight pinned at MAX_INFLIGHT and ~40% of requests shed as 429. Correcting it
     through POST /admin/backends works but dies with the process, so startup has to
     carry it.
+
+    `require_verify=False` belongs to the same argument: a backend that is down
+    or still loading its checkpoint at boot must be registered unhealthy and left
+    to the probe loop, not allowed to abort lifespan and restart-loop the
+    frontend. POST /admin/backends keeps the strict form.
     """
     _, _, pool = service_client
     assert [kwargs for _, kwargs in pool.added] == [
-        {"max_concurrency": 3, "max_client_batch": 64, "api_key": ""}
+        {
+            "max_concurrency": 3,
+            "max_client_batch": 64,
+            "api_key": "",
+            "require_verify": False,
+        }
     ]
 
 
@@ -295,6 +319,27 @@ def test_backend_healthy_metric_tracks_the_pool(service_client):
     pool.healthy = False
     assert _metric_lines(client, "splade_service_backend_healthy{") == [
         'splade_service_backend_healthy{backend="b1",url="http://backend-1:8138"} 0.0'
+    ]
+
+
+def test_probe_loop_liveness_is_scraped_off_the_pool(service_client):
+    """The one signal a frozen probe loop cannot fake.
+
+    `splade_service_backend_healthy` above is written only BY the probe loop, so
+    a loop that dies leaves it frozen at its last value and the outage reads as
+    steady state -- a scrape-time collector re-exports the stale value just as
+    faithfully as a push gauge would. `SpladeProbeLoopStalled` alerts on the age
+    of this stamp instead.
+    """
+    client, _, _ = service_client
+    assert _metric_lines(
+        client, "splade_service_probe_loop_last_iteration_timestamp"
+    ) == ["splade_service_probe_loop_last_iteration_timestamp 1000.0"]
+    assert _metric_lines(client, "splade_service_probe_loop_errors_total") == [
+        "splade_service_probe_loop_errors_total 0.0"
+    ]
+    assert _metric_lines(client, "splade_service_backend_client_generation{") == [
+        'splade_service_backend_client_generation{backend="b1",url="http://backend-1:8138"} 0.0'
     ]
 
 
