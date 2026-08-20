@@ -407,6 +407,61 @@ groups:
           description: "Both embedding caches live here. Cache misses degrade to real encodes, so this shows up as GPU load and latency before it shows up as errors."
           action: "docker logs --tail 50 embedding-service-kvrocks-1; check /mnt/nvme free space."
 
+      # --- MXG-149: the query service's cascade -------------------------------------------
+      # ⚠️ The two rules below are the only ones in this file that were NOT evaluated against
+      # this Prometheus before being committed, because the series they read do not exist here
+      # yet. article_search_query_* is exported by the article-search-query pods, and the scrape
+      # job that reaches them is MXG-181 §5. Until that lands these are inert: no series, no
+      # evaluation, no firing. Re-check both expressions the day the job appears.
+      - alert: CascadeServingCoarseOrder
+        # The fine ranker decides the order only when the cross-encoder scored EVERY candidate
+        # in the 120-window. Short of that the SERP keeps the coarse ranker's order, which is
+        # the decided behaviour and is measurably worse: MXG-153 put the CE's end-to-end worth
+        # at .915 against .842 on blind-union labels.
+        #
+        # This covers more than a CE outage. A blank or wrong SEARCH_RERANK_CE_URL produces the
+        # same reason="coarse" tag, because CeRerankClient then holds a null client and hands
+        # back an empty window. Neither case is visible in a response: an open-loop ramp on
+        # 2026-08-19 got HTTP 200 for every request through 10 searches/s while the CE was
+        # failing, and only the counter deltas showed it.
+        #
+        # 30m rate windows, where the other proportion rules in this group use 5m. Two reasons.
+        # Search traffic averaged ~0.08 q/s across the A/B, so a 5m window holds roughly two
+        # dozen requests and one coarse order is already 4%. And cascade.order is stamped after
+        # the ranked-pool cache (300 s TTL), so a brief outage keeps counting through page flips
+        # for five minutes after it ends; a window shorter than the TTL reads that tail as new.
+        #
+        # Denominator is fine|coarse only: empty_pool and no_cascade are not degradations, and
+        # not_configured has its own rule below.
+        expr: |
+          sum(rate(article_search_query_cascade_order_total{reason="coarse"}[30m]))
+            / clamp_min(sum(rate(article_search_query_cascade_order_total{reason=~"fine|coarse"}[30m])), 0.001) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of SERPs are being served in coarse order"
+          description: "The cross-encoder is not scoring full windows. Results stay correct and get measurably worse (MXG-153: .915 against .842). A total CE outage is this same rule at 100%."
+          action: "Check CeServiceAtCapacity and ce_service_requests_total{status=\"429\"} first, then confirm SEARCH_RERANK_CE_URL on the query pods resolves to a reachable ce-service. Triage query: sum(rate(article_search_query_cascade_ce_window_total[5m])) by (outcome). Vocabulary: article/search/query/README-reranker.md, Cascade ordering."
+
+      - alert: CascadeWindowScorerMissing
+        # Despite the tag name this does NOT mean the CE got no url. reason="not_configured" is
+        # set only when the CeWindowScorer bean is absent from the context, and
+        # CeCascadeWindowScorer is an unconditional @Component, so a non-zero rate here is a
+        # broken assembly rather than a broken config. It should never fire in a deployment that
+        # was assembled normally; it is here because the enum value exists and an unexplained
+        # series is worse than a rule nobody expects to see.
+        # A forgotten url is not detectable after boot at all, which is what MXG-179 fixes by
+        # moving that check to startup.
+        expr: rate(article_search_query_cascade_order_total{reason="not_configured"}[30m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Query service is running without a CE window scorer bean"
+          description: "CascadeOrdering.NOT_CONFIGURED: every SERP is ordered by the coarse ranker and no CE call is ever attempted. This is a wiring fault in the deployed artifact, not a configuration value, so no env change will fix it."
+          action: "Hit the query service's actuator /beans and look for CeCascadeWindowScorer, then compare the deployed image against the branch it was built from."
+
   - name: host
     interval: 30s
     rules:
