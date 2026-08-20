@@ -63,6 +63,7 @@ class RetryPolicy:
 
 
 _TRANSIENT_HTTP_STATUSES = frozenset({500, 502, 503, 504, 408, 429})
+_INPUT_REJECTION_HTTP_STATUSES = frozenset({400, 413, 422})
 
 # Consecutive failures (real requests or health probes) before a backend is
 # marked unhealthy and skipped in selection; one success restores it.
@@ -98,6 +99,19 @@ class NoHealthyBackendError(RuntimeError):
     (and the `/readyz` canary) behave exactly as before; `main.py` catches
     the specific type to answer 503 instead of a 500 with a traceback.
     """
+
+
+class TEIInputError(RuntimeError):
+    """TEI rejected request data rather than reporting a backend fault.
+
+    The public exception deliberately carries no upstream response body.
+    Article text can appear there, and callers need only the status to
+    distinguish permanent input failures from retryable outages.
+    """
+
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(f"TEI rejected the embedding input (HTTP {status_code})")
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -594,6 +608,20 @@ class TEIPool:
                     backend.mark_success(source="trial" if trial else "request")
                     return np.asarray(json_resp, dtype=np.float16)
                 except BaseException as e:  # noqa: BLE001 — classify then re-raise
+                    if (
+                        isinstance(e, httpx.HTTPStatusError)
+                        and e.response.status_code in _INPUT_REJECTION_HTTP_STATUSES
+                    ):
+                        status = e.response.status_code
+                        # Reaching TEI's input validator proves the serving
+                        # connection works. Break any prior backend-failure
+                        # streak, then report the caller's permanent error.
+                        backend.mark_success(source="trial" if trial else "request")
+                        log.warning(
+                            "TEI backend %s rejected embedding input with HTTP %d",
+                            backend.id, status,
+                        )
+                        raise TEIInputError(status) from e
                     if not _is_transient(e):
                         log.warning(
                             "TEI backend %s: non-transient error (%s) — not retrying",

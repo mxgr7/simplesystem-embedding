@@ -41,7 +41,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 
 from cache import VECTOR_DIM, EmbeddingCache, fp16_from_bytes, vec_bytes_from_fp16
 from config import load_config
-from embed_client import HealthPolicy, NoHealthyBackendError, TEIPool
+from embed_client import HealthPolicy, NoHealthyBackendError, TEIInputError, TEIPool
 from hashing import article_hash
 from models import AddBackendRequest, EmbedRequest, PatchBackendRequest
 from rendering import N_FIELDS, render_from_nul
@@ -452,6 +452,13 @@ async def embed(
             detail="no healthy TEI backend available",
             headers={"Retry-After": f"{cfg.retry_after_s:.2f}"},
         )
+    except TEIInputError as e:
+        # Preserve permanent input failures across the wrapper boundary.
+        # Returning 500 here makes the indexer retry the whole batch forever
+        # instead of isolating the rejected article and dead-lettering it.
+        status = str(e.status_code)
+        _REQUESTS.labels(status=status).inc()
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
 
 async def _embed_handler(

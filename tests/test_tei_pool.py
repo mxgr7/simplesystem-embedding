@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 import httpx
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVICE_DIR = REPO_ROOT / "embedding-service"
@@ -67,6 +68,8 @@ class StubTEI:
             await asyncio.sleep(3600)
         if self.mode == "fail":
             return httpx.Response(503, text="backend down")
+        if self.mode == "reject" and not is_health:
+            return httpx.Response(422, text="input validation failed")
         if is_health:
             return httpx.Response(200, text="")
         n = len(json.loads(request.content)["inputs"])
@@ -166,6 +169,34 @@ def test_two_failures_trip_backend_unhealthy() -> None:
             assert not backend.healthy
             assert backend.consecutive_failures == 2
             assert backend.unhealthy_for() >= 0.0
+            await pool.aclose()
+
+    asyncio.run(body())
+
+
+def test_input_rejections_do_not_affect_backend_health() -> None:
+    stub = StubTEI("ok")
+
+    async def body():
+        with stubbed(stub):
+            pool = await _make_pool()
+            backend = _only(pool)
+            await backend.probe()
+            assert backend.healthy
+            backend.mark_failure(httpx.ConnectError("one transient failure"))
+            assert backend.consecutive_failures == 1
+
+            stub.mode = "reject"
+            for _ in range(3):
+                with pytest.raises(ec.TEIInputError) as raised:
+                    await pool.embed(["bad input"])
+                assert raised.value.status_code == 422
+                assert "input validation failed" not in str(raised.value)
+
+            assert backend.healthy
+            assert backend.consecutive_failures == 0
+            assert backend.client_generation == 0
+            assert stub.embed_calls == 3
             await pool.aclose()
 
     asyncio.run(body())

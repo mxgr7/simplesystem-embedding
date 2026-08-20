@@ -48,11 +48,17 @@ paths:
                   minItems: 128
                   maxItems: 128
         "400":
-          description: Malformed request (e.g. wrong field count, empty inputs).
+          description: |
+            Malformed request (for example, wrong field count or empty
+            inputs), or TEI rejected the rendered input as invalid.
         "401":
           description: Missing or invalid bearer token (when `API_KEY` is set).
         "413":
-          description: Too many inputs in one request.
+          description: |
+            Too many inputs in one request, or TEI rejected an input as too
+            large.
+        "422":
+          description: TEI rejected the rendered input during validation.
         "429":
           description: Service at concurrency limit. Includes `Retry-After`.
         "503":

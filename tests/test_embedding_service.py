@@ -217,6 +217,7 @@ def app_with_stubs(monkeypatch):
             self.call_count = 0
             self.texts_received: list[str] = []
             self.semaphore_wait_total_s = 0.0
+            self.error: Exception | None = None
 
         # Pool surface the lifespan drives.
         async def add_backend(self, url, **kwargs):
@@ -229,6 +230,8 @@ def app_with_stubs(monkeypatch):
             import hashlib
             self.call_count += 1
             self.texts_received.extend(texts)
+            if self.error:
+                raise self.error
             out = np.zeros((len(texts), 128), dtype=np.float16)
             for i, t in enumerate(texts):
                 # Seed from a hash of the whole text so distinct inputs
@@ -287,6 +290,20 @@ def test_embed_second_call_hits_cache(app_with_stubs):
     # Same hash → same vector (cache hit means we deserialised the stored
     # fp16 bytes back to a list — value must equal the original).
     assert r1.json()[0] == r2.json()[0]
+
+
+@pytest.mark.parametrize("status_code", [400, 413, 422])
+def test_embed_preserves_tei_input_rejection_status(app_with_stubs, status_code):
+    client, app = app_with_stubs
+    main = _load_service_main()
+    app.state.tei.error = main.TEIInputError(status_code)
+
+    r = client.post("/embed", json={"inputs": _make_8field()})
+
+    assert r.status_code == status_code
+    assert r.json() == {
+        "detail": f"TEI rejected the embedding input (HTTP {status_code})"
+    }
 
 
 def test_embed_rejects_wrong_field_count(app_with_stubs):
