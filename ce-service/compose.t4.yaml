@@ -55,7 +55,10 @@ services:
       # services' upgrade paths on a box where one of them is a production
       # indexer dependency. 6.5 GB of 802 is the right price for independence.
       target: service
-    image: simplesystem-ce-service:d_mxg84_new108t_mxg66_s68-fp16-t4-v1
+    # The tag encodes the checkpoint. The incumbent image
+    # (…:d_mxg84_new108t_mxg66_s68-fp16-t4-v1) stays in the local image store as
+    # the rollback target -- do not `docker image prune` on this box.
+    image: simplesystem-ce-service:d_mxg177_d_mxg66_s66-fp16-t4-v1
     # Loopback only, and deliberately so while this is dark.
     #
     # ⚠️ 8140, NOT 8139. 8139 looks free from the compose side and is not:
@@ -99,8 +102,11 @@ services:
       CE_MODEL_DIR: /model
       # Pinned, not defaulted, on purpose: the digests are what make the
       # deployment a named thing rather than "whatever is in /data today".
-      CE_MODEL_ID: d_mxg84_new108t_mxg66_s68-2026-08-14
-      CE_MODEL_SHA256: a7c23fc893f92873cda200385165900020c455d3de0730d40801fd661884b702
+      # MXG-177: the cell-D negation-tuned student, served under query contract
+      # fold-de-v1-no-prefix (raw query on the wire, fold_de + no prefix applied
+      # in the service; a `segment` key is now a 400).
+      CE_MODEL_ID: d_mxg177_d_mxg66_s66-2026-08-20
+      CE_MODEL_SHA256: 85a2cfdc088d6f779abf4a5ecc36c9fbafe13539df78a5710c4aeb96750c5036
       # ⚠️ These two pin DIFFERENT things and both are load-bearing. The digest
       # pins the vocabulary file and MUST equal the indexer's
       # `s2ng-article-search.ce.tokenizer-sha256`, or the 115,485,224 stored
@@ -180,9 +186,15 @@ services:
       # scores, not an error.
       CE_ASSERT_GOLDEN: "1"
       PYTHONPATH: /runtime
-      API_KEY: ${CE_API_KEY:?set CE_API_KEY}
+      # Blank means open. The encoders serve without API keys since 2026-08-21
+      # (Max, recorded on MXG-181); the middleware stays so a key can be turned
+      # back on without a code change.
+      API_KEY: ${CE_API_KEY:-}
     volumes:
-      - ${CE_MODEL_DIR:-/data/ce-service/model}:/model:ro
+      # Versioned per checkpoint so the incumbent's directory
+      # (/data/ce-service/model, holding d_mxg84_new108t_mxg66_s68) survives as
+      # the rollback target. Rollback = revert this commit + `up -d`.
+      - ${CE_MODEL_DIR:-/data/ce-service/model-d_mxg177_d_mxg66_s66-2026-08-20}:/model:ro
       # CUDA torch + tokenizers + safetensors, kept off the 88%-full root fs.
       - ${CE_RUNTIME_DIR:-/data/ce-service/runtime}:/runtime:ro
     deploy:

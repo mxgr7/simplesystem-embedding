@@ -4,12 +4,19 @@ Serves the cross-encoder fine ranker for the v2 search pipeline, scoring
 `(query, article)` pairs **from the article token ids the indexer already
 stored** rather than re-rendering and re-tokenizing per candidate per query.
 
-MXG-144. Model: `d_mxg84_new108t_mxg66_s68` (12L×384 XLM-R student, `text_es`
-profile, fp16, **`CE_MAX_LEN=128`** since 2026-08-18) — the settled output of
-flag-visible teacher →
-distill → MXG-66 negation overlay. **The overlay is not optional**: the unaided
-student scores 0.320/0.700 on the controlled negation gates against 0.920/0.968
-with it, and under the MXG-108 rendering that failure is unrecoverable.
+MXG-144. Model: `d_mxg177_d_mxg66_s66` (12L×384 XLM-R student, `text_es`
+profile, fp16, **`CE_MAX_LEN=128`** since 2026-08-18) — the cell-D output of
+fold_de/no-prefix teacher → distill → MXG-66 negation overlay, shipped under
+MXG-177 (Max's explicit override of the teacher screen's predeclared no-change
+verdict; `pipeline/out/mxg177_stage2/run_manifest.json` records it). **The
+overlay is not optional**: the unaided student fails the controlled negation
+gate; with it the model scores 0.912/0.960.
+
+**Query contract `fold-de-v1-no-prefix`** (MXG-177): the caller sends the
+**untouched raw query**; this service alone builds the model input — `fold_de`
+(NFC → casefold → NFC → ä→ae/ö→oe/ü→ue/ß→ss → strip remaining combining marks →
+NFC; **whitespace preserved**) and **no segment prefix**. The identifier is
+returned as `query_contract` from `/metadata` and every `/rerank` response.
 
 ## What it does, in one path
 
@@ -64,19 +71,26 @@ ever changes.
 Request:
 
 ```json
-{ "query": "6es7 522-1bl01", "segment": "A_identifier", "max_len": 128,
+{ "query": "6ES7 522-1BL01", "max_len": 128,
   "candidates": [{ "id": "vendor42:AB-1234", "tokens_b64": "PwAAAKcD…",
                    "token_count": 137,
                    "tokenizer_version": "ce_dist_l12_v3-2026-07-18-fkr108" }] }
 ```
 
-* `segment` is the ESCI hint the model was trained with. Omit it and you get
-  `P_product_noun`, which is **the trained fallback**, not an arbitrary default:
-  it is the `multiIf` fallback in `export_ce_data.SEGMENT_SQL` and the
-  `coalesce(...)` in `build_ce_v4_dataset.py`, so a term with no classification
-  at all was trained under it. An *unrecognised* value is a 400 — it would still
-  tokenize, still eat query budget and still produce plausible scores. MXG-148
-  will start sending real values.
+* `query` is the raw request string, untouched. Folding happens HERE, once, and
+  the folded text is what gets encoded — a caller that folds (or normalizes)
+  first would double-apply nothing (fold_de is idempotent) but a caller that
+  substitutes the normalized lookup term for the raw spelling breaks the
+  contract silently. Keep `term`, `raw_query` and `ce_query_text` distinct.
+* A request carrying a **`segment` key — null included — is a 400**
+  `invalid_request`, logged at error level without the query text. The retired
+  prefixed contract is the one thing that must fail loudly, because its scores
+  under this model would be plausible and wrong.
+* A nonblank query whose folded form is empty (combining marks alone, or
+  characters that decompose to whitespace) is a **query-level decline**: HTTP
+  200, `results` and `skipped` BOTH empty, `declined_reason:
+  "empty_folded_query"`, no inference. This is the one carve-out to the
+  every-id-comes-back contract below; callers branch on `declined_reason`.
 * `tokenizer_version` is **per candidate**, because a partially backfilled index
   carries a mix and surviving that is the whole reason the field exists.
 * `token_count` is redundant with `len(tokens_b64)`. The redundancy is the
@@ -99,7 +113,9 @@ Response carries `results[]` **in request order** — this service does not own
 ranking policy; EAN pin-to-top, tail demotion and tie handling live in the query
 service's `RerankerService` — plus `skipped[]` with a `reason` per candidate
 (`tokenizer_version_mismatch` | `decode_failed` | `no_tokens`). Every input id
-comes back exactly once across the two.
+comes back exactly once across the two — except on an `empty_folded_query`
+decline, where both arrays are empty by design. Every response also carries
+`query_contract` alongside `serving_contract`; assert on both.
 
 Each result carries **both** `ce_score` and the four class probabilities. The
 score is `train_ce.py`'s `sum(softmax(logits) · [4,2,1,0]) / 4` and the field
@@ -167,10 +183,17 @@ docker run --rm -v /data/ce-service/runtime:/runtime \
   'transformers>=5,<6' 'tokenizers>=0.22,<1' 'safetensors>=0.4,<1'
 ```
 
-Then copy the **inner** checkpoint directory (`…-2026-08-14/d_mxg84_new108t_mxg66_s68/`,
-excluding `scores.jsonl.gz` and `train.log`) to `/data/ce-service/model/`, and
-**verify both digests from inside the container**, not from the host — the point
-is to check what the process will read.
+Then copy the **inner** checkpoint directory
+(`…-2026-08-20/d_mxg177_d_mxg66_s66/`, excluding `scores.jsonl.gz`, `train.log`
+and `DONE`) to the **versioned** model dir the compose file mounts
+(`/data/ce-service/model-d_mxg177_d_mxg66_s66-2026-08-20/`), and **verify both
+digests from inside the container**, not from the host — the point is to check
+what the process will read.
+
+The incumbent's directory (`/data/ce-service/model/`, holding
+`d_mxg84_new108t_mxg66_s68`) and its image stay untouched as the rollback
+target: rollback is `git revert` of the pin commit + `up -d`. Do not
+`docker image prune` on this box.
 
 `docker compose -f compose.t4.yaml --env-file .env up -d`.
 
@@ -184,7 +207,9 @@ would splice a syntactically valid, semantically wrong sequence) · `max_len`
 inside `[8, max_position_embeddings − 2]` · CPU without `CE_ALLOW_CPU` ·
 compute capability < 7.0 · **bf16 without native bf16** · an inconsistent
 `(MAX_INPUTS_PER_REQUEST, REQUEST_BUDGET_S)` pair · the golden splice fixture ·
-the warmup forward.
+**the query contract** (the fold_de training table and a no-prefix encode
+through the loaded tokenizer — the golden fixture stores precomputed queryIds,
+so it alone would not catch a resurrected prefix) · the warmup forward.
 
 The bf16 guard exists because on sm_75 `torch.cuda.is_bf16_supported()` answers
 **True** — it defaults to `including_emulation=True` — so without it the process
