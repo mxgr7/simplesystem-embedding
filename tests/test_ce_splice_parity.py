@@ -31,14 +31,13 @@ sys.path.insert(0, str(REPO / "ce-service"))
 
 from ceserve import SPLICE_FIXTURE  # noqa: E402
 from ceserve.constants import BOS, EOS, HEAD_EXTRA, PAD, VOCAB_SIZE  # noqa: E402
+from ceserve.fold_de import fold_de  # noqa: E402
 from ceserve.splice import (  # noqa: E402
-    DEFAULT_SEGMENT,
-    SEGMENTS,
     TokenDecodeError,
     assemble,
     clamp_max_len,
     decode_token_ids,
-    resolve_segment,
+    encode_query,
 )
 
 # /next-gen's own cross-language fixture, written by the SAME tokenizer.json and
@@ -304,30 +303,53 @@ def test_pad_to_fixed_width_still_bounded_by_max_len():
     )
 
 
-# ------------------------------------------------------- segment / max_len --
+# --------------------------------------- query contract (MXG-177) / max_len --
 
-def test_segment_vocabulary_is_the_trained_one():
-    assert SEGMENTS == {
-        "A_identifier", "B_brand", "C_brand_product", "D_spec_product",
-        "P_product_noun",
+def test_fold_de_matches_the_training_contract():
+    """The exact table `pipeline/fold_de.py` self-checks, plus the row
+    `pipeline/tests/test_train_ce_query_contract.py` pins: whitespace is
+    PRESERVED (fold_de alone, no normalize_text collapse — that composition is
+    the SPLADE chain, and copying it here would be a silent contract break)."""
+    table = {
+        "Kühlschrank": "kuehlschrank",
+        "Schloßschraube GROß": "schlossschraube gross",
+        "für": "fuer",
+        "Größe": "groesse",
+        "V4034PX": "v4034px",
+        "Café": "cafe",
+        "Messlöffel  M8X40": "messloeffel  m8x40",
+        "": "",
     }
-    assert DEFAULT_SEGMENT == "P_product_noun", (
-        "the multiIf fallback in export_ce_data.SEGMENT_SQL — a term with no "
-        "classification was TRAINED as P_product_noun"
-    )
+    for src, want in table.items():
+        assert fold_de(src) == want, src
 
 
-def test_absent_segment_defaults_and_says_so():
-    assert resolve_segment(None) == (DEFAULT_SEGMENT, True)
-    assert resolve_segment("") == (DEFAULT_SEGMENT, True)
-    assert resolve_segment("A_identifier") == ("A_identifier", False)
+def test_fold_de_is_idempotent():
+    for src in ("Kühlschrank", "Schloßschraube GROß", "Café", "bosch  gsr 12v"):
+        once = fold_de(src)
+        assert fold_de(once) == once, src
 
 
-def test_unknown_segment_is_rejected_not_passed_through():
-    with pytest.raises(ValueError) as exc:
-        resolve_segment("Z_made_up")
-    assert "unknown segment" in str(exc.value)
-    assert DEFAULT_SEGMENT in str(exc.value)
+def test_encode_query_applies_no_prefix():
+    """Under the retired contract encode_query prepended '[segment] '. Now it
+    encodes the caller's (already folded) text verbatim."""
+
+    class Recorder:
+        def __init__(self):
+            self.seen = []
+
+        def encode(self, text, add_special_tokens=False):
+            self.seen.append((text, add_special_tokens))
+
+            class Enc:
+                ids = [1, 2, 3]
+
+            return Enc()
+
+    tok = Recorder()
+    ids = encode_query(tok, "kuehlschrank  gross")
+    assert tok.seen == [("kuehlschrank  gross", False)]
+    assert ids.tolist() == [1, 2, 3] and ids.dtype == np.int64
 
 
 @pytest.mark.parametrize("requested,expected", [(None, 192), (128, 128), (192, 192), (8, 8)])

@@ -15,15 +15,17 @@ import numpy as np
 
 # ---------------------------------------------------------------- the model --
 
-# The MXG-84 ship decision (2026-08-17): the flag-visible teacher arm WITH the
-# MXG-66 negation overlay. The unaided student scores 0.320/0.700 on the
-# controlled negation gates (FAIL) against 0.920/0.968 with the overlay, and
-# that failure is unrecoverable by design under the MXG-108 rendering. Same
+# The MXG-177 ship decision (2026-08-20): the cell-D negation-tuned student —
+# distilled from the fold_de/no-prefix teacher and finished with the MXG-66
+# negation overlay (the bare student fails the controlled negation gate, the
+# overlay passes 0.912/0.960). Max explicitly overrode the teacher screen's
+# predeclared no-change verdict; the override is recorded in
+# `pipeline/out/mxg177_stage2/run_manifest.json::approved_contract`. Same
 # checkpoint `pipeline/ce_serve_skew.py::CE_MODEL` pins for the offline stack.
-MODEL_ID = os.environ.get("CE_MODEL_ID", "d_mxg84_new108t_mxg66_s68-2026-08-14")
+MODEL_ID = os.environ.get("CE_MODEL_ID", "d_mxg177_d_mxg66_s66-2026-08-20")
 MODEL_SHA256 = os.environ.get(
     "CE_MODEL_SHA256",
-    "a7c23fc893f92873cda200385165900020c455d3de0730d40801fd661884b702",
+    "85a2cfdc088d6f779abf4a5ecc36c9fbafe13539df78a5710c4aeb96750c5036",
 )
 
 # ⚠️ TOKENIZER_SHA256 and TOKENIZER_VERSION pin two DIFFERENT things and both
@@ -37,6 +39,8 @@ MODEL_SHA256 = os.environ.get(
 # Verified 2026-08-18: `d_mxg84_new108t_mxg66_s68/tokenizer.json` is byte-identical
 # to `ce_dist_l12_v3-2026-07-18/tokenizer.json`, so the 115,485,224 stored token
 # blobs are valid for this student and no re-tokenization pass is needed.
+# Re-verified 2026-08-21 for MXG-177: `d_mxg177_d_mxg66_s66/tokenizer.json`
+# carries the same digest, so the stored blobs stay valid across this cutover too.
 TOKENIZER_SHA256 = os.environ.get(
     "CE_TOKENIZER_SHA256",
     "3a56def25aa40facc030ea8b0b87f3688e4b3c39eb8b45d5702b3a1300fe2a20",
@@ -76,6 +80,15 @@ MIN_MAX_LEN = 8
 # so a splice change invalidates any cached window that names the old contract.
 SPLICE_VERSION = "splice_v1"
 
+# How the query side of the pair is built from the wire: the service applies
+# `fold_de` to the untouched raw query and adds NO segment prefix (train cell D,
+# `train_ce.build_query(row, "none", "fold_de")`). Deliberately NOT
+# env-overridable, unlike everything else in this file: the identifier names
+# what the CODE does, and an env override would let a deployment claim a
+# contract the code cannot honor. A caller that needs a different query
+# contract needs a different build. MXG-177.
+QUERY_CONTRACT = "fold-de-v1-no-prefix"
+
 PROTOCOL_VERSION = 1
 
 
@@ -114,5 +127,6 @@ def model_metadata(dtype="fp16", max_len=192):
         "pad": PAD,
         "head_extra": HEAD_EXTRA,
         "splice_version": SPLICE_VERSION,
+        "query_contract": QUERY_CONTRACT,
         "serving_contract": serving_contract(dtype, max_len),
     }

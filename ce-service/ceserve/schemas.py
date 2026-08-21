@@ -32,16 +32,13 @@ class RerankCandidate(BaseModel):
 
 
 class RerankRequest(BaseModel):
-    query: str = Field(description="Raw user query text. The `[segment] ` prefix "
-                                   "is part of the model contract and is applied "
-                                   "by this service, not by the caller.")
-    segment: str | None = Field(
-        default=None,
-        description="ESCI segment hint: A_identifier | B_brand | C_brand_product "
-        "| D_spec_product | P_product_noun. Omit to get the trained fallback "
-        "P_product_noun. An unrecognised value is a 400 — it would still "
-        "tokenize and still produce plausible scores.",
-    )
+    query: str = Field(description="The UNTOUCHED raw user query. This service "
+                                   "alone builds the model input: `fold_de` "
+                                   "(German umlaut expansion, casefold, strip "
+                                   "remaining combining marks; whitespace "
+                                   "preserved) and NO prefix — query contract "
+                                   "fold-de-v1-no-prefix. A request carrying a "
+                                   "`segment` key, null included, is a 400.")
     max_len: int | None = Field(
         default=None,
         description="Serve-time width dial, clamped to [8, CE_MAX_LEN]. Quality "
@@ -77,8 +74,16 @@ class RerankResponse(BaseModel):
     model_sha256: str
     tokenizer_version: str
     serving_contract: str
-    segment: str
-    segment_defaulted: bool
+    query_contract: str = Field(description="fold-de-v1-no-prefix. Callers "
+                                            "assert on this alongside "
+                                            "serving_contract.")
+    declined_reason: str | None = Field(
+        default=None,
+        description="Present (as `empty_folded_query`) only when a nonblank "
+        "raw query folds to nothing encodable: HTTP 200, no inference, and "
+        "BOTH arrays empty — the one carve-out to the every-id-comes-back "
+        "contract.",
+    )
     max_len: int
     n_input: int
     n_scored: int

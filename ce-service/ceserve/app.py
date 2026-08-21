@@ -25,8 +25,10 @@ from ceserve.constants import (
     HEAD_EXTRA,
     MODEL_ID,
     MODEL_SHA256,
+    QUERY_CONTRACT,
     TOKENIZER_VERSION,
 )
+from ceserve.fold_de import fold_de
 from ceserve.metrics import (
     ASSEMBLE_MS,
     CANDIDATES,
@@ -41,13 +43,10 @@ from ceserve.metrics import (
 from ceserve.schemas import RerankRequest, RerankResponse
 from ceserve.scorer import CrossEncoderScorer, ce_score
 from ceserve.splice import (
-    DEFAULT_SEGMENT,
-    SEGMENTS,
     TokenDecodeError,
     clamp_max_len,
     decode_token_ids,
     encode_query,
-    resolve_segment,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -179,8 +178,6 @@ async def metadata(request: Request):
         "max_inputs_per_request": config.max_inputs,
         "max_inflight": config.max_inflight,
         "request_budget_s": config.request_budget_s,
-        "default_segment": DEFAULT_SEGMENT,
-        "segments": sorted(SEGMENTS),
     })
     return payload
 
@@ -191,6 +188,21 @@ def _parse_request(payload, config, scorer):
     """Validate the REQUEST. Per-candidate problems are handled in `_partition`."""
     if not isinstance(payload, dict):
         raise RequestError("body must be a JSON object")
+    if "segment" in payload:
+        # The retired pre-MXG-177 contract. Rejected on PRESENCE of the key —
+        # a null value included — because a caller that still sends it was built
+        # against the prefixed contract and its scores would be silently wrong.
+        # Logged here (not in `_error`, which deliberately does not log) with no
+        # query text and no candidate contents.
+        log.error(
+            "contract violation: request carries the retired 'segment' key; "
+            "this service implements query contract %s (MXG-177)",
+            QUERY_CONTRACT,
+        )
+        raise RequestError(
+            "the 'segment' key is not part of query contract "
+            f"{QUERY_CONTRACT}; send the raw query only"
+        )
     query = payload.get("query")
     if not isinstance(query, str) or not query.strip():
         raise RequestError("query must be a non-empty string")
@@ -203,7 +215,6 @@ def _parse_request(payload, config, scorer):
             f"{config.max_inputs}",
             status=413, code="too_many_candidates")
     try:
-        segment, defaulted = resolve_segment(payload.get("segment"))
         max_len = clamp_max_len(payload.get("max_len"), scorer.max_len)
     except ValueError as exc:
         raise RequestError(str(exc)) from None
@@ -220,7 +231,7 @@ def _parse_request(payload, config, scorer):
             # window was built wrong, and scoring it twice would hide that.
             raise RequestError(f"duplicate candidate id {cid!r}")
         seen.add(cid)
-    return query, segment, defaulted, max_len, candidates
+    return query, max_len, candidates
 
 
 def _partition(candidates, expected_version, config):
@@ -266,8 +277,8 @@ def _partition(candidates, expected_version, config):
     return ids, arts, counts, skipped
 
 
-def _build_response(scorer, query_ids, ids, counts, probs, skipped, segment,
-                    defaulted, max_len, n_input, padded_width):
+def _build_response(scorer, query_ids, ids, counts, probs, skipped, max_len,
+                    n_input, padded_width):
     nq = int(min(query_ids.shape[0], max(1, max_len - HEAD_EXTRA - 1)))
     budget = max(1, max_len - nq - HEAD_EXTRA)
     scores = ce_score(probs) if len(ids) else np.zeros(0)
@@ -289,8 +300,7 @@ def _build_response(scorer, query_ids, ids, counts, probs, skipped, segment,
         "model_sha256": MODEL_SHA256,
         "tokenizer_version": TOKENIZER_VERSION,
         "serving_contract": scorer.serving_contract,
-        "segment": segment,
-        "segment_defaulted": defaulted,
+        "query_contract": QUERY_CONTRACT,
         "max_len": max_len,
         "n_input": n_input,
         "n_scored": len(results),
@@ -354,8 +364,31 @@ async def _rerank(request, config):
     except orjson.JSONDecodeError as exc:
         raise RequestError(f"body is not valid JSON: {exc}") from None
 
-    query, segment, defaulted, max_len, candidates = _parse_request(
-        payload, config, scorer)
+    query, max_len, candidates = _parse_request(payload, config, scorer)
+
+    folded = fold_de(query)
+    if not folded.strip():
+        # A nonblank raw query whose folded form carries nothing to encode
+        # (combining marks alone, or characters that decompose to whitespace).
+        # A query-level decline, not an error: HTTP 200, no inference, no log.
+        # Both arrays are empty BY DESIGN — the one carve-out to the "every
+        # input id comes back exactly once" contract; callers branch on
+        # `declined_reason`. The ticket names the exact reason string.
+        REQUESTS.labels("200").inc()
+        return _json({
+            "model_id": MODEL_ID,
+            "model_sha256": MODEL_SHA256,
+            "tokenizer_version": TOKENIZER_VERSION,
+            "serving_contract": scorer.serving_contract,
+            "query_contract": QUERY_CONTRACT,
+            "declined_reason": "empty_folded_query",
+            "max_len": max_len,
+            "n_input": len(candidates),
+            "n_scored": 0,
+            "n_skipped": 0,
+            "results": [],
+            "skipped": [],
+        })
 
     if request.app.state.inflight >= config.max_inflight:
         # A fast refusal beats a queue: the caller degrades to upstream order on
@@ -368,7 +401,7 @@ async def _rerank(request, config):
         candidates, config.tokenizer_version, config)
     ASSEMBLE_MS.observe(time.perf_counter() - t0)
 
-    query_ids = encode_query(scorer.tokenizer, segment, query)
+    query_ids = encode_query(scorer.tokenizer, folded)
 
     padded_width = 0
     probs = np.zeros((0, 4), dtype=np.float32)
@@ -395,8 +428,7 @@ async def _rerank(request, config):
         PADDED_WIDTH.observe(padded_width)
 
     response = _build_response(scorer, query_ids, ids, counts, probs, skipped,
-                               segment, defaulted, max_len, len(candidates),
-                               padded_width)
+                               max_len, len(candidates), padded_width)
     CANDIDATES_PER_REQUEST.observe(len(candidates))
     CANDIDATES.labels("scored").inc(len(ids))
     for entry in skipped:

@@ -24,8 +24,12 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "ce-service"))
 
 from ceserve import app as appmod  # noqa: E402
-from ceserve.constants import MODEL_SHA256, TOKENIZER_VERSION  # noqa: E402
-from ceserve.splice import DEFAULT_SEGMENT, assemble  # noqa: E402
+from ceserve.constants import (  # noqa: E402
+    MODEL_SHA256,
+    QUERY_CONTRACT,
+    TOKENIZER_VERSION,
+)
+from ceserve.splice import assemble  # noqa: E402
 
 OTHER_VERSION = "ce_dist_l12_v3-2026-07-18"  # the pre-MXG-108 stamp
 
@@ -48,6 +52,11 @@ def candidate(cid, ids=(10, 11, 12), version=TOKENIZER_VERSION, blob=_DEFAULT,
 
 
 class StubTokenizer:
+    def __init__(self):
+        # Every text the service asked to encode, so tests can pin what the
+        # model would actually see (the folded query, no prefix).
+        self.seen = []
+
     def no_padding(self):
         pass
 
@@ -55,6 +64,8 @@ class StubTokenizer:
         pass
 
     def encode(self, text, add_special_tokens=False):
+        self.seen.append(text)
+
         class Enc:
             ids = list(range(100, 100 + min(len(text.split()), 20)))
 
@@ -103,6 +114,7 @@ class StubScorer:
             "model_id": "stub", "model_sha256": MODEL_SHA256,
             "tokenizer_version": TOKENIZER_VERSION,
             "serving_contract": self.serving_contract,
+            "query_contract": QUERY_CONTRACT,
             "device": "cpu", "dtype": "fp32", "max_len": self.max_len,
             "warmed_up": self.warmed_up, "degraded": self.degraded,
         }
@@ -166,6 +178,7 @@ def test_response_carries_the_serving_contract_not_just_the_model(client):
     assert body["serving_contract"]
     assert body["tokenizer_version"] == TOKENIZER_VERSION
     assert body["model_sha256"] == MODEL_SHA256
+    assert body["query_contract"] == "fold-de-v1-no-prefix"
 
 
 def test_padded_width_and_query_token_count_are_reported(client):
@@ -174,11 +187,11 @@ def test_padded_width_and_query_token_count_are_reported(client):
     body = post(client, candidates=[candidate("a", ids=range(10)),
                                     candidate("b", ids=range(40))]).json()
     assert body["padded_width"] == 40 + body["query_token_count"] + 4
-    # StubTokenizer emits one id per whitespace token, and the query is
-    # "[P_product_noun] bosch akkuschrauber" -> 3. The segment prefix is part of
-    # the MODEL contract (train_ce.py), applied here rather than by the caller,
-    # and it costs query budget; this is what pins that it is applied at all.
-    assert body["query_token_count"] == 3
+    # StubTokenizer emits one id per whitespace token, and the encoded text is
+    # fold_de("bosch akkuschrauber") -> "bosch akkuschrauber" -> 2. Under the
+    # retired prefixed contract this was 3 ("[P_product_noun] ..."); this is
+    # what pins that NO prefix is applied (fold-de-v1-no-prefix, MXG-177).
+    assert body["query_token_count"] == 2
 
 
 def test_truncated_flag_marks_articles_over_the_budget(client):
@@ -277,23 +290,77 @@ def test_every_input_id_appears_exactly_once(client):
     assert len(returned) == len(set(returned)) == body["n_input"]
 
 
-# ------------------------------------------------------------------ segment --
+# ------------------------------------------------- the query contract (MXG-177) --
 
-def test_absent_segment_defaults_and_says_so(client):
-    body = post(client).json()
-    assert body["segment"] == DEFAULT_SEGMENT and body["segment_defaulted"] is True
-
-
-def test_explicit_segment_is_reported_as_not_defaulted(client):
-    body = post(client, segment="A_identifier").json()
-    assert body["segment"] == "A_identifier" and body["segment_defaulted"] is False
-
-
-def test_unknown_segment_is_a_400_with_the_vocabulary(client):
-    response = post(client, segment="Z_nonsense")
+@pytest.mark.parametrize("value", ["P_product_noun", None, "anything"])
+def test_segment_key_is_rejected_with_400(client, value):
+    """PRESENCE of the key is the violation, null included: a caller that still
+    sends it was built against the retired prefixed contract, and its scores
+    would be silently wrong."""
+    response = post(client, segment=value)
     assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert "unknown segment" in detail and "A_identifier" in detail
+    payload = response.json()
+    assert payload["error"] == "invalid_request"
+    assert "segment" in payload["detail"]
+    assert QUERY_CONTRACT in payload["detail"]
+
+
+def test_segment_rejection_logs_error_without_query_text(client, caplog):
+    import logging
+
+    secret_query = "hochdruckreiniger kaercher K7"
+    blob = pack([10, 11, 12])
+    with caplog.at_level(logging.ERROR, logger="ceserve.app"):
+        response = client.post("/rerank", json={
+            "query": secret_query, "segment": None,
+            "candidates": [candidate("a")],
+        })
+    assert response.status_code == 400
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1, "exactly one contract-violation error record"
+    logged = errors[0].getMessage()
+    assert "segment" in logged
+    assert secret_query not in logged and blob not in logged
+    assert secret_query not in response.json()["detail"]
+
+
+def test_query_is_folded_before_encoding_with_whitespace_preserved(client, scorer):
+    post(client, query="Kühlschrank  GROßE")
+    assert scorer.tokenizer.seen[-1] == "kuehlschrank  grosse", (
+        "fold_de alone — umlauts expand, case folds, and the double space "
+        "SURVIVES (no normalize_text collapse; that is the SPLADE chain)"
+    )
+
+
+def test_empty_folded_query_declines_without_inference(client, scorer, caplog):
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="ceserve.app"):
+        # Combining acute + diaeresis: nonblank under str.strip(), folds to "".
+        response = post(client, query="́̈",
+                        candidates=[candidate("a"), candidate("b")])
+    assert response.status_code == 200
+    body = response.json()
+    assert body["declined_reason"] == "empty_folded_query"
+    assert body["results"] == [] and body["skipped"] == []
+    assert body["n_input"] == 2 and body["n_scored"] == 0 and body["n_skipped"] == 0
+    assert body["query_contract"] == QUERY_CONTRACT
+    assert scorer.calls == 0, "a decline must not run inference"
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "a decline is a degenerate input, not an incident"
+    )
+
+
+def test_whitespace_producing_fold_also_declines(client, scorer):
+    # U+00B4 ACUTE ACCENT: NFKD -> space + combining acute -> folds to " ".
+    # Whitespace-only folded text tokenizes to zero ids, so it declines too.
+    body = post(client, query="´").json()
+    assert body["declined_reason"] == "empty_folded_query"
+    assert scorer.calls == 0
+
+
+def test_scored_responses_do_not_carry_declined_reason(client):
+    assert "declined_reason" not in post(client).json()
 
 
 # ------------------------------------------------------------------ max_len --
@@ -393,10 +460,13 @@ def test_readyz_reports_the_warmup(client, scorer):
 def test_metadata_reports_the_pins_and_the_knobs(client):
     body = client.get("/metadata").json()
     for field in ("model_sha256", "tokenizer_version", "serving_contract",
-                  "max_len", "default_segment", "segments",
+                  "query_contract", "max_len",
                   "max_inputs_per_request", "max_inflight", "request_budget_s"):
         assert field in body, field
-    assert body["default_segment"] == DEFAULT_SEGMENT
+    assert body["query_contract"] == "fold-de-v1-no-prefix"
+    assert "default_segment" not in body and "segments" not in body, (
+        "the segment vocabulary left with the prefixed contract"
+    )
 
 
 def test_metrics_exposes_the_runtime_collector(client):

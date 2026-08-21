@@ -295,6 +295,51 @@ def test_a_fixture_from_another_tokenizer_is_refused(tmp_path):
         S.assert_golden_fixture(path)
 
 
+# ------------------------------------------------ 14. the query contract ----
+
+def test_query_contract_check_passes_as_shipped():
+    S.assert_query_contract()
+
+
+def test_query_contract_check_covers_the_tokenizer_path():
+    class Recorder:
+        def encode(self, text, add_special_tokens=False):
+            class Enc:
+                ids = [hash(w) % 1000 for w in text.split()]
+
+            return Enc()
+
+    S.assert_query_contract(Recorder())
+
+
+def test_a_broken_fold_fails_the_boot(monkeypatch):
+    """A merge that collapses whitespace (the SPLADE normalize_text chain) or
+    resurrects the prefix must be a startup failure, not a plausible score."""
+    monkeypatch.setattr(S, "fold_de", lambda text: " ".join(str(text).split()))
+    with pytest.raises(RuntimeError) as exc:
+        S.assert_query_contract()
+    assert "fold-de-v1-no-prefix" in str(exc.value)
+
+
+def test_a_resurrected_prefix_fails_the_boot(monkeypatch):
+    real = S.encode_query
+
+    def prefixed(tokenizer, query):
+        return real(tokenizer, f"[P_product_noun] {query}")
+
+    class Recorder:
+        def encode(self, text, add_special_tokens=False):
+            class Enc:
+                ids = [hash(w) % 1000 for w in text.split()]
+
+            return Enc()
+
+    monkeypatch.setattr(S, "encode_query", prefixed)
+    with pytest.raises(RuntimeError) as exc:
+        S.assert_query_contract(Recorder())
+    assert "fold-de-v1-no-prefix" in str(exc.value)
+
+
 # ------------------------------------------------------------- ce_score ----
 
 def test_ce_score_is_the_offline_formula():

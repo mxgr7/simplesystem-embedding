@@ -30,6 +30,7 @@ from ceserve.constants import (
     NUM_LABELS,
     PAD,
     PROFILE,
+    QUERY_CONTRACT,
     SPLICE_VERSION,
     TOKENIZER_SHA256,
     TOKENIZER_VERSION,
@@ -37,7 +38,8 @@ from ceserve.constants import (
     model_metadata,
     serving_contract,
 )
-from ceserve.splice import assemble, decode_token_ids
+from ceserve.fold_de import fold_de
+from ceserve.splice import assemble, decode_token_ids, encode_query
 
 log = logging.getLogger(__name__)
 
@@ -294,6 +296,57 @@ def assert_golden_fixture(path=SPLICE_FIXTURE):
     return len(payload["cases"]), rows
 
 
+# ------------------------------------------------------------ assertion 14 --
+
+# The exact chain `pipeline/fold_de.py` self-checks, plus the double-space row
+# `tests/test_train_ce_query_contract.py` pins: fold_de PRESERVES whitespace
+# (no `normalize_text` collapse — that is the SPLADE chain, not the CE one).
+_FOLD_TABLE = {
+    "Kühlschrank": "kuehlschrank",
+    "Schloßschraube GROß": "schlossschraube gross",
+    "Größe": "groesse",
+    "Café": "cafe",
+    "V4034PX": "v4034px",
+    "Messlöffel  M8X40": "messloeffel  m8x40",
+}
+
+
+def assert_query_contract(tokenizer=None):
+    """The query side of the pair, checked end to end on the serving box.
+
+    The golden fixture (assertion 13) stores precomputed queryIds, so it pins
+    `assemble` only — a bad merge that resurrects the retired `[segment] `
+    prefix or breaks `fold_de` would still serve plausible scores with no error
+    anywhere. This check runs the fold_de training-contract table and, given
+    the loaded tokenizer, asserts `encode_query` encodes the folded text
+    verbatim with no prefix. MXG-177.
+    """
+    if QUERY_CONTRACT != "fold-de-v1-no-prefix":
+        raise RuntimeError(
+            f"QUERY_CONTRACT={QUERY_CONTRACT!r}: this build implements "
+            "fold-de-v1-no-prefix and must say so"
+        )
+    for src, want in _FOLD_TABLE.items():
+        got = fold_de(src)
+        if got != want:
+            raise RuntimeError(
+                f"fold_de({src!r}) = {got!r}, expected {want!r}; the served "
+                f"query contract {QUERY_CONTRACT} does not match the training "
+                "contract (train_ce.build_query(row, 'none', 'fold_de'))"
+            )
+        if fold_de(got) != got:
+            raise RuntimeError(f"fold_de is not idempotent on {src!r}")
+    if tokenizer is not None:
+        got = encode_query(tokenizer, fold_de("Kühlschrank"))
+        want = tokenizer.encode("kuehlschrank", add_special_tokens=False).ids
+        if got.tolist() != list(want):
+            raise RuntimeError(
+                "encode_query does not encode the folded query verbatim; a "
+                "resurrected prefix or a second normalization would serve "
+                f"plausible but wrong scores (query contract {QUERY_CONTRACT})"
+            )
+
+
 # -------------------------------------------------------------- the scorer --
 
 def ce_score(probs):
@@ -348,6 +401,8 @@ class CrossEncoderScorer:
                 f"tokenizer vocab {self.tokenizer.get_vocab_size()} exceeds the "
                 f"model's {VOCAB_SIZE}"
             )
+        assert_query_contract(self.tokenizer)
+        log.info("query contract ok: %s", QUERY_CONTRACT)
 
         model = XLMRobertaForSequenceClassification(
             XLMRobertaConfig.from_dict(config_dict))
@@ -453,6 +508,7 @@ __all__ = [
     "assert_config",
     "assert_digests",
     "assert_golden_fixture",
+    "assert_query_contract",
     "ce_score",
     "checkpoint_sha256",
     "resolve_device",

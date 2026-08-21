@@ -23,29 +23,6 @@ import numpy as np
 
 from ceserve.constants import BOS, EOS, HEAD_EXTRA, MIN_MAX_LEN, PAD, VOCAB_SIZE
 
-# The ESCI segment hint prefixed to the query as plain text (`train_ce.py:94`).
-# Vocabulary from `export_ce_data.SEGMENT_SQL` / `build_ce_v4_dataset.SEGMENT_EXPR`.
-SEGMENTS = frozenset(
-    {
-        "A_identifier",
-        "B_brand",
-        "C_brand_product",
-        "D_spec_product",
-        "P_product_noun",
-    }
-)
-
-# NOT a choice: `P_product_noun` is the `multiIf` fallback in both segment
-# expressions, and `build_ce_v4_dataset.py` wraps every join in
-# `coalesce(sp.segment, 'P_product_noun')` — a term with no classification at all
-# was TRAINED as P_product_noun. Any other default puts the query prefix out of
-# distribution, because the hint is plain text rather than a special token:
-# `[UNKNOWN] bosch akkuschrauber` tokenizes into subword pieces the model has
-# never seen in that slot and silently eats 3-5 ids of the query budget.
-# MXG-148 will start sending real values.
-DEFAULT_SEGMENT = "P_product_noun"
-
-
 class TokenDecodeError(ValueError):
     """A stored `ceTokenIds` blob that cannot be trusted.
 
@@ -98,11 +75,14 @@ def decode_token_ids(blob_b64, expected_count=None, vocab_size=VOCAB_SIZE):
     return ids.astype(np.int64, copy=False)
 
 
-def encode_query(tokenizer, segment, query):
+def encode_query(tokenizer, query):
     """Query-side ids, WITHOUT special tokens.
 
-    `f"[{segment}] {query}"` is the model contract (`train_ce.py::PairDS.__getitem__`),
-    not a caller concern, so the prefix is applied here rather than on the wire.
+    The model contract is `fold_de(raw_query)` with NO segment prefix — train
+    cell D, `train_ce.build_query(row, "none", "fold_de")`, query contract
+    `fold-de-v1-no-prefix` (MXG-177). The CALLER passes the already-folded text
+    (`app._rerank` folds exactly once, so the decline check and the encoded text
+    cannot drift); this function encodes it verbatim.
 
     The tokenizer must already have had `no_padding()` / `no_truncation()` called
     — the Rust backend is stateful and shared, and a stale padding config makes
@@ -110,7 +90,7 @@ def encode_query(tokenizer, segment, query):
     and `CeTokenizer.load()` both guard the same trap.
     """
     return np.asarray(
-        tokenizer.encode(f"[{segment}] {query}", add_special_tokens=False).ids,
+        tokenizer.encode(query, add_special_tokens=False).ids,
         dtype=np.int64,
     )
 
@@ -158,25 +138,6 @@ def assemble(q_ids, arts, max_len, pad_to):
         ids[i, h + li] = EOS
     mask = (np.arange(width)[None, :] < seq[:, None]).astype(np.int64)
     return ids, mask, int(seq.max())
-
-
-def resolve_segment(value):
-    """(segment, was_defaulted). Raises ValueError for an unknown value.
-
-    Unknown is rejected rather than passed through because an arbitrary string
-    still tokenizes, still produces plausible scores, and still eats query
-    budget — the failure would be invisible. Absent, on the other hand, is a
-    supported state until MXG-148 ports the segmenter to the serve path.
-    """
-    if value is None or value == "":
-        return DEFAULT_SEGMENT, True
-    if value not in SEGMENTS:
-        raise ValueError(
-            f"unknown segment {value!r}; expected one of {sorted(SEGMENTS)} "
-            "or omit the field to get the trained fallback "
-            f"{DEFAULT_SEGMENT!r}"
-        )
-    return value, False
 
 
 def clamp_max_len(requested, configured_max_len):
