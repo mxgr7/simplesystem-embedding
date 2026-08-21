@@ -37,3 +37,6 @@ tests/fixtures/mongo_sample/sample_10k.json
 reports/hnsw_eval*/
 
 .obsidian/
+
+# MXG-115: the Slack incoming-webhook URL for Alertmanager. Credential, never committed.
+*.local

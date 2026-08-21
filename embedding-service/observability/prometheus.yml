@@ -2,6 +2,17 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# MXG-115. Until 2026-08-16 there were no rule_files and no alerting block: eleven jobs feeding
+# a Prometheus that could not tell anyone about anything. A directory glob rather than named
+# files, so adding a rule group needs no config reload of this file.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 scrape_configs:
   # embedding-service runs network_mode:host — reach it via the host gateway
   # that compose injects into this Prometheus container's /etc/hosts.
@@ -45,14 +56,55 @@ scrape_configs:
         labels:
           stack: embedding-service
 
-  # Remote TEI box (vast.ai) — same te_* metric names as local TEI, so
-  # dashboard queries must filter by job to avoid summing the two.
-  - job_name: tei_remote
+  # The second TEI replica, dedicated to indexer embedding (see the `tei-indexer` service).
+  # MXG-115: this was never scraped. `tei` above is the QUERY replica on :8080; the one that
+  # actually has to keep up on Sunday is this one, and it was the only unmonitored process on
+  # the GPU. Same te_* metric names as `tei`, so dashboard and rule queries must filter by job
+  # rather than summing across them.
+  - job_name: tei_indexer
     metrics_path: /metrics
     static_configs:
-      - targets: ["88.207.86.141:41661"]
+      - targets: ["host.docker.internal:8081"]
         labels:
           stack: embedding-service
+
+  # `tei_remote` was removed here 2026-08-16 (MXG-115). It pointed at 88.207.86.141:41661,
+  # a vast.ai rental destroyed weeks earlier, and had been red ever since. A permanently-red
+  # target is worse than no target: it trains everyone to read a red board as normal, and it
+  # is the first thing a `up == 0` alert rule would have paged on, forever.
+
+  # MXG-111: splade-service as a co-tenant on this same T4. The frontend on :8137
+  # carries the request/cache counters (splade_service_cache_hits_total etc.); it
+  # runs host-net like embedding-service, so it needs the host gateway. The backend
+  # on :8138 is loopback-bound and exposes no /metrics — watch it through the GPU
+  # job below and its /health instead.
+  #
+  # Scrape it as its own job rather than folding it into the embedding-service one:
+  # both stacks share this GPU, and the whole point of the co-tenancy is being able
+  # to attribute a query-latency regression to one of them.
+  - job_name: splade-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8137"]
+        labels:
+          stack: splade-service
+
+  # MXG-144: the cross-encoder fine ranker, a THIRD tenant on this T4 — and the
+  # first one that is latency-critical and on the query path. Its own job for
+  # the same attribution reason splade got one, and doubly so here: measured on
+  # this box, saturating either tenant costs the other ~35-50%
+  # (report/pipeline_v2/mxg144_ce_service.md), so a latency regression on one
+  # side is only diagnosable if the other side's rate is visible next to it.
+  #
+  # :8140, NOT :8139 — mxg121-splade-auth's nginx holds 8139 on the host
+  # loopback with host networking, so it shows up in `ss -lntp` and in nothing
+  # `docker port` prints.
+  - job_name: ce-service
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8140"]
+        labels:
+          stack: ce-service
 
   # redis_exporter is on the same bridge network as Prometheus — addressable
   # by service name. It pulls KVRocks's INFO/keyspace/command stats over
@@ -82,38 +134,27 @@ scrape_configs:
         labels:
           stack: embedding-service
 
-  # article-semantic-search query service — runs on milvus (172.16.20.115)
-  # on port 9099. The SG blocks this box from reaching milvus:9099 directly,
-  # so an SSH tunnel bridges it: `ssh -fN -L 172.17.0.1:19099:localhost:9099 milvus`
-  # binds to the docker0 gateway (what host.docker.internal resolves to inside
-  # this container), so Prometheus scrapes the local tunnel endpoint.
-  # Exposes http_server_requests_seconds_* (Micrometer) for the search endpoint.
-  - job_name: query_service
-    metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ["host.docker.internal:19099"]
-        labels:
-          stack: embedding-service
+  # `query_service` was removed here 2026-08-16 (MXG-115). It scraped the article-semantic-search
+  # service on the milvus box through a hand-made SSH tunnel:
+  #   ssh -fN -L 172.17.0.1:19099:localhost:9099 milvus
+  # No such tunnel has existed for months, nothing listens on 19099, and the local
+  # article-semantic-search container exited two months ago. A scrape target whose transport is
+  # a tunnel someone has to remember to re-open by hand cannot be a monitoring foundation; if
+  # the next-gen query service needs scraping, that belongs where the service is deployed.
+  # The `query-service-loadtest` dashboard keeps working on the data already in the TSDB.
+  #
+  # `search_prober` was removed here too, with the prober itself (see compose.yaml).
 
-  # search-prober — synthetic semantic-search prober hitting the preprod gateway
-  # every 10s (health-check + ES warm-keeper). Same bridge net as Prometheus →
-  # service-name addressing. Exposes probe_search_latency_seconds (histogram →
-  # real preprod p50/p90/p99), probe_up, probe_requests_total, probe_hit_count.
-  - job_name: search_prober
+  # elasticsearch_exporter — monitors `semsearchprod`, the 3-node cluster holding the live
+  # article index. Same bridge network as Prometheus → service-name addressing.
+  #
+  # MXG-115 renamed this job from `semantic_es_temp`: the temp cluster it was named for is
+  # gone, and the exporter had been reporting up=1 with zero series ever since. There was no
+  # data under the old job name to preserve. 60s because each scrape costs the shared prod
+  # cluster a _nodes/stats + _all/_stats.
+  - job_name: semantic_es
     metrics_path: /metrics
-    static_configs:
-      - targets: ["search-prober:9155"]
-        labels:
-          stack: embedding-service
-
-  # elasticsearch_exporter — monitors the temporary semantic ES
-  # (semantic-es-temp, ES 9.3.3) holding prod-article-index-v1-semantic-bf16
-  # during the catch-up backfill. Same bridge network as Prometheus →
-  # service-name addressing. Scrape interval relaxed because the exporter
-  # hits _nodes/stats + _all/_stats + _cat/shards on each scrape.
-  - job_name: semantic_es_temp
-    metrics_path: /metrics
-    scrape_interval: 30s
+    scrape_interval: 60s
     scrape_timeout: 30s
     static_configs:
       - targets: ["elasticsearch_exporter:9114"]

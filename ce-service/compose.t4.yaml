@@ -1,0 +1,215 @@
+# MXG-144: the cross-encoder fine ranker as a co-tenant on the Tesla T4 that
+# already hosts the dense embedding stack (tei :8080, tei-indexer :8081,
+# kvrocks :6666, embedding-service :9000) and the SPLADE pair (:8137/:8138).
+#
+# ⚠️ THIS IS THE FIRST LATENCY-CRITICAL, ON-THE-QUERY-PATH TENANT ON THIS BOX.
+# Every existing tenant is throughput work on the indexing path, Turing has no
+# MIG, and the tenants time-slice: a bulk SPLADE batch in flight is head-of-line
+# blocking for a search request. MXG-111's latency check was a controlled probe
+# on a box serving zero production query traffic. Until the co-tenancy
+# measurement in report/pipeline_v2/mxg144_ce_service.md says otherwise, this is
+# deployed DARK -- bound to loopback, with no query-service traffic pointed at
+# it. The "which box, and why" decision is that measurement's output, not this
+# file's premise.
+#
+# Sizing, measured ON THIS BOX over 300 real windows whose article tokens were
+# read from the live index (report/pipeline_v2/mxg144_ce_service.md).
+#
+# ⚠️ Serving width is CE_MAX_LEN=128 since 2026-08-18, so the 0.654 ms/candidate
+# slope from ce_latency_t4_v1.md no longer applies -- that was width 192. At 128
+# the measured slope is 0.408 ms/candidate + ~2 ms fixed.
+#
+#   window |  p95 @192 |  p95 @128 |  @128 under SPLADE saturation (x1.5)
+#   -------+-----------+-----------+-------------------------------------
+#      120 |   80.4 ms |   52.9 ms |   79.4 ms
+#      200 |  134.0 ms |   85.7 ms |  128.5 ms   <- inside the 150 ms budget
+#      256 |  167.4 ms |  108.1 ms |  162.1 ms   <- outside; do not raise the cap
+#
+# Co-tenancy costs a flat ~1.5x across the whole distribution. At width 192 a
+# 200-deep window was 201 ms projected and did NOT fit; at 128 it does, which is
+# why the query service's max-window-size moved 120 -> 200 in the same change.
+services:
+  ce-service-t4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # `service`, NOT `service-cuda`. Docker's root is /var/lib/docker on this
+      # box's 49 GB OS disk, at 88% with ~6 GB free; the service-cuda base
+      # (pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime) is ~9-11 GB unpacked and
+      # would fill the root filesystem of a production host. `service` carries
+      # no torch and bind-mounts the CUDA runtime from /data (802 GB free) --
+      # the arrangement splade-backend-t4 already runs here. Image stays ~200 MB.
+      #
+      # Provision the runtime once, before first `up`:
+      #   docker run --rm -v /data/ce-service/runtime:/runtime \
+      #     ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+      #     uv pip install --target /runtime --no-cache \
+      #     --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0
+      #   docker run --rm -v /data/ce-service/runtime:/runtime \
+      #     ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
+      #     uv pip install --target /runtime --no-cache \
+      #     'transformers>=5,<6' 'tokenizers>=0.22,<1' 'safetensors>=0.4,<1'
+      #
+      # A SEPARATE runtime dir from splade's, which already holds a working
+      # cu128 torch 2.8.0. Reusing it costs nothing today and couples two
+      # services' upgrade paths on a box where one of them is a production
+      # indexer dependency. 6.5 GB of 802 is the right price for independence.
+      target: service
+    image: simplesystem-ce-service:d_mxg84_new108t_mxg66_s68-fp16-t4-v1
+    # Loopback only, and deliberately so while this is dark.
+    #
+    # ⚠️ 8140, NOT 8139. 8139 looks free from the compose side and is not:
+    # `mxg121-splade-auth` is an nginx running with host networking and binds
+    # 127.0.0.1:8139, so it does not appear in `docker port` output for any
+    # container. Worse, Docker accepted the `127.0.0.1:8139:8139` mapping and
+    # started the container ANYWAY -- `docker inspect` showed the binding in
+    # HostConfig.PortBindings and an EMPTY NetworkSettings.Ports, with a healthy
+    # container (the healthcheck runs on the CONTAINER's loopback) answering
+    # nothing on the host. A curl to :8139 got splade-auth's /metadata, which is
+    # a well-formed JSON document describing a completely different model.
+    # Check with `ss -lntp`, never with `docker port`.
+    #
+    # Taken on this box: 8080/8081 TEI, 8137 SPLADE frontend, 8138 SPLADE
+    # backend, 8139 splade-auth nginx, 9000/9001 dense, 6666 + 8000 kvrocks,
+    # 9090 prom, 9093 alertmanager, 9100/9114/9121/9145/9150/9400 exporters,
+    # 3000 grafana, 20241 (local).
+    ports:
+      - "127.0.0.1:8140:8140"
+      # ...and the default-bridge gateway, so Prometheus can scrape it. Prometheus
+      # runs on a bridge network and reaches the host as `host.docker.internal`,
+      # which resolves to 172.17.0.1 — a loopback-only publish is invisible to it
+      # (`dial tcp 172.17.0.1:8140: connect: connection refused`). splade-service
+      # does not hit this because it uses host networking and binds 0.0.0.0:8137;
+      # this keeps the CE off every external interface instead, which is the point
+      # while it is dark.
+      #
+      # ⚠️ If the daemon's default bridge ever moves off 172.17/16 this line stops
+      # binding and the scrape goes dark — but self-detecting: CeServiceAbsent
+      # fires within 5m. (Bridge subnets do move here: a 172.19/16 bridge once
+      # collided with an Atlas PrivateLink route.)
+      - "172.17.0.1:8140:8140"
+      # Query-service experiment host. The host firewall admits only
+      # 172.16.20.115/32 on this interface; keep the source rule paired with
+      # this publish when moving the service.
+      - "172.16.10.92:8140:8140"
+    environment:
+      # The INNER directory. ship_mxg84.sh nests the run name inside the dated
+      # release dir; pointing at the outer one used to raise a tokenizer backend
+      # error naming nothing, and resolve_model_dir now names the fix instead.
+      CE_MODEL_DIR: /model
+      # Pinned, not defaulted, on purpose: the digests are what make the
+      # deployment a named thing rather than "whatever is in /data today".
+      CE_MODEL_ID: d_mxg84_new108t_mxg66_s68-2026-08-14
+      CE_MODEL_SHA256: a7c23fc893f92873cda200385165900020c455d3de0730d40801fd661884b702
+      # ⚠️ These two pin DIFFERENT things and both are load-bearing. The digest
+      # pins the vocabulary file and MUST equal the indexer's
+      # `s2ng-article-search.ce.tokenizer-sha256`, or the 115,485,224 stored
+      # ceTokenIds blobs are ids in a foreign vocabulary and every score is
+      # quietly wrong. The version string pins the article RENDERING the ids
+      # were produced from -- the `-fkr108` suffix is MXG-108, where the
+      # vocabulary did not change but the rendering did. Nothing on this box
+      # enforces agreement with the indexer's value; that is the same hazard
+      # SPLADE_MODEL_VERSION carries, and the query service's
+      # SEARCH_RERANK_CE_EXPECTED_TOKENIZER_VERSION is the other half of it.
+      CE_TOKENIZER_SHA256: 3a56def25aa40facc030ea8b0b87f3688e4b3c39eb8b45d5702b3a1300fe2a20
+      CE_TOKENIZER_VERSION: ce_dist_l12_v3-2026-07-18-fkr108
+      CE_DEVICE: cuda
+      # fp16, and it is not a compromise: sm_75 has NO native bf16, and
+      # torch.cuda.is_bf16_supported() answers True anyway (it defaults to
+      # including_emulation=True), so an operator setting bf16 here would get an
+      # emulated backend at ~10x the cost with no error anywhere. scorer.py
+      # refuses that explicitly. fp16 is also quality-free for this model: all
+      # nDCG@10 deltas against fp32 are <= 0.0001 with CIs spanning zero.
+      CE_DTYPE: fp16
+      # 128, not the 192 the student was selected at. This is the CEILING and the
+      # default; a request may still ask for less.
+      #
+      # Decided 2026-08-18 (Max) to buy back latency headroom, and it is a better
+      # lever than anything GPU scheduling could offer here -- see
+      # report/pipeline_v2/mxg144_ce_service.md §3a. Co-tenancy on this card is a
+      # flat ~1.5x across the whole latency distribution (fair SM time-slicing, not
+      # head-of-line blocking), and there is no way to take a bigger share: CUDA
+      # stream priority is intra-context, Turing has no MIG, and MPS caps rather
+      # than reserves. Perfect GPU isolation would have recovered 40 ms at window
+      # 120; dropping the width to 128 recovers 42.
+      #
+      #   max_len |  p50 |  p95   (k=120, measured on this box)
+      #       192 | 78.8 | 80.4
+      #       128 | 51.0 | 52.9   <- 0.65x, and what unlocks window 200
+      #
+      # Cost is near-linear in width because padded width is SATURATED on real
+      # windows: 46.8% of stored blobs exceed even the 192 budget, so almost every
+      # window pads to the ceiling. Quality price is 0.26 pp nDCG@10 against a
+      # ±0.4 pp seed spread (ce_distill_v2.md), i.e. inside noise.
+      CE_MAX_LEN: "128"
+      # One forward at k <= 256, which is the shape 0.654 ms/candidate was
+      # measured in. Above that it is a memory guard, not a batching strategy.
+      CE_FORWARD_CHUNK: "256"
+      # 256, which is ~105 ms of GPU at the slope measured for CE_MAX_LEN=128
+      # (0.408 ms/candidate + 2 ms fixed; it was 0.654 at width 192). The query
+      # service's max-window-size must be <= this and is 200 (~84 ms idle,
+      # ~128 ms under co-tenancy); the remaining headroom is deliberate.
+      MAX_INPUTS_PER_REQUEST: "256"
+      # NOT 32 (splade's value). 32 would queue ~2.5 s of latent work behind a
+      # 150 ms budget. The caller degrades to upstream order on a 429 but WAITS
+      # on a queue, so a fast refusal is strictly better than a slow success.
+      # One forward in flight plus one assembling.
+      MAX_INFLIGHT: "2"
+      # A RESPONSE deadline, not a work deadline: asyncio.wait_for around
+      # asyncio.to_thread does not cancel the running thread. Above the worst
+      # legal request (~167 ms) and well below the query service's own timeout,
+      # so a slow request is refused here with a diagnosable 504 rather than
+      # there with an opaque socket timeout. scorer.assert_budget_is_consistent
+      # refuses to start on an inconsistent pair -- embedding-service shipped
+      # exactly that (MAX_INPUTS=256 against a budget nothing could finish
+      # inside) and every legal request timed out, marking its only backend
+      # unhealthy and taking the dense path down.
+      REQUEST_BUDGET_S: "0.5"
+      # FOUR cores on this box, shared with two TEI replicas, two SPLADE
+      # processes, kvrocks, embedding-service and seven observability sidecars.
+      # splade-backend-t4 already takes 2. CPU assembly is 0.2-2.7 ms against a
+      # 78 ms forward, so this is not the bottleneck and must not become one for
+      # the co-tenants.
+      TORCH_NUM_THREADS: "2"
+      # One short query encode per request; a rayon pool here is contention, not
+      # throughput.
+      TOKENIZERS_PARALLELISM: "false"
+      # Re-run the frozen splice against the golden fixture at boot. ~1 ms, and
+      # it is the difference between "CI was green somewhere else" and "the code
+      # in THIS container splices correctly". A wrong splice produces plausible
+      # scores, not an error.
+      CE_ASSERT_GOLDEN: "1"
+      PYTHONPATH: /runtime
+      API_KEY: ${CE_API_KEY:?set CE_API_KEY}
+    volumes:
+      - ${CE_MODEL_DIR:-/data/ce-service/model}:/model:ro
+      # CUDA torch + tokenizers + safetensors, kept off the 88%-full root fs.
+      - ${CE_RUNTIME_DIR:-/data/ce-service/runtime}:/runtime:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # 256m. shm is host RAM, this host has 15 GB with ~4 GB free and no swap,
+    # and there is no dataloader here at all -- one forward over an in-memory
+    # numpy array. splade takes 1gb because it batches 64 documents through a
+    # tokenizer; this batches ids that arrived pre-tokenized.
+    shm_size: 256m
+    restart: unless-stopped
+    healthcheck:
+      # /readyz, NOT /healthz. MXG-111's lesson: splade-backend kept /health,
+      # /readyz and /embed green while /encode-packed 500'd, because nothing
+      # exercised the path that was broken. /readyz here is gated on the warmup
+      # forward having actually run.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8140/readyz', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 30
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "3"

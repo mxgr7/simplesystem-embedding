@@ -1,0 +1,42 @@
+services:
+  splade-backend-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend-cuda
+    image: simplesystem-splade-backend:prod-soup-cuda-v1
+    ports:
+      - "127.0.0.1:8138:8138"
+    environment:
+      SPLADE_CHECKPOINT: /model/prod_soup.ckpt
+      HF_HOME: /data/huggingface
+      DEVICE: cuda
+      DOCUMENT_DTYPE: bf16
+      BACKEND_BATCH_SIZE: "256"
+      BACKEND_MAX_CONCURRENCY: "1"
+      MAX_INPUTS_PER_REQUEST: "256"
+      TORCH_NUM_THREADS: "16"
+      BACKEND_API_KEY: ${SPLADE_BACKEND_API_KEY:?set SPLADE_BACKEND_API_KEY}
+    volumes:
+      - ${SPLADE_MODEL_DIR:-/data/splade-service/model}:/model:ro
+      - ${SPLADE_HF_DIR:-/data/splade-service/huggingface}:/data/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 8gb
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8138/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 30
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "3"

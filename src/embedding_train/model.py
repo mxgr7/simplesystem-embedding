@@ -624,6 +624,7 @@ class EmbeddingModule(L.LightningModule):
             max_query_length,
             encode_batch_size,
             device,
+            is_query=True,
         )
         catalog_embeddings = self._encode_texts_batched(
             tokenizer,
@@ -746,7 +747,8 @@ class EmbeddingModule(L.LightningModule):
         )
 
     def _encode_texts_batched(
-        self, tokenizer, texts, max_length, encode_batch_size, device
+        self, tokenizer, texts, max_length, encode_batch_size, device,
+        is_query=False,
     ):
         encoded_batches = []
         was_training = self.training
@@ -766,7 +768,7 @@ class EmbeddingModule(L.LightningModule):
                     name: tensor.to(device)
                     for name, tensor in dict(inputs).items()
                 }
-                embeddings = self.encode(inputs)
+                embeddings = self.encode(inputs, is_query=is_query)
                 encoded_batches.append(
                     embeddings.detach().cpu().to(dtype=torch.float32)
                 )
@@ -1023,7 +1025,7 @@ class EmbeddingModule(L.LightningModule):
                 )
             teacher = self._teacher_ref[0]
             with torch.no_grad():
-                teacher_query_embeddings = teacher.encode(batch["query_inputs"])
+                teacher_query_embeddings = teacher.encode(batch["query_inputs"], is_query=True)
                 teacher_offer_embeddings = teacher.encode(batch["offer_inputs"])
             student_sims = torch.matmul(
                 query_embeddings, offer_embeddings.transpose(0, 1)
@@ -1040,7 +1042,10 @@ class EmbeddingModule(L.LightningModule):
 
         raise RuntimeError(f"Unsupported loss type: {self.loss_type}")
 
-    def encode(self, inputs):
+    def encode(self, inputs, is_query=False):
+        # is_query is accepted and ignored here; only SpladeModule can route to a
+        # separate query encoder. Keeps one signature across both architectures.
+        del is_query
         outputs = self.encoder(**inputs)
         self.assert_finite(outputs.last_hidden_state, "last_hidden_state")
         pooled = self.pool_last_hidden_state(

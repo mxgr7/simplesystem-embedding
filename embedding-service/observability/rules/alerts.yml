@@ -1,0 +1,580 @@
+## MXG-115. Alert rules for the semantic GPU box (semantic-search.prod.nextgen).
+##
+## Before this file: eleven scrape jobs, `{"groups":[]}`, no alertmanager. Every failure on
+## this box was exported faithfully and continuously into nothing, for as long as it took
+## someone to go looking. Two were live when it was written -- dcgm_exporter had been
+## crashlooping since a driver upgrade, and the Elasticsearch exporter had spent weeks
+## reporting up=1 while resolving no host at all.
+##
+## That second one set the shape of this file. `up` measures whether Prometheus could scrape
+## the exporter's own HTTP endpoint. It says nothing about whether the exporter could reach
+## the thing it exports, so an exporter that answers 200 with zero series is green and blind.
+## Every backend-facing job therefore gets an `absent()` companion carrying `category: blind`;
+## alertmanager.yml inhibits those when the target is simply down, so a dead target pages once
+## on the cause rather than twice.
+##
+## Every expression here was evaluated against this Prometheus before being committed, and
+## every metric name was read off the live exporter rather than remembered. Thresholds are
+## calibrated against measurements taken 2026-08-16 and noted per rule; where a threshold
+## could not be calibrated yet, the rule says so instead of guessing quietly.
+
+groups:
+  - name: meta
+    interval: 30s
+    rules:
+      - alert: Watchdog
+        # Always firing, by construction. Its only job is to make the alert path itself
+        # observable: if this is not present in Alertmanager, then Prometheus is down, or the
+        # rules did not load, or Prometheus cannot reach Alertmanager -- and in every one of
+        # those cases the absence of other alerts means nothing. A monitoring stack that
+        # cannot prove it is alive is the state this box was already in.
+        #
+        # Routed to the `null` receiver in alertmanager.yml, so it never reaches Slack. Check
+        # it by hand, or point a dead-man's-snitch at it later:
+        #   curl -s localhost:9093/api/v2/alerts | grep -c Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "Alerting pipeline is alive"
+          description: "This alert always fires. Its absence means the alerting path is broken."
+
+  - name: targets
+    interval: 30s
+    rules:
+      - alert: TargetDown
+        # 15m, not 5m: a container restart or a compose recreate is not an incident, and this
+        # box's whole problem is a board nobody trusts. `indexer` is excluded and handled
+        # below -- it is legitimately absent until MXG-112 wires it.
+        expr: up{job!="indexer"} == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
+          description: "Target has been unreachable for 15 minutes. Everything downstream of this job is now unmonitored."
+          action: "docker ps -a | grep -i {{ $labels.job }}; docker logs --tail 50 <container>"
+
+      - alert: IndexerTargetDown
+        # Separate and only a warning, because until the indexer starts writing this is the
+        # expected state. Once it is live, promote this to critical and delete the note.
+        expr: up{job="indexer"} == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "article-search-indexer is not being scraped"
+          description: "Expected while MXG-112 is unfinished. After the indexer goes live this means it is down, and with SPLADE_REQUIRED=true a down indexer is a stalled pipeline, not a slow one."
+          action: "Check the indexer container on this host; ACTUATOR_PORT must be 9091."
+
+  - name: gpu
+    interval: 30s
+    rules:
+      - alert: GpuMetricsMissing
+        # The rule that would have caught dcgm_exporter's 2,970-restart crashloop even if the
+        # container had kept answering /metrics. Driver upgrades break GPU containers created
+        # before them, because the nvidia runtime injects driver libraries at container
+        # CREATION -- a restart loop can never recover, only a recreate can.
+        expr: absent(DCGM_FI_DEV_FB_USED)
+        for: 10m
+        labels:
+          severity: critical
+          job: gpu
+          category: blind
+        annotations:
+          summary: "No GPU metrics are being produced"
+          description: "DCGM_FI_DEV_FB_USED has no series. The card is shared by two TEI replicas and the SPLADE backend, and none of them can be seen."
+          action: "docker compose -f embedding-service/compose.yaml up -d --force-recreate dcgm_exporter -- a restart will NOT fix it."
+
+      - alert: GpuMemoryHigh
+        # Baseline 2026-08-16 under sustained SPLADE load: 5,172 MiB of 15,360 = 34%, with
+        # both TEI replicas resident. 85% leaves room for a burst without an OOM.
+        expr: DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU {{ $labels.gpu }} memory at {{ $value | humanizePercentage }}"
+          description: "Steady state is 34%. A CUDA OOM here takes out whichever tenant asks next -- query embeds, indexer embeds, or SPLADE."
+          action: "nvidia-smi; check BACKEND_BATCH_SIZE on splade-backend-t4 (64) and TEI's --max-batch-tokens."
+
+      - alert: GpuMemoryCritical
+        expr: DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) > 0.95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU {{ $labels.gpu }} memory at {{ $value | humanizePercentage }} -- OOM imminent"
+          description: "At this level an allocation failure is a matter of when. With SPLADE_REQUIRED=true a SPLADE OOM stalls indexing into retry then DLQ."
+          action: "nvidia-smi; consider dropping BACKEND_BATCH_SIZE or draining the SPLADE backend via PATCH /admin/backends {weight: 0}."
+
+      - alert: GpuXidErrors
+        # XID is the GPU's own hardware/driver fault code. On a T4 shared three ways, an Xid
+        # is the difference between "a job crashed" and "the card needs a reset".
+        expr: DCGM_FI_DEV_XID_ERRORS > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU {{ $labels.gpu }} reported Xid error {{ $value }}"
+          description: "A driver-level GPU fault. Processes using the card may be in an undefined state."
+          action: "nvidia-smi -q | grep -i xid; check dmesg; a card reset needs every CUDA container stopped first."
+
+      - alert: GpuTempHigh
+        expr: DCGM_FI_DEV_GPU_TEMP > 85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU {{ $labels.gpu }} at {{ $value }}C"
+          description: "The T4 throttles near 85C, which shows up as unexplained encode-throughput loss rather than as an error."
+          action: "Check for a co-tenant running hotter than expected; DCGM_FI_DEV_POWER_USAGE tells you which."
+
+  - name: services
+    interval: 30s
+    rules:
+      - alert: SpladeBackendUnhealthy
+        # splade_service_backend_healthy was added for this ticket. Nothing else covers the
+        # case: splade_service_requests_total{status="504"} only moves when a client asks, so
+        # a backend that dies while the indexer is idle stays invisible until the next batch
+        # -- and with SPLADE_REQUIRED=true that batch does not degrade, it dead-letters.
+        expr: splade_service_backend_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SPLADE backend {{ $labels.backend }} ({{ $labels.url }}) is failing its probe"
+          description: "The frontend on :8137 has no working encoder. Indexing cannot commit a document without a SPLADE vector."
+          action: "curl -s localhost:8137/readyz; docker logs --tail 50 splade-service-splade-backend-t4-1"
+
+      - alert: SpladeNoBackendAtAll
+        # Only the absent case -- a backend that is registered but failing is
+        # SpladeBackendUnhealthy above, and paging twice for one event is how a board
+        # stops being read. No series here means the pool is empty or the frontend is gone.
+        expr: absent(splade_service_backend_healthy)
+        for: 5m
+        labels:
+          severity: critical
+          job: splade-service
+          category: blind
+        annotations:
+          summary: "SPLADE service reports no backends at all"
+          description: "The pool is empty, or the frontend on :8137 is not serving /metrics. /embed answers 503."
+          action: "curl -s localhost:8137/admin/backends; docker compose -f splade-service/compose.t4.yaml ps"
+
+      - alert: SpladeAtCapacity
+        # The cross-encoder has had CeServiceAtCapacity since MXG-144; SPLADE never got the
+        # equivalent, so on 2026-08-19 it refused 83% of the indexer's calls for hours and
+        # nothing said so. A 429 is not an error on the service's side, it is the service
+        # telling the caller to ask for less, and nobody was listening.
+        # Proportion, not rate: a few rejections during a burst are the gate working. This
+        # fires only when most traffic is being turned away and stays that way.
+        expr: |
+          sum(rate(splade_service_requests_total{status="429"}[5m]))
+            / clamp_min(sum(rate(splade_service_requests_total[5m])), 0.001) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SPLADE service is refusing {{ $value | humanizePercentage }} of requests"
+          description: "splade-service is at MAX_INFLIGHT and returning 429. If the caller retries whole batches, most of the traffic is the same work repeating; lower the caller's concurrency before raising the cap."
+          action: "curl -s localhost:8137/metrics | grep -E 'splade_service_(requests_total|inflight)'"
+
+      - alert: SpladeGatewayTimeouts
+        expr: rate(splade_service_requests_total{status="504"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SPLADE /embed is returning 504s"
+          description: "The frontend cannot get a vector out of its backend within REQUEST_BUDGET_S (120s). Every one of these is an indexer batch heading for retry."
+          action: "Check GPU contention first (DCGM_FI_DEV_GPU_UTIL), then the backend's own logs."
+
+      # --- MXG-166: the sparse pool's own recovery loop -----------------------------------
+      - alert: SpladeProbeLoopStalled
+        # splade_service_backend_healthy is written only BY the probe loop, so a loop that dies
+        # leaves it frozen at its last value and the outage looks like steady state. The gauge is
+        # a scrape-time collector here, which does not help: it faithfully re-exports the stale
+        # boolean. This is the one signal a frozen loop cannot fake. MXG-159 is the same failure
+        # on the dense side, where it cost four hours across a restart of the backend itself.
+        expr: time() - splade_service_probe_loop_last_iteration_timestamp > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SPLADE probe loop has not run for {{ $value | humanizeDuration }}"
+          description: "Nothing is re-probing the SPLADE backends, so an unhealthy backend can no longer recover on its own. The semantic query arm and the indexer both depend on it."
+          action: "docker logs --tail 100 splade-service-splade-service-t4-1 | grep -i probe; docker restart splade-service-splade-service-t4-1"
+
+      - alert: SpladeProbeLoopMetricMissing
+        # The threshold rule above cannot fire on a loop that never published anything, and an
+        # exporter answering 200 with no series reads as green -- the same blind spot every
+        # backend-facing job here gets an absent() twin for.
+        expr: absent(splade_service_probe_loop_last_iteration_timestamp)
+        for: 5m
+        labels:
+          severity: critical
+          job: splade-service
+          category: blind
+        annotations:
+          summary: "SPLADE probe-loop liveness metric is absent"
+          description: "The frontend on :8137 is not publishing its probe-loop stamp, so SpladeProbeLoopStalled cannot fire either way."
+          action: "curl -s localhost:8137/metrics | grep splade_service_probe_loop"
+
+      - alert: SpladeClientRecycling
+        # Recycling means the backend answers but our HTTP client to it is wedged. Self-healing,
+        # so warning not critical, but repeated recycles say the underlying cancellation/pool
+        # problem is back. REQUEST_BUDGET_S is 120 here against the dense side's 5, which makes
+        # the cancellations that poison a pool rarer, not impossible.
+        expr: changes(splade_service_backend_client_generation[30m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "splade-service is repeatedly recycling its client for backend {{ $labels.backend }}"
+          description: "{{ $value }} client recycles in 30m: the connection pool keeps wedging even though the backend is reachable."
+          action: "docker logs --tail 200 splade-service-splade-service-t4-1 | grep -i recycl"
+
+      - alert: SpladeNoHealthyBackendServed
+        # The 503 MXG-166 introduced. It used to be an unhandled 500: uncounted by
+        # splade_service_requests_total and invisible to every alert built on it, so a total
+        # outage of the encoder showed up nowhere until someone read the tracebacks.
+        expr: rate(splade_service_requests_total{status="503"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "splade-service is rejecting requests with no healthy backend"
+          description: "Every one of these is a query served without its semantic arm, or an indexer batch heading for retry."
+          action: "curl -s localhost:8137/admin/backends | python3 -m json.tool"
+
+      # --- MXG-144: the cross-encoder fine ranker -----------------------------------------
+      # The first query-path tenant on this GPU. Everything below is scoped by what a search
+      # request actually experiences, not by what the process reports about itself.
+      - alert: CeServiceNotReady
+        # ce_service_ready is a SCRAPE-TIME collector, not a gauge written by a loop: a gauge
+        # whose writer has died reports healthy forever, which is the failure this exists to
+        # catch. It only goes 1 after the warmup FORWARD ran -- splade kept /health, /readyz and
+        # /embed green while /encode-packed 500'd because nothing exercised the broken path.
+        expr: ce_service_ready == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ce-service on :8140 is not ready"
+          description: "The fine ranker is unavailable. Search still answers -- the query service degrades to upstream order -- but the SERP is the unreranked control ranking."
+          action: "curl -s localhost:8140/readyz; docker logs --tail 50 src-ce-service-t4-1"
+
+      - alert: CeServiceAbsent
+        # Only the absent case; a loaded-but-degraded process is CeServiceNotReady above, and
+        # paging twice for one event is how a board stops being read.
+        expr: absent(ce_service_ready)
+        for: 5m
+        labels:
+          severity: critical
+          job: ce-service
+          category: blind
+        annotations:
+          summary: "ce-service is not exposing metrics at all"
+          description: "The process is gone, or :8140 is not serving /metrics. Note 8139 is splade-auth's nginx, not this."
+          action: "docker compose -f /data/ce-service/src/compose.t4.yaml ps; ss -lntp | grep 814"
+
+      - alert: CeServiceDegraded
+        # Set by an inference exception. A CUDA OOM or an illegal memory access poisons the
+        # context, and a process that keeps answering afterwards serves garbage, so the service
+        # marks itself degraded and stops accepting work rather than continuing.
+        expr: ce_service_degraded == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ce-service marked itself degraded after an inference failure"
+          description: "A forward raised; the CUDA context is presumed poisoned. It will 503 until restarted."
+          action: "docker logs --tail 100 src-ce-service-t4-1 | grep -A20 'inference failed'; then restart it."
+
+      - alert: CeFineRankerBudgetBreached
+        # The 150 ms fine-ranker budget, at the window the query service actually sends.
+        # Cross-check against ce_service_padded_width and ce_service_candidates_per_request
+        # before blaming the GPU: a window that grew, or a padded width that drifted from 154 to
+        # 192, explains a latency rise that no GPU metric shows.
+        expr: histogram_quantile(0.95, sum(rate(ce_service_request_seconds_bucket[5m])) by (le)) > 0.15
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ce-service p95 is {{ $value | printf \"%.3f\" }}s, over the 150 ms budget"
+          description: "Measured on this box: co-tenancy with a saturated SPLADE costs the CE ~1.5x (p95 80.6 -> 119.8 ms at window 120). A breach usually means a bulk encode is running, not that the model got slower."
+          action: "Check DCGM_FI_DEV_GPU_UTIL and the splade job's rate first; then ce_service_candidates_per_request."
+
+      - alert: CeServiceAtCapacity
+        # MAX_INFLIGHT is 2 on purpose -- a fast 429 beats a queue, because the caller degrades
+        # to upstream order on a refusal but WAITS on a queue. Sustained 429s mean the search
+        # rate has outgrown one T4's share of the card.
+        expr: rate(ce_service_requests_total{status="429"}[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ce-service is shedding requests at its concurrency limit"
+          description: "Every one of these is a search served in upstream order. Sustained, it is the signal to move the CE off this shared card."
+          action: "Compare the search rate against ~1,530 pairs/s (12.7 windows of 120 per second) idle, less under co-tenancy."
+
+      - alert: CeTokenizerVersionSkew
+        # Candidates whose stored ceTokenizerVersion is not the deployed one. THE ROLLOUT ALARM:
+        # it means a tokenizer bump landed without a completed backfill, or the query service's
+        # SEARCH_RERANK_CE_EXPECTED_TOKENIZER_VERSION is stale. Those candidates are demoted, not
+        # mis-scored -- but at a high enough rate the missing-content guard trips and reranking
+        # silently stops happening.
+        expr: |
+          rate(ce_service_candidates_total{outcome="skipped_version"}[15m])
+            / clamp_min(sum(rate(ce_service_candidates_total[15m])), 0.001) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | printf \"%.1%\" }} of CE candidates carry a stale ceTokenizerVersion"
+          description: "Steady state is 0: all 115,485,224 offer-bearing articles are stamped ce_dist_l12_v3-2026-07-18-fkr108."
+          action: "Compare CE_TOKENIZER_VERSION on ce-service against the indexer's, then check the backfill's progress."
+
+      - alert: CeDecodeFailures
+        # A stored blob that will not decode. Distinct from a version skew: that is a rollout,
+        # this is corruption.
+        expr: rate(ce_service_candidates_total{outcome="skipped_decode"}[15m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ce-service cannot decode some stored ceTokenIds blobs"
+          description: "Either a truncated _source (ceTokenCount disagreeing with the blob length) or a wire-format change."
+          action: "docker logs src-ce-service-t4-1 | grep decode_failed; then sample the article's _source directly."
+
+      - alert: TeiBackendUnhealthy
+        expr: embedding_service_tei_backend_healthy == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dense embedding backend {{ $labels.backend }} ({{ $labels.url }}) is unhealthy"
+          description: "embedding-service on :9000 cannot reach this TEI replica."
+          action: "docker logs --tail 50 embedding-service-tei-indexer-1"
+
+      - alert: TeiProbeLoopStalled
+        # The health gauge above is only ever written BY the probe loop, so a loop that dies
+        # leaves it frozen at its last value and the outage looks like steady state. MXG-159:
+        # that is exactly what happened, for four hours, across a restart of TEI itself.
+        # This is the one signal a frozen push-gauge cannot fake.
+        expr: time() - embedding_service_tei_probe_loop_last_iteration_timestamp > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "embedding-service TEI probe loop has not run for {{ $value | humanizeDuration }}"
+          description: "Nothing is re-probing the TEI backends, so an unhealthy backend can no longer recover on its own."
+          action: "docker logs --tail 100 embedding-service-embedding-service-1 | grep -i probe; docker restart embedding-service-embedding-service-1"
+
+      - alert: TeiClientRecycling
+        # Recycling means the backend answers but our HTTP client to it is wedged (MXG-159).
+        # Self-healing, so warning not critical, but repeated recycles say the underlying
+        # cancellation/pool problem is back.
+        expr: changes(embedding_service_tei_backend_client_generation[30m]) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "embedding-service is repeatedly recycling its client for backend {{ $labels.backend }}"
+          description: "{{ $value }} client recycles in 30m: the connection pool keeps wedging even though the backend is reachable."
+          action: "docker logs --tail 200 embedding-service-embedding-service-1 | grep -i recycl"
+
+      - alert: TeiRequestFailures
+        # TEI has no failure counter; it has a request counter and a success counter. The gap
+        # between their rates is the failure rate.
+        expr: rate(te_request_count[5m]) - rate(te_request_success[5m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TEI {{ $labels.job }} is failing requests ({{ $value | printf \"%.2f\" }}/s)"
+          description: "Sustained non-success responses from a TEI replica. On tei_indexer this is the dense half of indexing failing."
+          action: "docker logs --tail 100 embedding-service-tei-1 (or -tei-indexer-1); look for queue-Full."
+
+      - alert: KvrocksDown
+        expr: redis_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "KVRocks is unreachable"
+          description: "Both embedding caches live here. Cache misses degrade to real encodes, so this shows up as GPU load and latency before it shows up as errors."
+          action: "docker logs --tail 50 embedding-service-kvrocks-1; check /mnt/nvme free space."
+
+      # --- MXG-149: the query service's cascade -------------------------------------------
+      # ⚠️ The two rules below are the only ones in this file that were NOT evaluated against
+      # this Prometheus before being committed, because the series they read do not exist here
+      # yet. article_search_query_* is exported by the article-search-query pods, and the scrape
+      # job that reaches them is MXG-181 §5. Until that lands these are inert: no series, no
+      # evaluation, no firing. Re-check both expressions the day the job appears.
+      - alert: CascadeServingCoarseOrder
+        # The fine ranker decides the order only when the cross-encoder scored EVERY candidate
+        # in the 120-window. Short of that the SERP keeps the coarse ranker's order, which is
+        # the decided behaviour and is measurably worse: MXG-153 put the CE's end-to-end worth
+        # at .915 against .842 on blind-union labels.
+        #
+        # This covers more than a CE outage. A blank or wrong SEARCH_RERANK_CE_URL produces the
+        # same reason="coarse" tag, because CeRerankClient then holds a null client and hands
+        # back an empty window. Neither case is visible in a response: an open-loop ramp on
+        # 2026-08-19 got HTTP 200 for every request through 10 searches/s while the CE was
+        # failing, and only the counter deltas showed it.
+        #
+        # 30m rate windows, where the other proportion rules in this group use 5m. Two reasons.
+        # Search traffic averaged ~0.08 q/s across the A/B, so a 5m window holds roughly two
+        # dozen requests and one coarse order is already 4%. And cascade.order is stamped after
+        # the ranked-pool cache (300 s TTL), so a brief outage keeps counting through page flips
+        # for five minutes after it ends; a window shorter than the TTL reads that tail as new.
+        #
+        # Denominator is fine|coarse only: empty_pool and no_cascade are not degradations, and
+        # not_configured has its own rule below.
+        expr: |
+          sum(rate(article_search_query_cascade_order_total{reason="coarse"}[30m]))
+            / clamp_min(sum(rate(article_search_query_cascade_order_total{reason=~"fine|coarse"}[30m])), 0.001) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of SERPs are being served in coarse order"
+          description: "The cross-encoder is not scoring full windows. Results stay correct and get measurably worse (MXG-153: .915 against .842). A total CE outage is this same rule at 100%."
+          action: "Check CeServiceAtCapacity and ce_service_requests_total{status=\"429\"} first, then confirm SEARCH_RERANK_CE_URL on the query pods resolves to a reachable ce-service. Triage query: sum(rate(article_search_query_cascade_ce_window_total[5m])) by (outcome). Vocabulary: article/search/query/README-reranker.md, Cascade ordering."
+
+      - alert: CascadeWindowScorerMissing
+        # Despite the tag name this does NOT mean the CE got no url. reason="not_configured" is
+        # set only when the CeWindowScorer bean is absent from the context, and
+        # CeCascadeWindowScorer is an unconditional @Component, so a non-zero rate here is a
+        # broken assembly rather than a broken config. It should never fire in a deployment that
+        # was assembled normally; it is here because the enum value exists and an unexplained
+        # series is worse than a rule nobody expects to see.
+        # A forgotten url is not detectable after boot at all, which is what MXG-179 fixes by
+        # moving that check to startup.
+        expr: rate(article_search_query_cascade_order_total{reason="not_configured"}[30m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Query service is running without a CE window scorer bean"
+          description: "CascadeOrdering.NOT_CONFIGURED: every SERP is ordered by the coarse ranker and no CE call is ever attempted. This is a wiring fault in the deployed artifact, not a configuration value, so no env change will fix it."
+          action: "Hit the query service's actuator /beans and look for CeCascadeWindowScorer, then compare the deployed image against the branch it was built from."
+
+  - name: host
+    interval: 30s
+    rules:
+      - alert: DiskSpaceLow
+        # Measured 2026-08-16: / is 90% full (5.2 GB free of 49 GB), /mnt/nvme 52%, /data 20%.
+        # The root filesystem is the live risk -- it is Docker's storage root, and it is why
+        # splade-service builds from the slim `backend` target with CUDA torch bind-mounted
+        # from /data instead of pulling a 9-11 GB CUDA base. This rule fires on / today, and
+        # that is a true positive, not a miscalibration.
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes < 0.15
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.mountpoint }} is {{ $value | humanizePercentage }} free"
+          description: "On / this blocks image pulls and can wedge the docker daemon. On /mnt/nvme it starves KVRocks, whose SPLADE keyspace is projected at 60-120 GB fully populated against 57 GB free."
+          action: "docker system df; docker image prune; check /var/lib/docker and /mnt/nvme."
+
+      - alert: DiskSpaceCritical
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes < 0.06
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.mountpoint }} is {{ $value | humanizePercentage }} free"
+          description: "A full filesystem takes containers down in ways that look like unrelated bugs."
+          action: "docker system prune -a is the blunt option; check for a runaway log first (json-file logs are capped at 50m x 3 per service)."
+
+      - alert: HostMemoryLow
+        # 15 GB of RAM and ZERO swap: there is no soft failure mode here, the OOM killer picks
+        # a victim. KVRocks is capped at 5 GB for exactly this reason. Baseline 61% available.
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.12
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host memory {{ $value | humanizePercentage }} available"
+          description: "This host has no swap. The OOM killer will choose, and it does not know which of these containers matters."
+          action: "docker stats --no-stream; the usual suspects are KVRocks and a SPLADE batch."
+
+  - name: indexing
+    interval: 30s
+    rules:
+      - alert: ElasticsearchMetricsMissing
+        # The rule this whole file is shaped around. The exporter answered /metrics with 200
+        # and zero series for weeks after semantic-es-temp.prod.nextgen stopped resolving, so
+        # `up{job="semantic_es"}` stayed 1 the entire time. `up` cannot see this; absent() can.
+        expr: absent(elasticsearch_cluster_health_status)
+        for: 10m
+        labels:
+          severity: critical
+          job: semantic_es
+          category: blind
+        annotations:
+          summary: "The Elasticsearch exporter is up but exporting nothing"
+          description: "No cluster health series at all. The exporter's own endpoint is fine -- it cannot reach semsearchprod, or the credentials stopped working."
+          action: "docker logs --tail 20 embedding-service-elasticsearch_exporter-1; check ES_SEMANTIC2_URL resolves from the bridge network."
+
+      - alert: ElasticsearchClusterRed
+        expr: elasticsearch_cluster_health_status{color="red"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "semsearchprod is RED"
+          description: "At least one primary shard is unassigned. Writes to the affected shard fail; with SPLADE_REQUIRED=true the indexer retries and then dead-letters them."
+          action: "GET _cluster/allocation/explain"
+
+      - alert: ElasticsearchClusterYellow
+        # Yellow on 2026-08-16 with 6 initializing shards -- normal during a recovery, not
+        # normal for hours. 2h avoids paging on every routine relocation.
+        expr: elasticsearch_cluster_health_status{color="yellow"} == 1
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "semsearchprod has been YELLOW for 2 hours"
+          description: "Replicas unassigned for longer than a recovery should take."
+          action: "GET _cat/shards?v&h=index,shard,prirep,state,unassigned.reason | grep -v STARTED"
+
+      - alert: SemanticIndexerLagHigh
+        # UNCALIBRATED -- see the note at the end of this file. The threshold is derived from
+        # capacity, not from observed behaviour: SPLADE on this T4 does 283 docs/s, so 500k
+        # messages is roughly half an hour of work at full rate.
+        expr: kafka_group_lag_total{group="article-indexer-v1-semantic"} > 500000
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Semantic indexer is {{ $value | humanize }} messages behind"
+          description: "About half an hour of work at the T4's 283 docs/s ceiling. If it keeps climbing, the encoder is the bottleneck and this box is the wrong answer."
+          action: "Compare rate(kafka_group_partition_committed_offset) against the topic's end-offset rate."
+
+      - alert: SemanticIndexingStalled
+        # Lag alone cannot see a stall where the consumer commits offsets but nothing lands in
+        # ES. Lag climbing WHILE the index takes no writes at all is unambiguous.
+        expr: |
+          kafka_group_lag_total{group="article-indexer-v1-semantic"} > 10000
+          unless on()
+          (rate(elasticsearch_index_stats_indexing_index_total{index=~"article-splade-b50v2.*"}[15m]) > 0)
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Semantic indexer is behind and the index is taking no writes"
+          description: "Consumer lag above 10k while the article index has received zero documents for 15 minutes. This is a stall, not a slowdown."
+          action: "Check the indexer's DLQ and COUNTER_SPLADE_FAILURES; then curl localhost:8137/readyz."
+
+## Not yet covered, on purpose
+##
+## DLQ depth and COUNTER_SPLADE_FAILURES. Both are Micrometer metrics on the indexer's own
+## actuator endpoint, which has never been scraped from this box -- `up{job="indexer"}` has
+## been 0 since the job was written. Guessing at the exported metric names would produce rules
+## that silently never fire, which is the failure this ticket is about. Add them once the
+## indexer is live and the names can be read off /actuator/prometheus (MXG-112), and calibrate
+## SemanticIndexerLagHigh against a day of real lag at the same time.

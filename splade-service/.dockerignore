@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+# The compose files read secrets from an --env-file in this directory, so a
+# deployment puts a .env RIGHT HERE, inside the build context. `COPY . /app`
+# then bakes it into an image layer: `docker run --entrypoint sh <image> -c
+# 'cat /app/.env'` prints the keys, and they survive in the layer even after the
+# file is deleted. Worse, `load_dotenv()` in any tool run inside the container
+# picks that stale copy up in preference to the real environment, so rotating
+# the keys outside silently stops working.
+.env
+.env.*
+*.ckpt

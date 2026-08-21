@@ -161,51 +161,41 @@ services:
       - kvrocks
     restart: unless-stopped
 
-  search-prober:
-    # Synthetic search prober: health-check + cold-start warm-keeper. Fires ONE real
-    # semantic query at the preprod gateway every PROBE_INTERVAL s, rotating query+context
-    # so it keeps the shared ES page cache warm AND exposes real end-to-end preprod
-    # p50/p90/p99 to Prometheus (the preprod pod itself isn't scrapable). stdlib-only, so
-    # the base python image runs it with no pip install. Same bridge net as Prometheus ->
-    # scraped by service name on :9155. Creds come from the repo-root .env (PREPROD_REV_PROXY_*).
-    image: python:3.12-slim
-    command: ["python", "/app/prober.py"]
-    volumes:
-      - ./observability/search-prober/prober.py:/app/prober.py:ro
-      - ../scripts/company_context_map.json:/app/company_context_map.json:ro
-    environment:
-      PROBE_URL: https://preprod-api.platform.simplesystem.com
-      PROBE_AUTH: ${PREPROD_REV_PROXY_USER:-}:${PREPROD_REV_PROXY_PASSWORD:-}
-      PROBE_INTERVAL: "10"
-      PROBE_PORT: "9155"
-      PROBE_MAP: /app/company_context_map.json
-      PROBE_TARGET_LABEL: preprod
-    ports:
-      - "9155:9155"
-    restart: unless-stopped
+  # `search-prober` was removed here 2026-08-16. It fired one real semantic query at the
+  # preprod gateway every 10s as a health-check and ES warm-keeper, and had been failing
+  # 100% of those requests -- probe_up 0, 10,206 errors, zero successes -- for long enough
+  # that nobody could say when it last worked. Retired rather than repaired: it measured
+  # preprod, not this box, and it was the only reason PREPROD_REV_PROXY_* had to be on this
+  # host. `observability/search-prober/prober.py` is kept in the repo; if a synthetic probe
+  # is wanted again it should point at whatever is actually being served.
 
   elasticsearch_exporter:
-    # Monitors the temporary semantic ES ("semantic-es-temp", ES 9.3.3, single
-    # node) that holds prod-article-index-v1-semantic-bf16 during the catch-up
-    # backfill. On the same bridge net as Prometheus, so it's scraped by
-    # service name on :9114.
+    # Monitors `semsearchprod`, the 3-node semantic ES cluster that holds the live article
+    # index. On the same bridge net as Prometheus, so it's scraped by service name on :9114.
     #
-    # The ES host (semantic-es-temp.prod.nextgen -> 172.16.10.21) resolves over
-    # the bridge's embedded DNS, so no host-gateway trick is needed here.
+    # MXG-115: this used to point at http://semantic-es-temp.prod.nextgen:9200, the single-node
+    # temp cluster that held prod-article-index-v1-semantic-bf16 during the catch-up backfill.
+    # MXG-110 finished with that index (it is `close`d on semsearchprod now) and the temp host
+    # stopped resolving. The exporter went on answering /metrics with 200 and zero series, so
+    # Prometheus reported `up{job="semantic_es_temp"} = 1` for weeks while exporting nothing --
+    # the target was green and blind. `up` measures the exporter, not what the exporter can
+    # reach; the alert rules pair every backend-facing job with an `absent()` companion for
+    # exactly this reason.
     #
-    # Credentials: user max.gerer is a temp-cluster superuser, so cluster:monitor
-    # works directly. The exporter merges ES_USERNAME/ES_PASSWORD into the URI;
-    # we pass them from discrete .env vars (ES_SEMANTIC_USERNAME/PASSWORD, derived
-    # from ELASTIC_SEMANTIC_URL) via compose substitution so the password is never
-    # committed and never appears in the process args / docker inspect.
+    # Collector set is deliberately narrower than before. This is a shared production cluster,
+    # not the temp box: `--es.shards` and `--es.indices_settings` walk _cat/shards and
+    # _all/_settings over 184 shards on every scrape, which is not a cost worth imposing for
+    # metrics nobody alerts on. Cluster health + node stats + index-level docs/store is what
+    # the rules actually read, at 60s.
+    #
+    # Credentials: the exporter merges ES_USERNAME/ES_PASSWORD into the URI; we pass them from
+    # discrete .env vars via compose substitution so the password is never committed and never
+    # appears in the process args / docker inspect.
     image: quay.io/prometheuscommunity/elasticsearch-exporter:v1.10.0
     command:
-      - --es.uri=http://semantic-es-temp.prod.nextgen:9200
+      - --es.uri=${ES_SEMANTIC2_URL:-http://localhost:9200}
       - --es.all
       - --es.indices
-      - --es.indices_settings
-      - --es.shards
-      - --collector.clustersettings
       - --es.timeout=30s
       - --web.listen-address=:9114
     # Sourced from the repo-root .env via `--env-file ../.env` (the compose
@@ -215,8 +205,8 @@ services:
     # are supplied. Deploy this service with:
     #   docker compose --env-file .env -f embedding-service/compose.yaml up -d elasticsearch_exporter
     environment:
-      ES_USERNAME: ${ES_SEMANTIC_USERNAME:-}
-      ES_PASSWORD: ${ES_SEMANTIC_PASSWORD:-}
+      ES_USERNAME: ${ES_SEMANTIC2_USERNAME:-}
+      ES_PASSWORD: ${ES_SEMANTIC2_PASSWORD:-}
     ports:
       - "9114:9114"
     restart: unless-stopped
@@ -269,6 +259,13 @@ services:
       - "9090:9090"
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # A DIRECTORY mount, not a file-per-rule one, and deliberately so. A single-file bind
+      # mount binds an inode: rsync and most editors write a temp file and rename, which
+      # leaves the container reading the deleted original while POST /-/reload returns 200
+      # and loads nothing. Mounting the directory means new and rewritten rule files are seen
+      # without recreating the container. (prometheus.yml above still has that hazard --
+      # verify edits to it with `docker exec ... grep`, or recreate.)
+      - ./observability/rules:/etc/prometheus/rules:ro
       - prometheus_data:/prometheus
     # The embedding-service runs network_mode:host, so we can't address it
     # by service name from this bridge-net Prometheus. `host-gateway` makes
@@ -281,6 +278,39 @@ services:
       - dcgm_exporter
       - node_exporter
       - elasticsearch_exporter
+    restart: unless-stopped
+
+  alertmanager:
+    # MXG-115. Until 2026-08-16 this box had eleven scrape jobs, zero alert rules and nowhere
+    # to send an alert if it had had one. Rules without a receiver are the same failure one
+    # layer up, so the two land together.
+    image: prom/alertmanager:v0.27.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      # Needed for the "View in Alertmanager" links in Slack to be clickable from a laptop
+      # on the VPN; the container has no idea what host it is reachable as.
+      - --web.external-url=http://semantic-search.prod.nextgen:9093
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # The Slack incoming-webhook URL is a credential and Alertmanager does NOT expand env
+      # vars in its config, so it is passed as a file and referenced by `slack_api_url_file`.
+      # Default path ends in .local, which .gitignore excludes -- the URL must never reach a
+      # commit. If the file is missing this one container fails to start, loudly, which is the
+      # intended behaviour: a silently mute Alertmanager is the failure this ticket is about.
+      # Everything else in this compose file keeps working, hence `:-` rather than `:?`.
+      #
+      # ⚠️ PERMISSIONS. This image runs as `nobody` (65534), so a 0600 file owned by the
+      # deploying user is unreadable to it -- and the resulting `permission denied` is an
+      # UNRECOVERABLE notify error: every alert is dropped with nothing but a line in
+      # Alertmanager's log to show for it. After writing or rotating the webhook:
+      #     sudo chgrp 65534 <file> && chmod 0640 <file>
+      # Then confirm from inside the container, not from the host:
+      #     docker exec embedding-service-alertmanager-1 head -c 8 /etc/alertmanager/slack_webhook_url
+      - ${SLACK_WEBHOOK_FILE:-./observability/alertmanager/slack_webhook_url.local}:/etc/alertmanager/slack_webhook_url:ro
+      - alertmanager_data:/alertmanager
     restart: unless-stopped
 
   grafana:
@@ -307,3 +337,4 @@ services:
 volumes:
   prometheus_data:
   grafana_data:
+  alertmanager_data:

@@ -43,6 +43,23 @@ def build_module(cfg):
                 f"init_checkpoint is missing state_dict: {init_checkpoint}"
             )
         state_dict = _align_encoder_compile_prefix(state_dict, module)
+        # Untied encoders start from the SAME warm-start weights and diverge
+        # during training. Checkpoints predate the split and carry only
+        # `encoder.*`, so mirror them onto `query_encoder.*`; without this the
+        # strict load below raises on missing keys, and training SPLADE from a
+        # vanilla backbone degenerates.
+        if any(k.startswith("query_encoder.") for k, _ in module.state_dict().items()):
+            if not any(k.startswith("query_encoder.") for k in state_dict):
+                mirrored = {
+                    "query_encoder." + k[len("encoder."):]: v
+                    for k, v in state_dict.items()
+                    if k.startswith("encoder.")
+                }
+                state_dict = {**state_dict, **mirrored}
+                logging.info(
+                    "Mirrored %d encoder tensors onto query_encoder for warm start",
+                    len(mirrored),
+                )
         module.load_state_dict(state_dict)
         logging.info("Warm-started model weights from %s", init_checkpoint)
 
@@ -134,11 +151,23 @@ class DatasetStatsLogger(Callback):
         self._logged = True
 
 
+class StopAfterFirstValidation(Callback):
+    """Stop the instant the first real validation finishes (skips sanity check).
+    For LR/HP sweeps: one val on the full 8-epoch anneal schedule, then a precise
+    stop -- no wasted post-val steps, scheduler horizon untouched (unlike max_steps
+    which shrinks estimated_stepping_batches). Enable with +trainer.stop_after_first_val=true."""
+    def on_validation_end(self, trainer, pl_module):
+        if not trainer.sanity_checking:
+            trainer.should_stop = True
+
+
 def build_callbacks(cfg, logger):
     callbacks = [
         LearningRateMonitor(logging_interval="step"),
         DatasetStatsLogger(),
     ]
+    if getattr(cfg.trainer, "stop_after_first_val", False):
+        callbacks.append(StopAfterFirstValidation())
 
     if not getattr(cfg.trainer, "enable_checkpointing", True):
         return callbacks
@@ -229,6 +258,19 @@ def run(cfg):
 
     if best_model_path:
         print(f"Best checkpoint: {best_model_path}")
+
+    # Time-capped runs (trainer.max_time) stop mid-epoch; ModelCheckpoint only
+    # saves at validation/epoch boundaries, silently discarding the tail of
+    # training. Persist the end-of-fit weights explicitly so evals can use
+    # every trained step.
+    for callback in callbacks:
+        if isinstance(callback, ModelCheckpoint) and callback.dirpath:
+            final_path = str(
+                Path(callback.dirpath) / f"final-step={trainer.global_step}.ckpt"
+            )
+            trainer.save_checkpoint(final_path, weights_only=True)
+            print(f"Final checkpoint: {final_path}")
+            break
 
 
 def main():

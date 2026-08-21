@@ -20,6 +20,9 @@ def build_synthetic_negative_record(
         "query_text": anchor_query_text,
         "offer_id": synthetic_offer["offer_id"],
         "offer_text": synthetic_offer["offer_text"],
+        # Carried when field dropout is active so cross-query synthetic
+        # negatives get masked like real records.
+        "offer_fields": synthetic_offer.get("offer_fields"),
         "label": 0.0,
         "raw_label": SYNTHETIC_NEGATIVE_LABEL,
     }
@@ -493,3 +496,45 @@ class AnchorQueryBatchDataset(IterableDataset):
 
     def __len__(self):
         return self.batches_per_epoch
+
+class LengthBucketedBatchSampler:
+    """Batch sampler that reduces pad-to-longest waste while keeping batches
+    near-random: shuffle all indices each epoch, partition into windows of
+    `window_batches * batch_size`, sort each window by a length key, chunk
+    into batches, then shuffle the batch order. Batch composition stays a
+    random draw at window granularity; within-window length sorting cuts the
+    ~40% padding waste of fully shuffled batches (renders p50 ~300 vs 512 cap).
+    """
+
+    def __init__(self, lengths, batch_size, window_batches=16, seed=0,
+                 drop_last=False):
+        self.lengths = list(lengths)
+        self.batch_size = int(batch_size)
+        self.window_batches = max(1, int(window_batches))
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self._epoch = 0
+
+    def __len__(self):
+        n = len(self.lengths)
+        if self.drop_last:
+            return n // self.batch_size
+        return (n + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self._epoch)
+        self._epoch += 1
+        indices = list(range(len(self.lengths)))
+        rng.shuffle(indices)
+        window = self.window_batches * self.batch_size
+        batches = []
+        for start in range(0, len(indices), window):
+            chunk = indices[start:start + window]
+            chunk.sort(key=lambda i: self.lengths[i])
+            for b in range(0, len(chunk), self.batch_size):
+                batch = chunk[b:b + self.batch_size]
+                if self.drop_last and len(batch) < self.batch_size:
+                    continue
+                batches.append(batch)
+        rng.shuffle(batches)
+        return iter(batches)

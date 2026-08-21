@@ -1,0 +1,21 @@
+commit	seg_r100	gold_r100	seg_r10	gold_r10	flops_w	qnnz	vram_gb	status	description
+baseline	0.9635	0.8999	0.4316	0.4866	2.2	44	78.2	keep	fold_raw: reference recipe on raw_fold (8ep, warm-start v1a_best)
+baseline	0.9523	0.9101	0.4209	0.4927	2.7	42	78.2	keep	fold_b50: reference recipe on b50_fold
+baseline	0.9588	0.9040	0.4293	0.4925	2.3	39	0.0	keep	soup_fold: uniform soup(fold_raw, fold_b50) — balanced best
+52cf74c	0.9588	0.9040	0.4293	0.4925	2.3	39	-	speedup	eval harness fork-pool port: seg 15-20m->10m0s, gold ~25m->9m0s; reproduces soup_fold seg .9588/.4293 gold .9040/.4925 EXACT
+9e89338	0.9528	-	0.4206	-	4.42	46	78.2	screen	base_b50: in-budget 45min screen BASELINE, reference recipe on b50_fold (step1200, best ckpt)
+1119b75	0.9536	-	0.4240	-	2.37	38	78.2	speedup	s1_bucket: length-bucketed batching, 1632 steps vs 1200 in 45min (+36%), seg flat vs base_b50 (+.0008), FLOPS_w 4.42->2.37 — ADOPTED as default
+16282d7	0.9591	0.8921	0.4276	0.4866	2.86	42	78.2	keep	base_raw: in-budget 45min KEEP ROOT, reference recipe on raw_fold (final@1320); chain comparison point seg .9591 gold .8921
+a23afe7	0.9538	-	0.4246	-	2.47	41	78.2	screen	s2_mask100: train-time stopword mask100 — seg flat vs s1_bucket (+.0002), FLOPS flat; no in-budget win, park for full-length
+a23afe7	0	-	0	-	-	-	-	crash	s3_distill v1: model.margin_mse_teacher_scale not in splade config struct — fixed by exposing keys
+4262547	0.8993	-	0.3855	-	68.22	127	78.2	discard	s3_distill: MarginMSE w=.05 scale=20 BLOWUP — qnnz 127, FLOPS 68, seg -.054 vs s1; margin target >> natural dot scale inflates activations
+4262547	0.9369	-	0.4109	-	32.87	49	78.2	discard	s4_distill_tame: MarginMSE w=.02 scale=5 still blows FLOPS (33) seg -.017 vs s1; additive MarginMSE fights FLOPS reg — lever dead in-budget, needs margin normalization
+a23afe7	0.9570	-	0.4275	-	2.34	35	78.2	screen	s5_fdrop30: field_dropout p=.3 +bucketing, seg +.0034 vs s1 — GRADUATES to keep run on raw
+4262547	0.9609	0.8971	0.4332	0.4935	2.32	41	78.2	keep	k1_fdrop30_raw: fdrop p=.3 + bucketing on raw (final@1662) — vs root +.0018 seg +.0050 gold, mean +.0034 KEEP; new chain best
+4262547	0.9600	0.9000	0.4305	0.5028	2.29	35	-	soup	soup_k1s5: uniform soup(k1,s5) — vs k1 seg -.0009 gold +.0029 mean +.0010 <bar, NOT new best; gold R@10 .5028 = best anywhere
+7f85f4b	0.9628	0.8962	0.4422	0.5018	1.89	30	79.6	discard	k2_desc0_fd30: desc0+seq256+b512+accum1+fdrop30, 2996 steps (5.8ep) — vs k1 seg +.0019 gold -.0009 mean +.0005<bar; BUT R@10 +.009/+.008, FLOPS 1.89/1.47, best deploy profile — PRIME full-length candidate
+7f85f4b	0	0	0	0	-	-	-	crash	k3_desc0_384: OOM (batch384 x seq384 logits 17GiB) — 384/384 not viable at accum1; superseded by regime change
+-	-	-	-	-	-	-	-	note	CHAIN RE-ROOTED on k2 config (desc0+seq256+b512+accum1+fdrop30+bucketing) by Max decision: R@10 +.009/+.008, FLOPS 1.89/1.47, 5.8ep in-budget outweigh R@100 mean +.0005; budget 45->15 min from here — do NOT compare FLOPS/steps across budget generations
+48da6a0	0.9583	0.8956	0.4357	0.4941	2.78	39	79.6	keep	b15_root: NEW 15-MIN CHAIN ROOT (k2 config: desc0+seq256+b512+accum1+fdrop30+bucketing), 1015 steps/1.9ep, final@1015
+48da6a0	0.9591	-	0.4325	-	6.78	43	-	discard	s6_ep2: cosine fully annealed in-budget (max_epochs=2) — seg flat +.0008 but FLOPS_w 6.78>6 guardrail; annealed lr freezes sparsification. Keep max_epochs=8 mid-schedule
+48da6a0	0.9590	0.9046	0.4355	0.5010	2.64	31	79.6	keep	s7_lr3e5: lr 1.5e-5->3e-5 on b15 base, final@1016 — vs root seg +.0007 gold +.0090 mean +.0048 KEEP (new chain best); gold R@10 .5010 all-time high. SESSION-FINAL (Fable5 limit reached, session ended here)

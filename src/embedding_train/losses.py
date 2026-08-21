@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -47,6 +49,59 @@ def kl_distillation_loss(student_sims, teacher_sims, temperature):
 
 def flops_regularizer(representations):
     return (representations.abs().mean(dim=0) ** 2).sum()
+
+
+def l1_regularizer(representations):
+    # FLOPS penalizes (mean activation)^2, whose gradient vanishes as a -> 0, so
+    # it shrinks weights without ever zeroing a dimension. Measured: sweeping
+    # flops_lambda_q x4/x10/x20 moved query nnz 71 -> 69.6 -> 77.8 -> 80.5, i.e.
+    # up. L1 has constant gradient near zero and does drive dims to exactly
+    # zero, which is what actually shortens the query's posting-list disjunction.
+    # Equivalent to representations.abs().sum(dim=1).mean().
+    return representations.abs().mean(dim=0).sum()
+
+
+def df_activation_paper(document_frequency, half, sharp):
+    """Generalized logistic from DF-FLOPS (arXiv:2505.15070), their Eq. 3:
+
+        activ(x) = 1 / (1 + (x^(log_half 2) - 1)^sharp)
+
+    `half` is the df at which the weight is exactly 0.5 (their alpha=0.1) and
+    `sharp` controls steepness (their beta=10). At the published settings this is
+    a near-hard high-pass: w~0.0003 at df=2%, 0.5 at 10%, 0.99 at 20% — i.e. it
+    penalizes only the high-df tail and leaves everything else untouched. That is
+    why the paper reports doc nnz staying high (583.8 -> 301.6) while top-token
+    df collapses (95.8% -> 8.0%).
+
+    A plain sigmoid(alpha*(df-beta)) applies far broader pressure and collapses
+    nnz globally instead, which is a materially different regularizer.
+    """
+    if not 0.0 < half < 1.0:
+        # half > 1 flips the exponent positive, making the base negative; the
+        # clamp below then swallows it and EVERY weight becomes exactly 1.0,
+        # i.e. plain FLOPS, silently.
+        raise ValueError(f"df_half must be in (0, 1), got {half}")
+    # df=0 would give 0^negative = inf; clamp so the weight goes to ~0 cleanly.
+    safe = document_frequency.clamp(min=1e-9, max=1.0 - 1e-9)
+    exponent = math.log(2.0) / math.log(half)
+    return 1.0 / (1.0 + (safe.pow(exponent) - 1.0).clamp(min=0.0).pow(sharp))
+
+
+def df_flops_regularizer(representations, document_frequency, alpha, beta):
+    # FLOPS enforces sparsity *within* a vector but not *across terms*: nothing
+    # stops the model spending weight on a token present in a quarter of the
+    # corpus, which is what dominates the candidate set in an inverted index.
+    # This weights each dimension's penalty by a plain SIGMOID of its document
+    # frequency, so a high-df dim is only kept when it earns its posting list.
+    #
+    # NOTE this is NOT the DF-FLOPS paper's activation — arXiv:2505.15070 uses a
+    # generalized logistic, which is a far harder high-pass (w=3e-4 at df=2%
+    # where this gives 0.08). Use df_activation_paper for that. Conflating the
+    # two is what produced a mis-specified regularizer once already.
+    #
+    # alpha -> 0 degenerates to 0.5 * flops_regularizer (sigmoid(0) = 0.5).
+    weights = torch.sigmoid(alpha * (document_frequency - beta))
+    return (weights * representations.abs().mean(dim=0) ** 2).sum()
 
 
 def quadratic_warmup(step, warmup_steps, max_value):

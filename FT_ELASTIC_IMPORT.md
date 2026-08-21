@@ -767,11 +767,11 @@ Findings:
 - **TP18-lexical is the lower bound** at 3-4 ms p50 across all regimes. Identifier-only matches are degenerate on natural-language queries (most return zero hits or a tiny set) so the comparison is misleading on its own — its purpose is the hybrid leg, where it's measuring the cost of the matcher, not its recall.
 - **TP18-vector p50 sits 10-50× above STANDARD on every filtered regime.** At numC=1000 the cheapest filtered cell is `acl-top+mfr-mid` at 90 ms p50; the broadest (`acl-top`) is 172 ms. numC=5000 adds 1.2-2.7× more latency, sometimes hitting recall ceilings — `acl-top+price-50-200` is flat between numC=1000 (179 ms) and 5000 (179 ms) because ES short-circuits to exact search once the passing-filter set is small relative to numC. The latency premium of full kNN over BM25 is structural: HNSW must touch the graph on every shard whereas BM25 with a selective pre-filter can prune to a near-empty posting list.
 - **Hybrid eats both leg costs serially.** The legs run in parallel so the visible cost is `max(t_lex, t_knn) + t_phase2`. Lex is always fast (a few ms), so hybrid effectively tracks `t_vec_leg + ~20 ms`. At numC=5000 leg depth and broad ACL, hybrid is 533 ms p50 — the doc-spec'd shipping configuration. The numC=1000 variant cuts this roughly in half on the wider regimes but has no recall data to anchor it.
-- **Unfiltered hybrid@5000 has a real 1.4 s p99** even on a quiet box, driven by both legs needing to materialise 5000-deep result sets across 32 shards (~160k ids per leg coordinator-merged). This isn't queueing — c=1 reproduces it. It's a structural cost of "5000-deep fusion under no filter," which the classifier (§2.2.3) avoids by routing multi-word queries to vector-only.
+- **Unfiltered hybrid@5000 has a real 1.4 s p99** even on a quiet box, driven by both legs needing to materialise 5000-deep result sets across 32 shards (~160k ids per leg coordinator-merged). This isn't queueing — c=1 reproduces it. It's a structural cost of "5000-deep fusion under no filter," which the then-live classifier (§2.2.3, since retired by MXG-150) avoided by routing multi-word queries to vector-only; the union caps this cost through per-arm windows instead.
 
 **Concurrency / saturation note.** A first pass at concurrency 8 produced a 14-second p99 on TP18-vector@1000 unfiltered. A targeted probe revealed this is queue contention on a single-node test box, not HNSW pathology: at c=1, p99 = 48 ms; at c=2, 51 ms; at c=4, 62 ms; at c=8, 14053 ms. With c=8 × 32-shard fanout = 256 in-flight shard-level kNN ops, the search thread pool saturates (default `int(cores * 3 / 2) + 1`, ~25-30 threads here) and slow shards queue behind faster ones. Hybrid amplifies this because each query fires two legs (effectively 16 × 32 = 512 in-flight at c=8). The c=8 results (`bench_profiles_latency.json`) are useful as a "saturation under hostile load" view but **the c=4 numbers above are the right comparison** for per-profile latency, and the right number for production sizing depends on the deployment's per-node search-pool budget. A multi-node cluster sized for production traffic would expose much higher safe concurrency.
 
-The headline: **STANDARD wins decisively on latency under every filter regime** — 1-2 orders of magnitude faster than any TP18 path. TP18's value proposition therefore must be quality (semantic recall on natural-language queries — which fp32 vector delivers per sweep 4) not latency. The hybrid path's role is precisely the regime where lexical BM25 has nothing to grab on (multi-token NL queries) and routing to vector-only is correct (§2.2.3 classifier). Hybrid (RRF) is reserved for the ambiguous single-token middle.
+The headline: **STANDARD wins decisively on latency under every filter regime** — 1-2 orders of magnitude faster than any TP18 path. TP18's value proposition therefore must be quality (semantic recall on natural-language queries — which fp32 vector delivers per sweep 4) not latency. (Historical note: this paragraph describes the router-era shape; MXG-150 later replaced routing with the always-on arm union, and MXG-109/MXG-145 replaced the dense leg with SPLADE, whose cost profile under filters is inverted.)
 
 ### 2.1.5 Scaling outlook: 25× growth (150M articles / 500M offers)
 
@@ -869,17 +869,30 @@ The framing for the planning conversation: **HNSW at 150M articles is fine. The 
 
 The framing for the cutover runbook: **a reindex is not "done" when the new index finishes building — it is done when the new index is warm. The alias flip must be gated on warmth, and at scale (§2.1.5: ~200 GB hot HNSW set) that warm-up is minutes of deliberate query load, not an afterthought.**
 
-## 2.2 TEST_PROFILE_18 (fine-tuned knn) search profile
+## 2.2 TEST_PROFILE_18 search profile — the arm union
 
-A variant of `STANDARD` designed for the fine-tuned embedding pipeline. Three differences vs. STANDARD:
+The hybrid search profile. Since MXG-150 it is a **union of retrieval arms**: every applicable arm
+fires in parallel in one `_msearch`, the rankings are RRF-fused into a candidate pool (§2.2.5), and
+downstream rankers arbitrate (MXG-146; until they land the fused order is the live SERP order). The
+arms:
 
-1. **Drop** the synthetic-keywords sub-query (`syntheticKeywordsQuery()` returns `Optional.empty()`).
-2. **Drop** the cross-fields `multi_match` over offer text (STANDARD's clause **(a)** with `boost: 99`).
-3. **Add** a kNN match on `embeddings.vector`, **RRF-fused** with the surviving lexical matchers.
+| arm | source | depth |
+|---|---|---|
+| `lex` | the MXG-55 STANDARD offer query (`StandardStringQueryProvider` via `createStandard()`, lex_arm contract v4) + customer-artno sub-query (§1.2.2) + MXG-28's self-gating `idBrand` clause | `rankWindowSize` (5000) |
+| `id_merged` / `id_scoped` | MXG-28's trust-tier id arms (`IdArmQueryBuilder`, id_arm contract) — intrinsically gated (no id-shaped token / no known versions ⇒ absent) | 400 / 100 |
+| `sem` | SPLADE `sparse_vector` on `spladeVector`, `prune: false` (MXG-145, sem_arm contract); when `semanticLeg=DENSE` (MXG-141's A/B) the legacy `knn` block on `embeddings.vector` fires instead as a parallel `_search` side-channel — `knn`/`post_filter` cannot ride the msearch transport | `rankWindowSize` (5000) |
 
-The customer article number sub-query (§1.2.2) is unchanged.
+Historical: the profile began as a three-way *router* (§2.2.3's original text) with its own pruned
+lexical variant (§2.2.1). Both are retired; the sections below record what replaced them and why.
 
-### 2.2.1 Lexical side — pruned offer query
+### 2.2.1 Lexical side — pruned offer query *(retired by MXG-150)*
+
+> **Retired.** The pruned identifier bool below (`Test18LexicalQueryBuilder`) was deleted with the
+> router: its identifier clauses are superseded by the id arm's trust tiers (MXG-28) and its
+> customer-artno sub-query by the CAN tier plus the standard provider's own sibling clause. The
+> union's lexical arm is the full STANDARD offer query — including the MXG-55 lex-arm clauses —
+> obtained from `StringQueryProviderFactory.createStandard()`, so it conforms to the lex_arm
+> contract by construction. Text kept for history:
 
 The offer query becomes STANDARD's clauses **(b)** through **(g)** only — all identifier-like matches on `offers.articleNumber`, `offers.manufacturerArticleNumber`, and `offers.ean.raw`:
 
@@ -920,87 +933,79 @@ A new kNN retriever, built from scratch on top of the new `embeddings` nested gr
 - **All filter clauses pushed into `knn.filter`** — both the structural pre-filters (offers context, prices context, ACL, catalog-view core articles, blocked eClass) **and** the user-selected facet filters (vendor, article ID, manufacturer, price range, delivery time, features, eClass, categories, core sortiment). `post_filter` is **not used** by TEST_PROFILE_18. HNSW navigates only docs that pass the combined filter, so the post-filter cliff (§1.3.1) cannot occur and pagination is stable. Rationale and trade-offs in §2.2.6.
 - **Construction rule (same-offer semantics):** all per-offer constraints must live inside **one** `nested(path: "offers", ...)` clause, with each constraint as a `filter` inside its inner `bool`. Splitting them across multiple sibling nested clauses weakens the semantics from "exists an offer satisfying *all* filters" to "exists an offer satisfying A, AND exists *some* offer satisfying B" — different offers can satisfy each, and the same-offer guarantee is lost. The same applies to per-price constraints on `nested(path: "prices")`.
 
-### 2.2.3 Query routing — choose lexical-only / vector-only / hybrid
+### 2.2.3 Arm union — all arms fire, RRF-fused *(rewritten by MXG-150; the router this section originally specified is retired)*
 
-Direct port of `search-api/hybrid.py`'s `HYBRID_CLASSIFIED` mode. **Don't always fuse.** For most query shapes, one leg is strictly better than the fused result; routing to it directly saves work and improves precision. RRF is reserved for genuinely ambiguous single-token queries.
+**Don't route — union.** The original section specified a three-way router (a direct port of
+`search-api/hybrid.py`'s `HYBRID_CLASSIFIED`): whitespace ⇒ vector-only, strict identifier ⇒
+lexical-only with no fallback, else hybrid RRF. `retrieval_case_study_v2.md` measured why that
+shape is wrong: **union ≈ oracle** — STANDARD∪SPLADE R@100 .956 against a per-term *oracle* router
+at .962, so a perfect router buys 0.6pt and a regex router is not perfect. Arm Jaccard is .15–.25:
+the arms genuinely find different documents, which is exactly the condition under which unioning
+beats choosing. The router also stranded most natural-language traffic on dense alone (only the
+single-token non-identifier slice ever reached the SPLADE leg MXG-145 shipped).
 
 ```mermaid
 flowchart TD
-    Q["Query q"] --> WS{"Contains<br/>whitespace?"}
-    WS -- yes --> VEC["<b>Vector-only</b><br/>top-level knn block<br/>(§2.2.2)"]
-    WS -- no --> SI{"is_strict_identifier(q)?<br/>len 4–40 · 4 regex shapes<br/>· not in GENERIC_TOKENS"}
-    SI -- yes --> LEX["<b>Lexical-only</b><br/>pruned offer bool<br/>(§2.2.1)"]
-    SI -- no --> HYB["<b>Hybrid</b><br/>app-side RRF<br/>(§2.2.5)"]
-    LEX --> R{"hits empty?"}
-    R -- yes --> EMPTY["Return empty<br/>(no fallback)"]
-    R -- no --> HITS(["Return hits"])
-    VEC --> HITS
-    HYB --> HITS
-
-    classDef path fill:#eef,stroke:#557
-    classDef terminal fill:#efe,stroke:#575
-    class VEC,LEX,HYB path
-    class HITS,EMPTY terminal
+    Q["Query q"] --> ENC["encode (splade | tei)"]
+    ENC --> ASM["Test18ArmAssembler<br/>lex · id_merged · id_scoped · sem"]
+    ASM --> MS["ONE _msearch<br/>(+ parallel knn _search when DENSE)"]
+    MS --> FUSE["app-side RRF over N legs<br/>(§2.2.5)"]
+    FUSE --> P2["phase 2: page ∥ aggs over the fused pool<br/>(§2.2.6)"]
+    P2 --> HITS(["hits"])
 ```
 
-The three paths:
+**Per-arm gating is not exclusive routing.** An arm is *absent* when it cannot help — the id arms
+self-gate on id-shaped tokens / known versions, `idBrand` on a brand span + short number, the sem
+arm on encoder health — but no arm is ever chosen *instead of* another. The segmenter gate for the
+id arms (`identifier ∪ id_plus_text`) and any segment-gating of the sem arm arrive with MXG-148's
+serve-time segmenter and slot into the assembler; the arms currently fire ungated (decision on
+record, 2026-08-17). `Test18QueryClassifier` and its `is_strict_identifier` port are deleted — the
+strict-identifier regexes live on only in the offline reference (`search-api/hybrid.py`).
 
-| Query shape | Path | Why |
-|---|---|---|
-| Multi-word (whitespace present) | **vector-only** (top-level `knn` block, no fusion) | Identifier multi-fields on `offers.articleNumber.*` / `offers.manufacturerArticleNumber.*` / `offers.ean.raw` rarely fire on multi-token natural-language phrases. Including them via RRF contributes rank noise; the embedding already covers free-text. |
-| Single token, classifies as **strict identifier** | **lexical-only** (pruned offer bool, no fusion); empty result ⇒ return empty (no fallback) | Dense embeddings under-weight digit strings and over-cluster on lexical neighborhoods. Exact identifier matching is the right primitive for queries that look like MPNs, EANs, or opaque SKUs. |
-| Single token, not a strict identifier | **hybrid** (app-side RRF over a lexical-leg call + a kNN-leg call — §2.2.5) | Ambiguous: could be a brand, a generic product term, a category. Fuse both signals; let RRF arbitrate. |
+**Empty-strict no-fallback is dropped, with reason.** The router returned an empty SERP when a
+strict-identifier query had zero lexical hits ("a well-formed identifier with no matches means the
+SKU is not in the catalog"). That policy is consciously retired: the id arm's trust-tier ladder
+supersedes exact-match-or-nothing — MXG-22's engaged+zero replay measured its zero-result rescues
+strictly additive (36/40 zero rescues, +4/−0 attributable engaged) — and the principled "can this
+query legitimately return nothing" gate is MXG-147's absolute fused-score τ. A zero SERP now
+*emerges* when every fired arm returns nothing; it is never produced by a policy branch.
 
-**Strict-identifier classifier** — port `is_strict_identifier(q)` verbatim from `search-api/hybrid.py`:
+**One `_msearch`, one exception.** Each arm is one msearch item: `bool{must:[armQuery],
+filter: <full consolidated filter list>}`, `size` = the arm's depth, `_source` excluded (deep
+shape) or included (HITS_ONLY fast-path shape, clamped to `min(fusionWindowSize, armSize)`). The
+msearch item body does **not** carry `knn`, `post_filter`, `aggregations`, `track_total_hits` or
+`search_type` — the transport silently drops them — which is fine for ordinary-query arms and is
+exactly why the DENSE side-channel stays a separate parallel `_search` with the two-phase
+vendor-visibility split (§2.2.6) intact.
 
-- Length floor 4, ceiling 40 (chars). Below 4, the patterns admit too many false positives (`m3`, `cat6`). Above 40, no real identifiers.
-- Four anchored, case-insensitive regex shapes — ORed under `^...$`:
-  - `\d{8}` — EAN-8
-  - `\d{12,14}` — UPC-A / EAN-13 / GTIN-14
-  - `(?=.{7,}$)(?=(?:[^\d]*\d){3,})[a-z0-9]+(?:-[a-z0-9]+)+` — hyphenated, ≥7 chars total AND ≥3 digits anywhere
-  - `(?=.{7,}$)[a-z]+\d{4,}[a-z0-9]*` — alpha-then-digit, ≥7 chars total AND ≥4 consecutive digits after the letter prefix
-- Static `GENERIC_TOKENS` denylist for industry-generic tokens that pass shape checks but route incorrectly (`cr2032`, `cr2025`, `rj45`, `usb-c`, `cat6`, `ffp2`, `m8`, `ip67`, `wd-40`, …). Match is case- and whitespace-normalized. Extend as new offenders surface in query logs — see `GENERIC_TOKENS` in `hybrid.py` for the current list.
+**Search type — no DFS, unchanged rationale.** The msearch transport cannot express
+`search_type` per item, which lands on the same operating point the profile already chose: plain
+`query_then_fetch`. RRF fuses ranks, not raw scores, so shard-local IDF skew is absorbed by the
+fusion; phase-2 requests still set `query_then_fetch` explicitly.
 
-**No fallback on empty strict result.** When the classifier says "strict identifier" and the lexical-only search returns zero hits, return an empty result set. Don't reissue as hybrid. Rationale: a well-formed identifier with no matches means "this SKU/EAN/MPN is not in the catalog" — the correct answer is nothing. Falling back to hybrid would surface semantic neighbors of an opaque identifier (drills that vaguely resemble `8x12345678`), which is confusing rather than helpful. A user typing an identifier expects a binary outcome.
-
-**Asymmetric error handling.** False negatives — real identifiers the classifier missed — still fall through to the hybrid path, where the lexical retriever's identifier matches pick them up via RRF. False positives — strings that pass the classifier but aren't real identifiers — produce empty results that the user has to retry. To keep false positives rare, the classifier leans conservative: length floor 4 / ceiling 40, the `GENERIC_TOKENS` denylist for common shape-passing-but-generic tokens, and tight regex shapes (e.g. ≥3 digits anywhere for hyphenated forms). If query logs show appreciable empty-strict cases that should have surfaced results, tighten the classifier rather than re-introducing the fallback.
-
-**Three request shapes — the gating is a branch in the query builder, not a runtime parameter:**
-
-- **Lexical-only:** plain `query: { bool: ... }` containing §2.2.1's pruned offer bool plus the customer-artno sub-query, with `bool.filter` carrying the full filter set. No retriever block, no kNN. `sort` / `from` / `size` / `aggs` attach directly to the request — pageable is honored verbatim, no two-phase split needed.
-- **Vector-only:** top-level legacy `knn` block per §2.2.2, with `knn.filter` carrying the full filter set. No retriever wrapper (so we stay on basic license). Non-relevance sort triggers the two-phase split — see §2.2.4.
-- **Hybrid:** application-side RRF over a parallel pair of leg queries — see §2.2.5. The legs are retriever-equivalent for sort-handling purposes — non-relevance sort triggers the two-phase split per §2.2.4.
-
-**Search type — drop DFS for all three paths.** Legacy uses `dfs_query_then_fetch` (§1.3.6) to stabilize BM25 IDF across shards. TEST_PROFILE_18 uses plain `query_then_fetch` everywhere:
-
-- **Vector-only:** kNN is cosine distance — no term frequencies involved. DFS gathers IDF stats that nothing on this path consumes. Pure cost, zero benefit.
-- **Lexical-only:** strict-identifier matches produce tight result sets (often a handful of hits, sometimes one). Score variation within "matches the SKU" rarely flips ordering, so the IDF-stability win is marginal.
-- **Hybrid:** BM25 IDF skew can change the lexical leg's local ranks, but RRF fuses *ranks* not raw scores. Small rank flips at the leg level get absorbed by the fusion; the impact on the final fused order is small.
-
-Re-evaluate if relevance evaluations on the hybrid path show measurable rank drift from shard-local IDF; until then, the savings (one cross-shard round-trip per query) are pocketed.
-
-**Where this lives in code.** `Test18SearchQueryExecutor` dispatches on `Test18QueryClassifier.classify(queryString)`:
+**Where this lives in code.** `Test18SearchQueryExecutor` (validate, consolidate filters, sort
+splitter) → `Test18UnionExecutor` (encode, fire, fuse, phase 2) ← `Test18ArmAssembler` (the single
+place arms are born, and the seam for MXG-148's gates):
 
 ```
-mode = classifier.classify(q)
 filters = filterConsolidator.consolidate(params)
+if pageable.sort is non-relevance:
+    return sortPhaseSplitter.executeWithSort(params, filters, unionExecutor)   # §2.2.4
+return unionExecutor.execute(params, filters)
 
-switch (mode):
-    VECTOR_ONLY  -> retrieverPath(vectorOnlyExecutor, params, filters)    # §2.2.2
-    LEXICAL_ONLY -> lexicalExecutor.execute(params, filters)              # §2.2.1
-    HYBRID_RRF   -> retrieverPath(hybridExecutor, params, filters)        # §2.2.5
-
-retrieverPath(executor, params, filters):
-    if pageable.sort is non-relevance:
-        return sortPhaseSplitter.executeWithSort(params, filters, executor)   # §2.2.4
-    return executor.execute(params, filters)
+unionExecutor.execute(params, filters):
+    semantic = encode(q)                              # splade (default) | tei (DENSE)
+    arms  = assembler.assemble(params, filters, spans=[], sparse, rankWindowSize)
+    legs  = ONE _msearch(arms)  (+ parallel knn _search when DENSE)
+    fused = rrfFuse(legs, rankConstant)               # §2.2.5, N legs
+    page ∥ aggs over fused ids                        # §2.2.6
 ```
 
 ### 2.2.4 Sort on retriever-based paths
 
-ES 9.x doesn't let a top-level `sort` clause coexist with the legacy `knn` block, and the app-side RRF path produces an order that ES wouldn't know about anyway. For the lexical-only path (§2.2.3) the two-phase split is irrelevant — it's a plain `bool` query that supports `sort` natively — but vector-only and hybrid need it:
+ES 9.x doesn't let a top-level `sort` clause coexist with the legacy `knn` block, and the app-side RRF order is one ES wouldn't know about anyway — so the union path (every query since MXG-150) needs the two-phase split for non-relevance sorts:
 
-1. **Phase 1:** the path-specific executor with no `sort`, called at depth 1000 (deeper than `pageable.size`). For vector-only this is the `knn` block; for hybrid it's the full §2.2.5 three-call pipeline (legs + page fetch). Returns the top-1000 article IDs in retriever-equivalent order (cosine for vector-only, fused RRF rank for hybrid). Phase 1's source / aggregations are discarded.
+1. **Phase 1:** the union executor with no `sort`, called at depth 1000 (deeper than `pageable.size`) — the full §2.2.3 pipeline (one `_msearch` + fuse + page fetch). Returns the top-1000 article IDs in fused RRF order. Phase 1's source / aggregations are discarded.
 2. **Phase 2:** plain `bool` query with `filter: { ids: { values: [<phase 1 IDs>] } }` plus the same filter set as phase 1 (cheap to re-apply, protects against between-phase index changes). User's `sort` slot is populated here, and aggregations run on the phase-2 hits.
 
 ```mermaid
@@ -1027,15 +1032,15 @@ sequenceDiagram
     end
 ```
 
-Two `_search` round-trips per sorted vector-only query (phase 1 + phase 2); **five** per sorted hybrid query (phase 1 = legs ∥ + hybrid's own phase-2 pair ∥, then sort-splitter phase 2). All only when the user selects a non-relevance sort. Relevance-sorted queries — the default and majority case — skip the sort splitter entirely.
+Round trips per sorted query: one `_msearch` + the union's own phase-2 pair (∥) + the sort-splitter's phase 2 = **four** (plus the `knn` side-channel on the DENSE profile). All only when the user selects a non-relevance sort. Relevance-sorted queries — the default and majority case — skip the sort splitter entirely.
 
 The phase-2 lexical request inherits TEST_PROFILE_18's no-DFS choice (§2.2.3) — `search_type=query_then_fetch`, no extra cross-shard round-trip for IDF gathering.
 
-**Open optimization:** on a sorted hybrid query, the hybrid executor's own phase-2 pair is wasted (its hits get discarded by the sort splitter, and the aggs get rebuilt by phase-2). A `skipPhase2` mode on the hybrid executor would drop the cost back to three round trips. Deferred — the sort+hybrid combination is the rarest of rare cases.
+**Open optimization:** on a sorted query, the union executor's own phase-2 pair is wasted (its hits get discarded by the sort splitter, and the aggs get rebuilt by phase-2). A `skipPhase2` mode would drop the cost to two round trips. Deferred — the sort+union combination is the rarest of rare cases.
 
-### 2.2.5 Fusion — application-side RRF (hybrid path only)
+### 2.2.5 Fusion — application-side RRF
 
-Used by the hybrid path of §2.2.3 — single-token queries that aren't strict identifiers. The lexical bool and the kNN retriever are fused via Reciprocal Rank Fusion **implemented in application code, not in Elasticsearch**.
+Used by every query since MXG-150: the union's N arm rankings (§2.2.3) are fused via Reciprocal Rank Fusion **implemented in application code, not in Elasticsearch**. RRF weighting is not a quality knob once a coarse ranker exists (the fused output is a pool, not an order) — but it decides pool *membership* wherever a window truncates, and it is the live SERP order until MXG-146 ships.
 
 **Why app-side instead of `retriever: { rrf: ... }`.** The native ES `rrf` retriever is **ENTERPRISE-tier**, gated both in the [subscriptions matrix](https://www.elastic.co/subscriptions) (row: "Reciprocal Rank Fusion (RRF) for hybrid search", under Search & Analysis → Full-text search) and at runtime — `elastic/elasticsearch` (branch 9.3, file `x-pack/plugin/rank-rrf/.../RRFRankPlugin.java`) checks `License.OperationMode.ENTERPRISE` before serving the retriever, and a basic-license cluster gets `current license is non-compliant for [Reciprocal Rank Fusion (RRF)]`. We don't want to gate TEST_PROFILE_18 on an ENTERPRISE subscription, so RRF lives in the application.
 
@@ -1157,15 +1162,14 @@ The lexical-era `post_filter` trick excludes `brand=Acme` from the aggregation's
 - The `EnumMap<SearchFilterKind, Query> appliedFilters` plumbing and the per-facet `filter`-aggregation wrappers (the filter-out-self pattern) are not needed. Aggregations run directly over the request's hits.
 - No code path calls `queryBuilder.withFilter(...)` for TEST_PROFILE_18 — that slot stays empty.
 
-**Aggregation scope by path** — all match §2.2.6 "remaining-count" intent:
+**Aggregation scope** — matches §2.2.6 "remaining-count" intent (since MXG-150 there is a single
+path):
 
 | Path | Aggregations computed over |
 |---|---|
-| Lexical-only | Full matched set (bounded by ES's internal limits). The bool query carries no `ids` filter, so aggs see every doc passing the filter list. |
-| Vector-only | Top-`k = num_candidates = 5000` hits from the kNN. The kNN block sets `k` explicitly so ES's "aggregations are calculated on the top `k` nearest documents" rule scopes aggs to the candidate window. Without explicit `k`, ES would default `k = pageable.size` (typically ~10) and aggs would collapse to the page. |
-| Hybrid (app-side RRF) | Full fused candidate pool. The phase-2b call sets `filter: { ids: <allFusedIds> }` with `size = 0`, so aggregations scope to every doc in the fused pool — independent of how many appear on the user's page (see §2.2.5). |
+| Union (all queries) | Full fused candidate pool. The phase-2b call sets `filter: { ids: <allFusedIds> }` with `size = 0`, so aggregations scope to every doc in the fused pool — independent of how many appear on the user's page (see §2.2.5). The router-era per-path scopes (lexical full-match-set; vector top-`k`) are history. |
 
-**Why the hybrid split.** A single ES request couples aggregations to the same filter as hits — you can't say "aggs over the fused pool, hits over the page" without two requests. The hybrid path issues both, in parallel (§2.2.5).
+**Why the phase-2 split.** A single ES request couples aggregations to the same filter as hits — you can't say "aggs over the fused pool, hits over the page" without two requests. The union path issues both, in parallel (§2.2.5).
 
 **Escape hatch if what-if counts ever become a requirement:** issue a separate sidecar `buildAggregationsOnly()` request per facet (or one bundled with a top-level `filters` aggregation), each with that facet excluded from the filter list. The main hits query stays clean; the aggregation path pays the extra round-trip only when the UI needs the hint.
 
@@ -1291,8 +1295,8 @@ flowchart TB
 | Customer article number sub-query | yes | **yes** |
 | Synthetic keywords sub-query | yes | **no** |
 | kNN on `embeddings.vector` | no | **yes** (top-level legacy `knn` block) |
-| Query routing | single mode | **classifier-driven 3-way split** (lexical-only / vector-only / hybrid) |
-| Fusion strategy (hybrid path) | n/a | **app-side RRF over parallel leg queries** (ES `rrf` retriever is ENTERPRISE-gated) |
+| Query routing | single mode | **arm union, one `_msearch`** — router retired by MXG-150 (per-arm gating, never exclusive routing) |
+| Fusion strategy | n/a | **app-side RRF over N arm rankings** (ES `rrf` retriever is ENTERPRISE-gated) |
 | Structural filters | `bool.filter` | **`bool.filter` + `knn.filter`** |
 | User-selected facet filters | `post_filter` | **`bool.filter` + `knn.filter`** (no `post_filter`) |
 | Facet count semantics | what-if (filter-out-self) | **remaining (post-narrow)** — uniform across all three paths |

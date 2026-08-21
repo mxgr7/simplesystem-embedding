@@ -1,0 +1,73 @@
+## MXG-115. Alertmanager for the semantic GPU box (semantic-search.prod.nextgen).
+##
+## One box, one on-call, one channel: there is no routing tree worth building here, so the
+## whole config is "send it to Slack, and do not send the same thing over and over".
+##
+## The webhook URL is a credential and lives in a file, not this config. Alertmanager does not
+## expand environment variables in its own configuration, so `slack_api_url_file` is the only
+## way to keep the URL out of a committed file. compose.yaml mounts the host's
+## slack_webhook_url.local at the path below; if it is missing, this container refuses to start,
+## which is on purpose -- an Alertmanager that boots without a receiver is exactly the silent
+## failure this ticket exists to remove.
+global:
+  resolve_timeout: 5m
+  slack_api_url_file: /etc/alertmanager/slack_webhook_url
+
+route:
+  receiver: slack
+  # Group by alertname AND job: `TargetDown` firing for three different jobs is three different
+  # problems and should not collapse into one message that names only the first.
+  group_by: [alertname, job]
+  group_wait: 30s
+  group_interval: 5m
+  # 12h for the default case. Something that has been broken for half a day and not acted on
+  # deserves one more nudge, not one every hour.
+  repeat_interval: 12h
+  routes:
+    # The Watchdog always fires, on purpose -- it is how you check that the alert path works.
+    # It must never reach Slack, so it terminates here on a receiver that does nothing.
+    - matchers: ['alertname="Watchdog"']
+      receiver: "null"
+    # Criticals repeat hourly. Everything that can stall Sunday's indexing is critical.
+    - matchers: ['severity="critical"']
+      receiver: slack
+      repeat_interval: 1h
+
+inhibit_rules:
+  # A critical and a warning for the same thing on the same job is one problem. Send the worse.
+  - source_matchers: ['severity="critical"']
+    target_matchers: ['severity="warning"']
+    equal: [alertname, job]
+  # If a scrape target is down, every absent()-based rule for its metrics fires too. Those
+  # rules carry an explicit `job` label for precisely this join -- page once, on the cause.
+  - source_matchers: ['alertname="TargetDown"']
+    target_matchers: ['category="blind"']
+    equal: [job]
+
+receivers:
+  - name: "null"
+
+  - name: slack
+    slack_configs:
+      - channel: "#semantic-search-alerts"
+        send_resolved: true
+        title: '{{ if eq .Status "firing" }}:red_circle:{{ else }}:large_green_circle:{{ end }} [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}'
+        text: |-
+          {{ range .Alerts -}}
+          *{{ .Labels.severity | toUpper }}* — {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ if .Annotations.action }}*Do:* {{ .Annotations.action }}{{ end }}
+          {{ end }}
+        # Built by hand from .ExternalURL rather than with `{{ template "__alert_silenceURL" }}`
+        # -- that template does not exist in Alertmanager v0.27, and referencing an undefined
+        # template is an UNRECOVERABLE notify error: the whole message is dropped, retries are
+        # cancelled, and the only trace is a line in Alertmanager's own log. Caught by firing a
+        # deliberate test alert; it would otherwise have surfaced as silence during an incident.
+        # .ExternalURL comes from --web.external-url in compose.yaml.
+        actions:
+          - type: button
+            text: Silence
+            url: '{{ .ExternalURL }}/#/silences/new?filter={{ printf "{alertname=%q}" .CommonLabels.alertname | urlquery }}'
+          - type: button
+            text: Source
+            url: '{{ (index .Alerts 0).GeneratorURL }}'
