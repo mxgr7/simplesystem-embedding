@@ -73,9 +73,10 @@ def build_body(windows, k, rng):
         unique.append(entry)
         if len(unique) == k:
             break
+    # No `segment`: fold-de-v1-no-prefix (MXG-177) answers its presence with a
+    # 400. The bench windows still carry the field as history; it stays local.
     return {
         "query": window["query_term"],
-        "segment": window["segment"],
         "candidates": unique,
     }, len(unique)
 
