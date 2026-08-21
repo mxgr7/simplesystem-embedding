@@ -15,22 +15,23 @@ than a test of httpx.
 
 import asyncio
 import contextlib
-import importlib
 import json
 import logging
-import sys
 from pathlib import Path
 
 import httpx
 import pytest
 
 
+from conftest import load_flat_service
+
 REPO = Path(__file__).resolve().parents[1]
 SERVICE = REPO / "splade-service"
-sys.path.insert(0, str(SERVICE))
-
-backend_pool = importlib.import_module("backend_pool")
-constants = importlib.import_module("constants")
+splade = load_flat_service(
+    "splade_service", SERVICE, "backend_pool", "constants"
+)
+backend_pool = splade.backend_pool
+constants = splade.constants
 
 
 ENCODER_FIELDS = {

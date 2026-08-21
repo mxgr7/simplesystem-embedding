@@ -13,24 +13,21 @@ Uses `httpx.MockTransport` so we never hit the network.
 from __future__ import annotations
 
 import asyncio
-import sys
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
+from conftest import load_flat_service
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "search-api"))
 
-from conftest import load_service_module  # noqa: E402
-
-# `embed_client` exists in both search-api/ and embedding-service/, so
-# whichever test module is imported first would otherwise decide which one
-# these names refer to (see conftest). Load this one by path.
-_embed_client = load_service_module(
-    "embed_client", REPO_ROOT / "search-api" / "embed_client.py",
-)
+# `embed_client` exists in both search-api/ and embedding-service/. Capture the
+# search implementation without leaving its bare module name behind.
+_embed_client = load_flat_service(
+    "search_api", REPO_ROOT / "search-api", "embed_client"
+).embed_client
 EmbedClient = _embed_client.EmbedClient
 EmbedRetryPolicy = _embed_client.EmbedRetryPolicy
 

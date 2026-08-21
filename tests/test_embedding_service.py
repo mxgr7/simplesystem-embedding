@@ -21,38 +21,27 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import load_flat_service
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVICE_DIR = REPO_ROOT / "embedding-service"
-sys.path.insert(0, str(SERVICE_DIR))
-sys.path.insert(0, str(REPO_ROOT))
-
-import hashing  # noqa: E402
-import rendering  # noqa: E402
-
-_service_main = None
+dense = load_flat_service(
+    "embedding_service", SERVICE_DIR, "cache", "hashing", "rendering", "main"
+)
+cache_module = dense.cache
+hashing = dense.hashing
+rendering = dense.rendering
 
 
 def _load_service_main():
-    """Load embedding-service's `main.py` under a name nobody else claims.
+    return dense.main
 
-    Both `main` and `embed_client` exist in `search-api/` too, so a bare
-    `import main` resolves to whichever test module was collected last (see
-    conftest). Loading by path makes these tests independent of that order.
-    Cached: re-executing `main.py` would re-register its Prometheus metrics
-    and fail on duplicate timeseries."""
-    global _service_main
-    if _service_main is None:
-        from conftest import load_service_module
-        load_service_module("embed_client", SERVICE_DIR / "embed_client.py")
-        sys.path.insert(0, str(SERVICE_DIR))
-        try:
-            _service_main = load_service_module(
-                "embedding_service_main", SERVICE_DIR / "main.py",
-            )
-        finally:
-            sys.path.remove(str(SERVICE_DIR))
-    return _service_main
-from indexer.embedding_text import article_to_text as indexer_article_to_text  # noqa: E402
+
+sys.path.insert(0, str(REPO_ROOT))
+try:
+    from indexer.embedding_text import article_to_text as indexer_article_to_text
+finally:
+    sys.path.remove(str(REPO_ROOT))
 
 
 # ---------------------------------------------------------------------------
@@ -193,14 +182,11 @@ def app_with_stubs(monkeypatch):
     in-memory stubs so tests don't need a running KVRocks or TEI."""
     # Force imports of the service modules under SERVICE_DIR's sys.path.
     main = _load_service_main()
-    from cache import EmbeddingCache
-
     # Stub cache: in-memory dict, no network.
     class StubCache:
         def __init__(self) -> None:
             self.store: dict[str, bytes] = {}
-            from cache import CacheStats
-            self.stats = CacheStats()
+            self.stats = cache_module.CacheStats()
 
         async def mget(self, hashes):
             return [self.store.get(h) for h in hashes]
@@ -493,9 +479,7 @@ def test_readyz_failure_not_memoized(readyz_app):
 # --- EmbeddingCache.scan_any (unit, hand-rolled fake redis client) ---------
 
 def _cache_with_fake_client(fake) -> "object":
-    from cache import EmbeddingCache
-
-    c = EmbeddingCache.__new__(EmbeddingCache)
+    c = cache_module.EmbeddingCache.__new__(cache_module.EmbeddingCache)
     c._client = fake
     return c
 

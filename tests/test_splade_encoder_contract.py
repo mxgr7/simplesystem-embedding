@@ -9,17 +9,19 @@ vectors that disagree with the ones already in the index.
 """
 import asyncio
 import importlib
-import sys
 from pathlib import Path
 
 import pytest
 
+from conftest import load_flat_service
+
 REPO = Path(__file__).resolve().parents[1]
 SERVICE = REPO / "splade-service"
-sys.path.insert(0, str(SERVICE))
-
-backend_pool = importlib.import_module("backend_pool")
-constants = importlib.import_module("constants")
+splade = load_flat_service(
+    "splade_service", SERVICE, "backend_pool", "constants", "backend"
+)
+backend_pool = splade.backend_pool
+constants = splade.constants
 
 
 BF16 = {
@@ -105,12 +107,12 @@ def test_cache_prefix_is_namespaced_by_encoding_version_when_declared():
     previous = os.environ.get("SPLADE_ENCODING_VERSION")
     try:
         os.environ["SPLADE_ENCODING_VERSION"] = FP16["document_encoding_version"]
-        reloaded = importlib.reload(constants)
+        reloaded = splade.reload("constants")
         assert reloaded.CACHE_PREFIX == (
             f"splade:{reloaded.MODEL_ID}:{FP16['document_encoding_version']}:")
 
         del os.environ["SPLADE_ENCODING_VERSION"]
-        reloaded = importlib.reload(constants)
+        reloaded = splade.reload("constants")
         # Unset degrades to the historical model-only prefix, which is what the
         # existing keyspace holds -- declaring the version must be opt-in or the
         # first deploy silently orphans every cached vector.
@@ -120,7 +122,7 @@ def test_cache_prefix_is_namespaced_by_encoding_version_when_declared():
             os.environ.pop("SPLADE_ENCODING_VERSION", None)
         else:
             os.environ["SPLADE_ENCODING_VERSION"] = previous
-        importlib.reload(constants)
+        splade.reload("constants")
 
 
 def test_native_bf16_predicate_rejects_turing():
@@ -128,7 +130,7 @@ def test_native_bf16_predicate_rejects_turing():
     `including_emulation=True` and answers True on sm_75, so the check it was
     written for never fired and the backend ran on emulated bf16 at 2.48 TFLOP/s
     against fp16's 25.50 -- measured on the T4 this issue is about."""
-    backend = importlib.import_module("backend")
+    backend = splade.backend
     torch = importlib.import_module("torch")
 
     class FakeCuda:

@@ -1,6 +1,4 @@
 import asyncio
-import importlib
-import sys
 from pathlib import Path
 
 import httpx
@@ -8,12 +6,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+from conftest import load_flat_service
+
 REPO = Path(__file__).resolve().parents[1]
 SERVICE = REPO / "splade-service"
-sys.path.insert(0, str(SERVICE))
-
-backend_pool = importlib.import_module("backend_pool")
-config_module = importlib.import_module("config")
+splade = load_flat_service(
+    "splade_service", SERVICE, "backend_pool", "config", "main"
+)
+backend_pool = splade.backend_pool
+config_module = splade.config
+main = splade.main
 
 
 class StubConfig(config_module.Config):
@@ -103,7 +105,6 @@ class StubPool:
 
 @pytest.fixture
 def query_client(monkeypatch):
-    main = importlib.import_module("main")
     cache = StubCache()
     pool = StubPool()
     monkeypatch.setattr(main, "Config", StubConfig)
@@ -183,7 +184,6 @@ def test_embed_document_path_still_sets_document_true(query_client):
 
 def test_embed_query_obeys_shared_admission_limit(query_client):
     client, _, pool = query_client
-    import main
     main.app.state.inflight = main.app.state.config.max_inflight
     response = auth_post(client, "/embed-query", "query")
     assert response.status_code == 429

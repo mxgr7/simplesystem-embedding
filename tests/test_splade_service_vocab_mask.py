@@ -16,7 +16,6 @@ things that make that safe:
    every combination of the train-time mask options.
 2. `is_cased_token` agrees between the two implementations token for token.
 """
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -26,29 +25,23 @@ from unittest.mock import patch
 import torch
 
 from embedding_train.splade_model import SpladeModule, is_cased_token as train_is_cased
-from tests.test_splade import (  # reuse the stub encoder/tokenizer wiring
-    SPECIAL_TOKEN_IDS,
-    VOCAB_SIZE,
-    _MlmEncoderStub,
-    build_splade_cfg,
-)
+
+from conftest import load_flat_service
 
 REPO = Path(__file__).resolve().parents[1]
-
-
-def _load_backend():
-    """Import splade-service/backend.py without importing the FastAPI app.
-
-    The directory name is not a valid module path and the module builds a live
-    encoder at startup, so it is loaded by file path and only the pure helpers are
-    exercised.
-    """
-    path = REPO / "splade-service" / "backend.py"
-    sys.path.insert(0, str(REPO / "splade-service"))
-    spec = importlib.util.spec_from_file_location("splade_backend", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+sys.path.insert(0, str(REPO))
+try:
+    from tests.test_splade import (  # reuse the stub encoder/tokenizer wiring
+        SPECIAL_TOKEN_IDS,
+        VOCAB_SIZE,
+        _MlmEncoderStub,
+        build_splade_cfg,
+    )
+finally:
+    sys.path.remove(str(REPO))
+splade = load_flat_service(
+    "splade_service", REPO / "splade-service", "backend"
+)
 
 
 VOCAB = {
@@ -61,7 +54,7 @@ VOCAB = {
 
 class VocabMaskParityTest(unittest.TestCase):
     def setUp(self):
-        self.backend = _load_backend()
+        self.backend = splade.backend
         self.tokenizer = SimpleNamespace(
             all_special_ids=list(SPECIAL_TOKEN_IDS),
             get_vocab=lambda: dict(VOCAB),

@@ -1,16 +1,18 @@
 import gc
 import os
-import sys
 from pathlib import Path
 
 import pytest
 import torch
 
 
+from conftest import load_flat_service
+
 REPO = Path(__file__).resolve().parents[1]
 SERVICE = REPO / "splade-service"
-sys.path.insert(0, str(SERVICE))
-sys.path.insert(0, str(REPO / "src"))
+splade = load_flat_service(
+    "splade_service", SERVICE, "backend", "constants", "rendering"
+)
 
 CHECKPOINT = os.environ.get("SPLADE_PARITY_CHECKPOINT")
 pytestmark = pytest.mark.skipif(
@@ -20,9 +22,10 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_standalone_backend_matches_training_model_exactly(tmp_path):
-    from backend import SpladeEncoder
-    from constants import FIELD_ORDER, TOP_K
-    from rendering import render_from_nul
+    SpladeEncoder = splade.backend.SpladeEncoder
+    FIELD_ORDER = splade.constants.FIELD_ORDER
+    TOP_K = splade.constants.TOP_K
+    render_from_nul = splade.rendering.render_from_nul
 
     row = {name: "" for name in FIELD_ORDER}
     row.update({

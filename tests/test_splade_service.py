@@ -1,7 +1,5 @@
 import asyncio
-import importlib
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -9,15 +7,28 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+from conftest import load_flat_service
+
 REPO = Path(__file__).resolve().parents[1]
 SERVICE = REPO / "splade-service"
-sys.path.insert(0, str(SERVICE))
-
-codec = importlib.import_module("codec")
-constants = importlib.import_module("constants")
-hashing = importlib.import_module("hashing")
-config_module = importlib.import_module("config")
-rendering = importlib.import_module("rendering")
+splade = load_flat_service(
+    "splade_service",
+    SERVICE,
+    "backend",
+    "codec",
+    "constants",
+    "hashing",
+    "config",
+    "rendering",
+    "main",
+)
+backend = splade.backend
+codec = splade.codec
+constants = splade.constants
+hashing = splade.hashing
+config_module = splade.config
+rendering = splade.rendering
+main = splade.main
 
 
 def make_input(**overrides):
@@ -103,7 +114,6 @@ def test_sparse_array_codec_filters_fp16_underflow_and_sorts_ids():
 def test_backend_tokenizer_uses_wordpiece_fallback_on_missing_dependency(
     monkeypatch, tmp_path
 ):
-    backend = importlib.import_module("backend")
     vocab = tmp_path / "vocab.txt"
     vocab.write_text("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\ntest\n")
     config = tmp_path / "tokenizer_config.json"
@@ -214,7 +224,6 @@ class StubPool:
 
 @pytest.fixture
 def service_client(monkeypatch):
-    main = importlib.import_module("main")
     cache = StubCache()
     pool = StubPool()
     monkeypatch.setattr(main, "Config", StubConfig)
@@ -299,7 +308,6 @@ def test_backend_timeout_leaves_room_inside_the_request_budget(monkeypatch):
 
 
 def test_config_reads_pool_shape_from_the_environment(monkeypatch):
-    config_module = importlib.import_module("config")
     monkeypatch.setenv("BACKEND_MAX_CLIENT_BATCH", "16")
     monkeypatch.setenv("BACKEND_POOL_CONCURRENCY", "2")
     tuned = config_module.Config()
@@ -373,7 +381,6 @@ def test_backend_health_collector_unregisters_on_shutdown(monkeypatch):
     """Two sequential app lifespans must not collide on the default registry."""
     from prometheus_client import REGISTRY
 
-    main = importlib.import_module("main")
     monkeypatch.setattr(main, "Config", StubConfig)
     monkeypatch.setattr(main, "SparseCache", lambda *args: StubCache())
     monkeypatch.setattr(main, "BackendPool", lambda *args: StubPool())

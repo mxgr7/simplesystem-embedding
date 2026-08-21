@@ -28,19 +28,18 @@ import asyncio
 import contextlib
 import json
 import logging
-import sys
 from pathlib import Path
 
 import httpx
 import pytest
 
+from conftest import load_flat_service
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVICE_DIR = REPO_ROOT / "embedding-service"
-sys.path.insert(0, str(SERVICE_DIR))
-
-from conftest import load_service_module  # noqa: E402
-
-ec = load_service_module("embed_client", SERVICE_DIR / "embed_client.py")
+ec = load_flat_service(
+    "embedding_service", SERVICE_DIR, "embed_client"
+).embed_client
 
 
 # ---------------------------------------------------------------------------

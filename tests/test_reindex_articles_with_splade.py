@@ -276,10 +276,15 @@ def test_approval_report_pins_runtime_cost_batch_and_encoding(tmp_path):
     path = tmp_path / "approval.json"
     path.write_text(json.dumps(report))
     assert reindex.load_approval_report(path, args) == report
-    report["end_to_end_docs_per_second"] = 4_899
+
+    report["end_to_end_docs_per_second"] = reindex.MIN_FULL_RATE - 1
     path.write_text(json.dumps(report))
     with pytest.raises(ValueError, match="throughput"):
         reindex.load_approval_report(path, args)
+
+    report["end_to_end_docs_per_second"] = reindex.MIN_FULL_RATE
+    path.write_text(json.dumps(report))
+    assert reindex.load_approval_report(path, args) == report
 
 
 def test_invalid_numeric_run_arguments_are_rejected():

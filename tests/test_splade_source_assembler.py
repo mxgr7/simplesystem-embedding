@@ -1,18 +1,19 @@
 import hashlib
-import importlib
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
 
+from conftest import load_flat_service
+
 REPO = Path(__file__).resolve().parents[1]
 SERVICE = REPO / "splade-service"
-sys.path.insert(0, str(SERVICE))
-
-constants = importlib.import_module("constants")
-assembler = importlib.import_module("source_assembler")
+splade = load_flat_service(
+    "splade_service", SERVICE, "constants", "source_assembler"
+)
+constants = splade.constants
+assembler = splade.source_assembler
 
 S2_MAPPING = {
     "27100000": "Tools",
