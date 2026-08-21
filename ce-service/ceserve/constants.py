@@ -17,8 +17,8 @@ import numpy as np
 
 # The MXG-177 ship decision (2026-08-20): the cell-D negation-tuned student —
 # distilled from the fold_de/no-prefix teacher and finished with the MXG-66
-# negation overlay (the bare student fails the controlled negation gate, the
-# overlay passes 0.912/0.960). Max explicitly overrode the teacher screen's
+# negation overlay (the bare student FAILS the controlled negation gate, the
+# overlay passes it). Max explicitly overrode the teacher screen's
 # predeclared no-change verdict; the override is recorded in
 # `pipeline/out/mxg177_stage2/run_manifest.json::approved_contract`. Same
 # checkpoint `pipeline/ce_serve_skew.py::CE_MODEL` pins for the offline stack.
