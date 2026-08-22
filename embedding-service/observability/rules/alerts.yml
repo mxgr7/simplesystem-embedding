@@ -407,12 +407,15 @@ groups:
           description: "Both embedding caches live here. Cache misses degrade to real encodes, so this shows up as GPU load and latency before it shows up as errors."
           action: "docker logs --tail 50 embedding-service-kvrocks-1; check /mnt/nvme free space."
 
-      # --- MXG-149: the query service's cascade -------------------------------------------
-      # ⚠️ The two rules below are the only ones in this file that were NOT evaluated against
+      # --- MXG-149/MXG-202: the query service ---------------------------------------------
+      # ⚠️ The three rules below are the only ones in this file that were NOT evaluated against
       # this Prometheus before being committed, because the series they read do not exist here
-      # yet. article_search_query_* is exported by the article-search-query pods, and the scrape
-      # job that reaches them is MXG-181 §5. Until that lands these are inert: no series, no
-      # evaluation, no firing. Re-check both expressions the day the job appears.
+      # and are not going to. article_search_query_* is exported by the article-search-query
+      # pods, and this box's Prometheus does not scrape pods (MXG-187 §5). The copies that
+      # actually evaluate live in next-gen-deploy at
+      # portal/monitoring/prometheus-rules/article-semantic-search-prometheus-rules.yml, with
+      # namespace/job selectors these do not carry. These three are kept as the readable
+      # statement of what is watched on the semantic path; edit both copies together.
       - alert: CascadeServingCoarseOrder
         # The fine ranker decides the order only when the cross-encoder scored EVERY candidate
         # in the 120-window. Short of that the SERP keeps the coarse ranker's order, which is
@@ -461,6 +464,36 @@ groups:
           summary: "Query service is running without a CE window scorer bean"
           description: "CascadeOrdering.NOT_CONFIGURED: every SERP is ordered by the coarse ranker and no CE call is ever attempted. This is a wiring fault in the deployed artifact, not a configuration value, so no env change will fix it."
           action: "Hit the query service's actuator /beans and look for CeCascadeWindowScorer, then compare the deployed image against the branch it was built from."
+
+      - alert: SemanticArmDroppedFromUnion
+        # The semantic arm is the only one of the three behind a network call: the query must be
+        # encoded by splade-service before it can be issued. SpladeQueryClient answers a failed
+        # encode with no vector rather than an error -- correct, a search that cannot reach the
+        # encoder should serve lexically instead of 500ing -- so the arm simply does not fire and
+        # the SERP comes back lexical + identifier, HTTP 200, plausible. Same silent shape the
+        # cascade had before MXG-167, on the retrieval side.
+        #
+        # SpladeAtCapacity above does NOT cover this, on two counts. Its denominator is all of
+        # splade_service_requests_total, dominated by the indexer's bulk batches -- query encodes
+        # share the same MAX_INFLIGHT=32 pool with no reservation, so search could be shed
+        # wholesale without moving that ratio. And it only sees 429: a read timeout, a 401, a
+        # transport failure or an empty vector never appear in it, and the client treats all of
+        # them identically.
+        #
+        # 30m windows for the traffic reason the cascade rule gives (~0.08 q/s), not for its cache
+        # reason: the encode happens per request, ahead of the ranked-pool cache. Denominator
+        # excludes outcome="blank", which is not a degradation and which the serving path cannot
+        # produce -- a blank queryString is rejected before the executor runs.
+        expr: |
+          sum(rate(article_search_query_sem_arm_encode_total{outcome=~"failed|empty"}[30m]))
+            / clamp_min(sum(rate(article_search_query_sem_arm_encode_total{outcome=~"encoded|failed|empty"}[30m])), 0.001) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of searches are being served without the semantic arm"
+          description: "The SPLADE query encoder is not returning usable vectors, so the union runs on its lexical and identifier arms alone. Every one of those requests answers 200 with plausible results. A total encoder outage is this same rule at 100%."
+          action: "Split the numerator first: outcome=\"failed\" is unreachable/slow/429/401, outcome=\"empty\" is a 200 with no usable vector, and they need different triage. Triage query: sum(rate(article_search_query_sem_arm_encode_total[5m])) by (outcome). Then check SpladeAtCapacity and splade_service_requests_total{status=\"429\"}, and that SPLADE_QUERY_URL on the query pods reaches the frontend on :8137."
 
   - name: host
     interval: 30s
