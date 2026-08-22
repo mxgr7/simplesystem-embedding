@@ -971,8 +971,8 @@ query legitimately return nothing" gate is MXG-147's absolute fused-score τ. A 
 *emerges* when every fired arm returns nothing; it is never produced by a policy branch.
 
 **One `_msearch`, one exception.** Each arm is one msearch item: `bool{must:[armQuery],
-filter: <full consolidated filter list>}`, `size` = the arm's depth, `_source` excluded (deep
-shape) or included (HITS_ONLY fast-path shape, clamped to `min(fusionWindowSize, armSize)`). The
+filter: <full consolidated filter list>}`, `size` = the arm's depth, with `_source` excluded. Every
+relevance-ordered request uses this deep shape and runs the cascade and relevance filter. The
 msearch item body does **not** carry `knn`, `post_filter`, `aggregations`, `track_total_hits` or
 `search_type` — the transport silently drops them — which is fine for ordinary-query arms and is
 exactly why the DENSE side-channel stays a separate parallel `_search` with the two-phase
