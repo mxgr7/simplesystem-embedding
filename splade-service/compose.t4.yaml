@@ -178,8 +178,29 @@ services:
       # what BACKEND_MAX_CLIENT_BATCH above buys.
       REQUEST_BUDGET_S: "120"
       KVROCKS_READ_TIMEOUT_MS: "100"
-      API_KEY: ${SPLADE_API_KEY:?set SPLADE_API_KEY}
+      # `:-`, NOT `:?`. Blank means open, and blank is the deployed state: the
+      # encoders serve the query pods without API keys since 2026-08-21 (Max,
+      # recorded on MXG-181), the same decision ce-service/compose.t4.yaml
+      # already carries. `:?` rejects an EMPTY value as well as an unset one, so
+      # this file could not express that state at all -- and a sync that put the
+      # key back would take the query service DOWN, not degrade it:
+      # SpladeQueryServiceVerifier.probeEncodeQuery treats 401 on /embed-query as
+      # fatal, because GET /metadata is a PUBLIC_PATH and would otherwise pass an
+      # identity check in front of a frontend that rejects every encode (MXG-120).
+      # Turning authentication back on therefore means setting BOTH this and the
+      # query service's SPLADE_QUERY_API_KEY in the same change.
+      API_KEY: ${SPLADE_API_KEY:-}
+      # Stays mandatory, and that is what keeps the line above safe. The
+      # middleware resolves /admin against `ADMIN_API_KEY or API_KEY` and then
+      # opens the path entirely when the result is blank -- so with both keys
+      # empty, POST/PATCH/DELETE /admin/backends would be unauthenticated on
+      # 0.0.0.0:8137 (this service runs network_mode: host, unlike the backend on
+      # loopback 8138). Anyone could register a rogue backend, reweight the pool
+      # to zero, or drain the only healthy one. A separate admin key is the whole
+      # reason the middleware reads two variables.
       ADMIN_API_KEY: ${SPLADE_ADMIN_API_KEY:?set SPLADE_ADMIN_API_KEY}
+      # Also mandatory: the frontend->backend hop is credentialed independently
+      # of the client-facing one, and the backend is loopback-only anyway.
       BACKEND_API_KEY: ${SPLADE_BACKEND_API_KEY:?set SPLADE_BACKEND_API_KEY}
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--limit-concurrency", "128", "--no-access-log"]
     depends_on:

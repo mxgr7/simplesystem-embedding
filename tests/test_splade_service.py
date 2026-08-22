@@ -326,6 +326,46 @@ def test_admin_lists_backends(service_client):
     assert response.json() == pool.snapshots()
 
 
+@pytest.mark.parametrize(
+    ("admin_key", "client_key", "admin_status", "query_status"),
+    [
+        ("", "", 200, 200),
+        ("adm", "", 401, 200),
+        ("", "cli", 401, 401),
+        ("adm", "cli", 401, 401),
+    ],
+)
+def test_a_blank_client_key_must_not_also_open_admin(
+    monkeypatch, admin_key, client_key, admin_status, query_status
+):
+    """`API_KEY` blank opens /embed-query. It must not also open /admin/backends.
+
+    `compose.t4.yaml` serves the query pods with `API_KEY` blank (MXG-181,
+    2026-08-21) and keeps `ADMIN_API_KEY` mandatory. Row 2 is what makes that
+    pairing safe, and row 1 is why the mandatory half cannot be relaxed: the
+    middleware resolves /admin against `ADMIN_API_KEY or API_KEY` and then skips
+    authentication entirely when the result is blank, so with BOTH blank,
+    POST/PATCH/DELETE /admin/backends is unauthenticated -- on every interface,
+    because this service runs `network_mode: host` and binds 0.0.0.0:8137, not
+    loopback like the backend on 8138. That is enough to register a rogue
+    backend, reweight the pool to zero, or drain the only healthy one.
+    """
+
+    class KeyedConfig(StubConfig):
+        def __init__(self):
+            super().__init__()
+            self.api_key = client_key
+            self.admin_api_key = admin_key
+
+    monkeypatch.setattr(main, "Config", KeyedConfig)
+    monkeypatch.setattr(main, "SparseCache", lambda *args: StubCache())
+    monkeypatch.setattr(main, "BackendPool", lambda *args: StubPool())
+    with TestClient(main.app) as client:
+        assert client.get("/admin/backends").status_code == admin_status
+        query = client.post("/embed-query", json={"inputs": "kühlschrank"})
+        assert query.status_code == query_status
+
+
 def _metric_lines(client, name):
     body = client.get("/metrics").text
     return [line for line in body.splitlines() if line.startswith(name)]
