@@ -21,8 +21,8 @@ The control-arm copies of today's pick (`rep_offer`, `render_today`) stay in the
 audit: they are not rules.
 
 Evidence for the two operator choices lives in the docstrings below and in
-`report/pipeline_v2/feat_kw_audit.md`; what the union costs the cross-encoder is
-`report/pipeline_v2/feat_kw_ce_ab.md`.
+`report/pipeline_v2/field_preprocessing.md`; what the union costs the cross-encoder is
+`report/pipeline_v2/field_preprocessing.md`.
 """
 import json
 import os
