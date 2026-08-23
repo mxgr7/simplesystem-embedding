@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from tokenizers.implementations import BertWordPieceTokenizer
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
+from admission import PrioritySemaphore
 from constants import (
     MAX_OFFER_LENGTH,
     MODEL_NAME,
@@ -34,6 +35,10 @@ from codec import pack_sparse_rows
 class EncodeRequest(BaseModel):
     inputs: list[str]
     document: bool = True
+
+
+class InferenceCancelled(Exception):
+    pass
 
 
 def is_cased_token(tok):
@@ -302,7 +307,7 @@ class SpladeEncoder:
             f"prod-soup-top256-{self.document_dtype_name}-fp16codec{variant}-v2"
         )
 
-    def encode(self, texts, document=True):
+    def encode(self, texts, document=True, cancelled=None):
         """The JSON transport -- and, `document=False`, the query path.
 
         Runs the same forward as `_encode_batch`: same `_autocast()`, same
@@ -324,6 +329,8 @@ class SpladeEncoder:
         """
         output = []
         for start in range(0, len(texts), self.batch_size):
+            if cancelled is not None and cancelled.is_set():
+                raise InferenceCancelled
             chunk = texts[start:start + self.batch_size]
             tokens = self.tokenizer(
                 chunk,
@@ -345,6 +352,8 @@ class SpladeEncoder:
                     ~tokens["attention_mask"].bool().unsqueeze(-1), float("-inf")
                 )
                 vectors = logits.amax(dim=1)
+                if cancelled is not None and cancelled.is_set():
+                    raise InferenceCancelled
                 # in-place, NOT torch.log1p/torch.relu: log1p carries an fp32
                 # autocast cast policy, so the functional form silently upcasts
                 # the result -- which would put this transport back on a
@@ -352,6 +361,8 @@ class SpladeEncoder:
                 vectors.relu_().log1p_()
                 vectors.masked_fill_(self.drop, 0)
 
+            if cancelled is not None and cancelled.is_set():
+                raise InferenceCancelled
             if document:
                 values, ids = torch.topk(vectors, TOP_K, dim=1, sorted=True)
                 for row_ids, row_values in zip(ids, values):
@@ -553,7 +564,7 @@ async def lifespan(app):
         (os.environ["SPLADE_FOLD_VOCAB_MASK"].lower() in truthy
          if "SPLADE_FOLD_VOCAB_MASK" in os.environ else None),
     )
-    app.state.sem = asyncio.Semaphore(
+    app.state.sem = PrioritySemaphore(
         int(os.environ.get("BACKEND_MAX_CONCURRENCY", "1"))
     )
     yield
@@ -614,17 +625,65 @@ async def metadata(request: Request):
     return data
 
 
+async def _wait_for_disconnect(request):
+    while not await request.is_disconnected():
+        await asyncio.sleep(0.01)
+
+
+async def _encode_query_until_disconnect(body, request):
+    cancelled = threading.Event()
+
+    async def run():
+        async with request.app.state.sem.slot(priority=True):
+            worker = asyncio.create_task(
+                asyncio.to_thread(
+                    request.app.state.encoder.encode,
+                    body.inputs,
+                    False,
+                    cancelled,
+                )
+            )
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancelled.set()
+                await asyncio.gather(worker, return_exceptions=True)
+                raise
+
+    work = asyncio.create_task(run())
+    disconnected = asyncio.create_task(_wait_for_disconnect(request))
+    try:
+        done, _ = await asyncio.wait(
+            {work, disconnected},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if work in done:
+            return await work
+        cancelled.set()
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+        raise asyncio.CancelledError
+    finally:
+        cancelled.set()
+        disconnected.cancel()
+        if not work.done():
+            work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+
+
 @app.post("/encode")
 async def encode(body: EncodeRequest, request: Request):
     if not body.inputs:
         raise HTTPException(status_code=400, detail="inputs must not be empty")
     if len(body.inputs) > int(os.environ.get("MAX_INPUTS_PER_REQUEST", "2048")):
         raise HTTPException(status_code=413, detail="too many inputs")
-    async with request.app.state.sem:
+    if not body.document:
+        return await _encode_query_until_disconnect(body, request)
+    async with request.app.state.sem.slot():
         return await asyncio.to_thread(
             request.app.state.encoder.encode,
             body.inputs,
-            body.document,
+            True,
         )
 
 
@@ -636,7 +695,7 @@ async def encode_packed(body: EncodeRequest, request: Request):
         raise HTTPException(status_code=400, detail="inputs must not be empty")
     if len(body.inputs) > int(os.environ.get("MAX_INPUTS_PER_REQUEST", "2048")):
         raise HTTPException(status_code=413, detail="too many inputs")
-    async with request.app.state.sem:
+    async with request.app.state.sem.slot():
         value = await asyncio.to_thread(
             request.app.state.encoder.encode_packed,
             body.inputs,

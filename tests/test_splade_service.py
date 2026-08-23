@@ -1,6 +1,8 @@
 import asyncio
 import json
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -252,6 +254,185 @@ def test_embed_deduplicates_same_miss_within_request(service_client):
     assert response.status_code == 200
     assert response.json()[0] == response.json()[1]
     assert pool.calls == 1
+
+
+@pytest.mark.parametrize("inputs", ["kuehlschrank", ["kuehlschrank", "ofen"]])
+def test_document_saturation_does_not_reject_a_query(service_client, inputs):
+    client, _, pool = service_client
+    client.app.state.inflight = client.app.state.config.max_inflight
+
+    response = client.post("/embed-query", json={"inputs": inputs})
+
+    assert response.status_code == 200
+    assert pool.calls == 1
+
+
+def test_document_admission_leaves_one_request_slot_for_queries(service_client):
+    client, _, pool = service_client
+    client.app.state.inflight = client.app.state.config.max_inflight - 1
+
+    response = client.post("/embed", json={"inputs": make_input()})
+
+    assert response.status_code == 429
+    assert pool.calls == 0
+
+
+def test_backend_runs_a_query_before_queued_document_work():
+    class BlockingEncoder:
+        def __init__(self):
+            self.order = []
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def encode(self, inputs, document, cancelled=None):
+            name = inputs[0]
+            self.order.append(name)
+            if name == "running-document":
+                self.started.set()
+                assert self.release.wait(1)
+            return [{"1": 0.5}]
+
+    async def body():
+        encoder = BlockingEncoder()
+        state = SimpleNamespace(
+            encoder=encoder,
+            sem=splade.admission.PrioritySemaphore(1),
+        )
+
+        class ConnectedRequest:
+            def __init__(self):
+                self.app = SimpleNamespace(state=state)
+                self.disconnected = asyncio.Event()
+
+            async def is_disconnected(self):
+                await self.disconnected.wait()
+                return True
+
+        request = ConnectedRequest()
+
+        running = asyncio.create_task(
+            backend.encode(
+                backend.EncodeRequest(inputs=["running-document"]), request
+            )
+        )
+        assert await asyncio.to_thread(encoder.started.wait, 1)
+        queued_documents = [
+            asyncio.create_task(
+                backend.encode(
+                    backend.EncodeRequest(inputs=[f"queued-document-{index}"]),
+                    request,
+                )
+            )
+            for index in range(20)
+        ]
+        await asyncio.sleep(0)
+        query = asyncio.create_task(
+            backend.encode(
+                backend.EncodeRequest(inputs=["query"], document=False), request
+            )
+        )
+        await asyncio.sleep(0)
+
+        encoder.release.set()
+        await asyncio.wait_for(asyncio.shield(query), 0.2)
+        assert encoder.order[:2] == ["running-document", "query"]
+
+        await asyncio.gather(running, *queued_documents)
+
+    asyncio.run(body())
+
+
+def test_backend_disconnect_stops_query_inference_before_releasing_its_slot():
+    class CancellableEncoder:
+        def __init__(self):
+            self.started = threading.Event()
+            self.stopped = threading.Event()
+
+        def encode(self, inputs, document, cancelled=None):
+            self.started.set()
+            assert cancelled is not None
+            assert cancelled.wait(1)
+            self.stopped.set()
+            raise backend.InferenceCancelled
+
+    class DisconnectingRequest:
+        def __init__(self, state):
+            self.app = SimpleNamespace(state=state)
+            self.disconnected = asyncio.Event()
+
+        async def is_disconnected(self):
+            await self.disconnected.wait()
+            return True
+
+    async def body():
+        encoder = CancellableEncoder()
+        state = SimpleNamespace(
+            encoder=encoder,
+            sem=splade.admission.PrioritySemaphore(1),
+        )
+        request = DisconnectingRequest(state)
+        task = asyncio.create_task(
+            backend.encode(
+                backend.EncodeRequest(inputs=["query"], document=False), request
+            )
+        )
+        assert await asyncio.to_thread(encoder.started.wait, 1)
+
+        request.disconnected.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert encoder.stopped.is_set()
+        await asyncio.wait_for(state.sem.acquire(), 0.1)
+        state.sem.release()
+
+    asyncio.run(body())
+
+
+def test_disconnecting_a_query_cancels_work_and_releases_capacity():
+    class CancelledPool:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.cancelled = False
+
+        async def encode(self, texts, document=True):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    class DisconnectingRequest:
+        def __init__(self, state):
+            self.app = SimpleNamespace(state=state)
+            self.disconnected = asyncio.Event()
+
+        async def is_disconnected(self):
+            await self.disconnected.wait()
+            return True
+
+    async def body():
+        pool = CancelledPool()
+        state = SimpleNamespace(
+            config=StubConfig(),
+            inflight=0,
+            pool=pool,
+        )
+        request = DisconnectingRequest(state)
+        task = asyncio.create_task(
+            main.embed_query(main.EmbedRequest(inputs="kuehlschrank"), request)
+        )
+        await pool.started.wait()
+
+        request.disconnected.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert pool.cancelled
+        assert state.inflight == 0
+
+    asyncio.run(body())
 
 
 def test_readyz_checks_cache_and_backend(service_client):

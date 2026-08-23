@@ -182,12 +182,26 @@ def test_embed_document_path_still_sets_document_true(query_client):
     assert cache.calls > 0
 
 
-def test_embed_query_obeys_shared_admission_limit(query_client):
+def test_embed_query_bypasses_document_admission_limit(query_client):
     client, _, pool = query_client
     main.app.state.inflight = main.app.state.config.max_inflight
     response = auth_post(client, "/embed-query", "query")
-    assert response.status_code == 429
-    assert pool.calls == []
+    assert response.status_code == 200
+    assert pool.calls == [(["query"], False)]
+
+
+def test_embed_query_queue_is_not_cut_off_by_document_request_budget(query_client):
+    client, _, pool = query_client
+    main.app.state.config.request_budget_s = 0.001
+
+    async def delayed(texts, document=True):
+        await asyncio.sleep(0.02)
+        return [{"10": 1.0} for _ in texts]
+
+    pool.encode = delayed
+    response = auth_post(client, "/embed-query", "query")
+
+    assert response.status_code == 200
 
 
 def test_embed_query_rejects_malformed_backend_vector(query_client):

@@ -137,7 +137,11 @@ class Backend:
         # only ever calls /embed has no other way to tell, and the encoder-identity fields
         # (document_encoding_version, fold_vocab_mask, vocab_mask_sha256) exist only here.
         self.metadata = {}
-        self.sem = asyncio.Semaphore(max_concurrency)
+        # Document calls can fill their configured connections without trapping
+        # a live query behind them. One separate query connection reaches the
+        # backend's priority queue; additional queries wait here.
+        self.document_sem = asyncio.Semaphore(max_concurrency)
+        self.query_sem = asyncio.Semaphore(1)
         self.client = self._new_client()
 
     def _new_client(self):
@@ -314,7 +318,8 @@ class Backend:
             log.debug("backend %s probe failed: %s", self.id, exc)
 
     async def encode(self, texts, document=True):
-        async with self.sem:
+        admission = self.document_sem if document else self.query_sem
+        async with admission:
             response = await self.client.post(
                 "/encode", json={"inputs": texts, "document": document}
             )

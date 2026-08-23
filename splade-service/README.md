@@ -21,6 +21,19 @@ service, then returns the complete positive float32 query vector. Query callers
 must send the raw user text, including umlauts; they must not strip diacritics
 before calling the service. Query vectors bypass the document cache.
 
+Query requests do not receive HTTP 429. `POST /embed` can use at most
+`MAX_INFLIGHT - 1` admission slots, leaving one slot for live query work. Each
+backend client also has one query connection outside its document connection
+limit. At the backend, a query takes the next encoder slot before queued document
+work. A running document batch finishes first. This bounds a singleton query
+behind at most one 64-document T4 batch, measured at 231 ms, rather than every
+document batch already queued. More queries queue on the reserved connection and
+rely on the caller's deadline; the service adds no query queue timeout. Uvicorn's
+own concurrency rejection is disabled on both processes so it cannot answer 503
+before this admission logic runs. When the caller disconnects, the frontend
+cancels its backend call. The backend cancels a queued query or signals a running
+worker, waits for it to stop, and then releases the encoder slot.
+
 KVRocks values use compact `(uint16 token_id, fp16 weight)` storage under the
 model-scoped `splade:prod-soup-folde-top256-v1:` prefix. Cache failures fall back
 to inference.

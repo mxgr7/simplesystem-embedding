@@ -292,6 +292,54 @@ def test_pool_timeouts_recycle_the_client_early():
     asyncio.run(body())
 
 
+def test_query_overtakes_document_work_waiting_for_a_backend_slot():
+    class BlockingStub(StubBackend):
+        def __init__(self):
+            super().__init__()
+            self.order = []
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def __call__(self, request):
+            if request.url.path == "/metadata":
+                return await super().__call__(request)
+            payload = json.loads(request.content)
+            name = payload["inputs"][0]
+            self.order.append(name)
+            if name == "running-document":
+                self.started.set()
+                await self.release.wait()
+            return httpx.Response(200, json=[{"1": 0.5}])
+
+    stub = BlockingStub()
+
+    async def body():
+        with stubbed(stub):
+            pool = await _make_pool()
+            backend = _only(pool)
+            backend.document_sem = asyncio.Semaphore(1)
+
+            running = asyncio.create_task(
+                pool.encode(["running-document"], document=True)
+            )
+            await stub.started.wait()
+            queued_document = asyncio.create_task(
+                pool.encode(["queued-document"], document=True)
+            )
+            await asyncio.sleep(0)
+            query = asyncio.create_task(pool.encode(["query"], document=False))
+            await asyncio.wait_for(asyncio.shield(query), 0.1)
+            assert stub.order == ["running-document", "query"]
+
+            stub.release.set()
+            await asyncio.gather(running, queued_document)
+
+            assert stub.order == ["running-document", "query", "queued-document"]
+            await pool.aclose()
+
+    asyncio.run(body())
+
+
 def test_half_open_trial_recovers_from_traffic_alone():
     stub = StubBackend()
 

@@ -165,6 +165,9 @@ services:
       # nothing afterwards can tell which encoder produced a cached entry.
       SPLADE_ENCODING_VERSION: prod-soup-top256-fp16-fp16codec-wcast-v2
       MAX_INPUTS_PER_REQUEST: "256"
+      # One of these 32 slots is reserved for /embed-query. Document misses are
+      # admitted only while fewer than 31 requests are in flight; queries queue
+      # instead of returning 429 and take the next frontend and backend slot.
       MAX_INFLIGHT: "32"
       # 64 is the card's best batch (MXG-111: 8 -> 219.7 docs/s, 64 -> 273.9) and
       # the pool chunks by the min across non-draining backends, so leaving this at
@@ -204,7 +207,8 @@ services:
       # Also mandatory: the frontend->backend hop is credentialed independently
       # of the client-facing one, and the backend is loopback-only anyway.
       BACKEND_API_KEY: ${SPLADE_BACKEND_API_KEY:?set SPLADE_BACKEND_API_KEY}
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--limit-concurrency", "128", "--no-access-log"]
+    # Admission lives in the app. Uvicorn must not reject queued queries first.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--no-access-log"]
     depends_on:
       splade-backend-t4:
         condition: service_healthy

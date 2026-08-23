@@ -34,6 +34,7 @@ CACHE_HITS = Counter("splade_service_cache_hits_total", "Cache hits")
 CACHE_MISSES = Counter("splade_service_cache_misses_total", "Cache misses")
 INFLIGHT = Gauge("splade_service_inflight", "Miss requests being processed")
 MAX_QUERY_CHARS = 4096
+QUERY_RESERVE = 1
 LOG_THROTTLE_S = 60.0
 _throttled_last = {}
 _throttled_suppressed = {}
@@ -326,17 +327,36 @@ async def embed(body: EmbedRequest, request: Request, background: BackgroundTask
         raise no_backend_error(config, "/embed", exc)
 
 
+async def _wait_for_disconnect(request):
+    while not await request.is_disconnected():
+        await asyncio.sleep(0.01)
+
+
+async def _cancel_on_disconnect(request, awaitable):
+    work = asyncio.create_task(awaitable)
+    disconnected = asyncio.create_task(_wait_for_disconnect(request))
+    try:
+        done, _ = await asyncio.wait(
+            {work, disconnected},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if work in done:
+            return await work
+        work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+        raise asyncio.CancelledError
+    finally:
+        disconnected.cancel()
+        if not work.done():
+            work.cancel()
+        await asyncio.gather(work, return_exceptions=True)
+
+
 @app.post("/embed-query")
 async def embed_query(body: EmbedRequest, request: Request):
     config = request.app.state.config
     try:
-        return await asyncio.wait_for(
-            _embed_query(body, request),
-            timeout=config.request_budget_s,
-        )
-    except asyncio.TimeoutError:
-        REQUESTS.labels("504").inc()
-        raise HTTPException(status_code=504, detail="request budget exhausted")
+        return await _cancel_on_disconnect(request, _embed_query(body, request))
     except NoHealthyBackendError as exc:
         raise no_backend_error(config, "/embed-query", exc)
 
@@ -359,13 +379,6 @@ async def _embed_query(body, request):
     if any(len(value) > MAX_QUERY_CHARS for value in texts):
         REQUESTS.labels("413").inc()
         raise HTTPException(status_code=413, detail="query input is too long")
-    if request.app.state.inflight >= config.max_inflight:
-        REQUESTS.labels("429").inc()
-        raise HTTPException(
-            status_code=429,
-            detail="SPLADE service at concurrency limit",
-            headers={"Retry-After": "1"},
-        )
 
     request.app.state.inflight += 1
     INFLIGHT.set(request.app.state.inflight)
@@ -417,7 +430,8 @@ async def _embed(body, request, background):
     CACHE_HITS.inc(len(inputs) - missing)
     CACHE_MISSES.inc(missing)
 
-    if missing and request.app.state.inflight >= config.max_inflight:
+    document_limit = max(0, config.max_inflight - QUERY_RESERVE)
+    if missing and request.app.state.inflight >= document_limit:
         REQUESTS.labels("429").inc()
         raise HTTPException(
             status_code=429,

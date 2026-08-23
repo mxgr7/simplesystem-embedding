@@ -10,12 +10,12 @@ RUN uv pip install --system --no-cache \
       "prometheus-fastapi-instrumentator>=7,<8"
 COPY . /app
 EXPOSE 8137
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--limit-concurrency", "128", "--no-access-log"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--no-access-log"]
 
 FROM frontend AS backend
 ENV PYTHONPATH=/runtime
 EXPOSE 8138
-CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8138", "--limit-concurrency", "16", "--no-access-log"]
+CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8138", "--no-access-log"]
 
 # Portable self-contained CPU image for hosts with adequate Docker storage.
 # The dev compose uses `backend` and bind-mounts these dependencies from /data.
@@ -27,7 +27,7 @@ RUN uv pip install --system --no-cache \
       "transformers>=4.49,<6" \
       "huggingface-hub>=0.24,<2" "tokenizers>=0.21,<1"
 EXPOSE 8138
-CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8138", "--limit-concurrency", "16", "--no-access-log"]
+CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8138", "--no-access-log"]
 
 # Self-contained CUDA backend for the dedicated bulk-indexing GPU.
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime AS backend-cuda
@@ -41,4 +41,4 @@ RUN uv pip install --system --no-cache \
       "sentencepiece==0.2.1"
 COPY . /app
 EXPOSE 8138
-CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8138", "--limit-concurrency", "16", "--no-access-log"]
+CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "8138", "--no-access-log"]

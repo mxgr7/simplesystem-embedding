@@ -473,12 +473,10 @@ groups:
         # the SERP comes back lexical + identifier, HTTP 200, plausible. Same silent shape the
         # cascade had before MXG-167, on the retrieval side.
         #
-        # SpladeAtCapacity above does NOT cover this, on two counts. Its denominator is all of
-        # splade_service_requests_total, dominated by the indexer's bulk batches -- query encodes
-        # share the same MAX_INFLIGHT=32 pool with no reservation, so search could be shed
-        # wholesale without moving that ratio. And it only sees 429: a read timeout, a 401, a
-        # transport failure or an empty vector never appear in it, and the client treats all of
-        # them identically.
+        # SpladeAtCapacity above does not cover this. It now measures document admission only:
+        # query encodes reserve one request slot, queue instead of returning 429, and take the
+        # next backend encoder slot. A read timeout, a 401, a transport failure or an empty vector
+        # still never appears in that alert, and the client treats all of them identically.
         #
         # 30m windows for the traffic reason the cascade rule gives (~0.08 q/s), not for its cache
         # reason: the encode happens per request, ahead of the ranked-pool cache. Denominator
@@ -493,7 +491,7 @@ groups:
         annotations:
           summary: "{{ $value | humanizePercentage }} of searches are being served without the semantic arm"
           description: "The SPLADE query encoder is not returning usable vectors, so the union runs on its lexical and identifier arms alone. Every one of those requests answers 200 with plausible results. A total encoder outage is this same rule at 100%."
-          action: "Split the numerator first: outcome=\"failed\" is unreachable/slow/429/401, outcome=\"empty\" is a 200 with no usable vector, and they need different triage. Triage query: sum(rate(article_search_query_sem_arm_encode_total[5m])) by (outcome). Then check SpladeAtCapacity and splade_service_requests_total{status=\"429\"}, and that SPLADE_QUERY_URL on the query pods reaches the frontend on :8137."
+          action: "Split the numerator first: outcome=\"failed\" is unreachable, slow, 401, 503, or an old deployment returning 429; outcome=\"empty\" is a 200 with no usable vector. Triage query: sum(rate(article_search_query_sem_arm_encode_total[5m])) by (outcome). Then check splade_service_backend_healthy, splade_service_requests_total by status, and that SPLADE_QUERY_URL on the query pods reaches the frontend on :8137."
 
   - name: host
     interval: 30s
