@@ -118,6 +118,8 @@ services:
     # of 15,360 total INCLUDING the two TEI replicas' 1,447 -- i.e. ~3.7 GB for
     # SPLADE, more than the 1,785 the packed-path bench showed on an empty card,
     # because the JSON /encode path the indexer uses holds more. 34% of the card.
+    # Measured before MXG-203, which put that path on one [B,L,V] head tensor
+    # instead of two, so 5,173 MiB is now a ceiling rather than a reading.
     shm_size: 1gb
     restart: unless-stopped
     healthcheck:

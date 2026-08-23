@@ -56,6 +56,18 @@ FIELD_ORDER = (
 
 
 def model_metadata():
+    """WHICH checkpoint is served, and nothing about HOW it is executed.
+
+    Every backend is checked against this dict field for field, so it may only
+    hold values that identify the model. It used to carry `"precision":
+    "float32"` -- a literal, and one that was simply wrong: the weights-cast
+    profile the T4 runs has served fp16 documents *and* fp16 queries since
+    MXG-111. Execution is reported per backend instead, by `/metadata`'s
+    `document_compute_dtype` / `query_compute_dtype` and by
+    `document_encoding_version`, which are derived from the encoder and are in
+    `backend_pool.ENCODER_CONTRACT` precisely because they can differ between
+    two backends serving this same checkpoint.
+    """
     return {
         "protocol_version": PROTOCOL_VERSION,
         "model_id": MODEL_ID,
@@ -64,5 +76,4 @@ def model_metadata():
         "vocab_size": VOCAB_SIZE,
         "top_k": TOP_K,
         "max_length": MAX_OFFER_LENGTH,
-        "precision": "float32",
     }

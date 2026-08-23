@@ -303,6 +303,25 @@ class SpladeEncoder:
         )
 
     def encode(self, texts, document=True):
+        """The JSON transport -- and, `document=False`, the query path.
+
+        Runs the same forward as `_encode_batch`: same `_autocast()`, same
+        `_logits()`, same max-first in-place activation. That is not tidiness.
+        `document_encoding_version` names the compute dtype and the fast-path
+        flags; it namespaces the KVRocks keyspace and it is one of the four keys
+        every backend in the pool is gated on. And this is not the minor
+        transport -- `BackendPool` -> `/encode` is what `/embed` uses, which is
+        what the indexer uses. A `/encode` that ignored `DOCUMENT_DTYPE` would
+        file fp32 vectors under a name that says bf16, into the same cache the
+        packed transport writes its bf16 ones to, with nothing downstream able
+        to tell the two apart.
+
+        Queries share the forward deliberately: a query vector and a document
+        vector meet in a dot product, so they have to come out of the same
+        arithmetic. They already did whenever `DOCUMENT_WEIGHTS_CAST` held the
+        weights in the compute dtype -- which is the live T4 -- so this only
+        extends that to the autocast profiles.
+        """
         output = []
         for start in range(0, len(texts), self.batch_size):
             chunk = texts[start:start + self.batch_size]
@@ -316,17 +335,22 @@ class SpladeEncoder:
             tokens = {
                 name: value.to(self.device) for name, value in tokens.items()
             }
-            with torch.inference_mode():
-                logits = self.model(
-                    input_ids=tokens["input_ids"],
-                    attention_mask=tokens["attention_mask"],
-                ).logits
-                activations = torch.log1p(torch.relu(logits))
-                activations *= tokens["attention_mask"].unsqueeze(-1).to(
-                    activations.dtype
+            with torch.inference_mode(), self._autocast():
+                logits = self._logits(
+                    tokens["input_ids"], tokens["attention_mask"]
                 )
-                vectors = activations.amax(dim=1)
-                vectors.masked_fill_(~self.mask, 0)
+                # Max first, then log1p(relu(.)) -- monotone non-decreasing, so
+                # this is the vector `_encode_batch` computes, elementwise.
+                logits.masked_fill_(
+                    ~tokens["attention_mask"].bool().unsqueeze(-1), float("-inf")
+                )
+                vectors = logits.amax(dim=1)
+                # in-place, NOT torch.log1p/torch.relu: log1p carries an fp32
+                # autocast cast policy, so the functional form silently upcasts
+                # the result -- which would put this transport back on a
+                # different number from the packed one even under one autocast.
+                vectors.relu_().log1p_()
+                vectors.masked_fill_(self.drop, 0)
 
             if document:
                 values, ids = torch.topk(vectors, TOP_K, dim=1, sorted=True)
@@ -345,7 +369,7 @@ class SpladeEncoder:
                         str(int(token_id)): float(vector[token_id])
                         for token_id in ids.cpu()
                     })
-            del logits, activations, vectors
+            del logits, vectors
         return output
 
     def _autocast(self):
@@ -568,6 +592,11 @@ async def metadata(request: Request):
     )
     data["optimized_document_encoder"] = encoder.optimized_document_encoder
     data["document_compute_dtype"] = encoder.document_dtype_name
+    # Queries run through the same forward as documents (`SpladeEncoder.encode`
+    # serves both), so they come out of the same arithmetic. Reported because
+    # this is the question the old constant `"precision": "float32"` answered,
+    # and answered wrongly for every profile that casts or autocasts.
+    data["query_compute_dtype"] = encoder.document_dtype_name
     data["document_encoding_version"] = encoder.document_encoding_version
     data["document_transports"] = ["json-map-v1", "splade-u16-f16-batch-v1"]
     data["document_weights_cast"] = encoder.weights_cast

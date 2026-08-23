@@ -76,9 +76,18 @@ These defaults are the intended production values, so `compose.t4.yaml` does not
 set them.
 
 CUDA backends also expose `POST /encode-packed` for bulk document indexing. It
-runs document inference under BF16 autocast, applies the special-token mask and
-top-256 on GPU, and returns versioned batches of the existing uint16-token/
-float16-weight codec. Query encoding remains unpruned float32 through `/encode`.
+applies the special-token mask and top-256 on GPU and returns versioned batches
+of the existing uint16-token/float16-weight codec. `/encode` returns the same
+vectors as an unpruned JSON map, and is the transport `/embed` -- and therefore
+the indexer -- uses; queries go through it too, with `document=false`, which
+skips the top-256 pruning.
+
+Both transports run the forward under the same `DOCUMENT_DTYPE`, and so do both
+roles: a query vector and a document vector meet in a dot product. `/metadata`
+reports the dtype in force as `document_compute_dtype` / `query_compute_dtype`,
+and `document_encoding_version` -- which namespaces the cache keyspace and gates
+pool membership -- names it too.
+
 Use `compose.gpu.yaml` for the dedicated GPU backend and benchmark representative
 rendered texts with `scripts/bench_splade_backend.py` before approving a full run.
 
