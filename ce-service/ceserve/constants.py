@@ -62,9 +62,12 @@ NUM_LABELS = 4
 LABELS = ("E", "S", "C", "I")
 
 # `train_ce.py::GAINS`. ce_score = sum(softmax(logits) * GAINS) / 4 -- the number
-# the offline stack ranks by, so serving has to produce the same one or the
-# agreement check in tests/test_ce_score_agreement.py is comparing two different
-# quantities and cannot fail usefully.
+# the offline stack ranks by, so serving has to produce the same one.
+#
+# ⚠️ Nothing checks that empirically. tests/test_ce_score_agreement.py, which
+# would compare served scores against `train_ce.py --score-only` on the same
+# pairs, has never been written (MXG-219). What IS checked is the mapping these
+# gains are applied under: `scorer.assert_label_order`, MXG-204.
 GAINS = np.array([4.0, 2.0, 1.0, 0.0], dtype=np.float64)
 
 # The rendering profile the article ids were produced from: everything the ES

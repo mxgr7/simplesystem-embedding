@@ -253,8 +253,12 @@ the same contract an H100 would.
 loop `CeTokenizer.encodePacked → ES binary → ce-service` without either side
 trusting a description of the other. It skips if `/next-gen` is not checked out.
 
-`tests/test_ce_score_agreement.py` is the deploy gate and needs the box: it
-compares served scores against `train_ce.py --score-only` on the same pairs.
+⚠️ **`tests/test_ce_score_agreement.py` does not exist.** It is meant to be the
+deploy gate — served scores against `train_ce.py --score-only` on the same
+pairs, which needs the box — and it has never been written. Nothing here
+currently compares a served number to a trained number: the suite above covers
+the request contract, a frozen-input splice replay and the boot assertions.
+MXG-219.
 
 `ceserve/bench_ce_service.py` is the client-side k-sweep — run it idle **and**
 with splade under load, since these are co-tenants.
