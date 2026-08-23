@@ -147,7 +147,48 @@ def assert_digests(model_dir):
         )
 
 
-# ---------------------------------------------------- assertions 5, 6, 7, 11 --
+# ------------------------------------------------ assertions 5, 6, 7, 11, 15 --
+
+def assert_label_order(id2label):
+    """What the four logit columns MEAN, not just how many there are.
+
+    `ce_score` is `sum(softmax(logits) * GAINS) / 4` with GAINS applied
+    positionally against LABELS, and `_build_response` reads `probs[i][0]` as
+    `ce_p_e`. That index -> class mapping is a training convention
+    (`train_ce.py::LAB2ID`); until MXG-204 no shipped artifact recorded it, and
+    a head exported under a permuted order would produce four well-formed
+    probabilities, a ce_score in the right range and a plausible ce_p_e. The
+    fine ranker would consume p_I as p_E and the five-input filter would
+    threshold on it. Nothing downstream can tell, which is the whole reason
+    this file exists.
+
+    Accepts str or int keys: `config.json` gives strings, transformers' loaded
+    config gives ints.
+    """
+    ordered = [id2label.get(str(i), id2label.get(i))
+               for i in range(NUM_LABELS)]
+    if ordered == list(LABELS):
+        return
+    if all(name is None for name in ordered):
+        detail = ("config.json has no id2label at all, so nothing in this "
+                  "checkpoint says which column is which")
+    elif ordered == [f"LABEL_{i}" for i in range(NUM_LABELS)]:
+        detail = ("config.json carries the generic LABEL_0..LABEL_3 that "
+                  "`num_labels=4` leaves behind — it records the arity and "
+                  "not the mapping")
+    else:
+        detail = f"config.json id2label reads {ordered} left to right"
+    raise RuntimeError(
+        f"{detail}, but this build scores positionally as {list(LABELS)} with "
+        f"GAINS={GAINS.tolist()} and serves probs[0] as ce_p_e "
+        "(CE_MODEL_DIR). A head whose columns are in another order returns "
+        "four well-formed probabilities and a plausible ce_score, the fine "
+        "ranker consumes p_I as p_E, and the filter thresholds on it — no "
+        "error anywhere. Stamp the mapping with pipeline/stamp_ce_labels.py; "
+        "config.json is not covered by CE_MODEL_SHA256, so this needs no "
+        "re-ship of the weights. MXG-204."
+    )
+
 
 def assert_config(config_dict, max_len):
     architectures = config_dict.get("architectures") or []
@@ -174,6 +215,7 @@ def assert_config(config_dict, max_len):
         raise RuntimeError(
             f"GAINS has {len(GAINS)} entries but the head has {n_labels} labels"
         )
+    assert_label_order(labels)
     for field, expected in (("pad_token_id", PAD), ("bos_token_id", BOS),
                             ("eos_token_id", EOS)):
         actual = config_dict.get(field)
@@ -508,6 +550,7 @@ __all__ = [
     "assert_config",
     "assert_digests",
     "assert_golden_fixture",
+    "assert_label_order",
     "assert_query_contract",
     "ce_score",
     "checkpoint_sha256",

@@ -194,6 +194,14 @@ services:
       # Versioned per checkpoint so the incumbent's directory
       # (/data/ce-service/model, holding d_mxg84_new108t_mxg66_s68) survives as
       # the rollback target. Rollback = revert this commit + `up -d`.
+      #
+      # ⚠️ BOTH directories need the stamped id2label (MXG-204). The boot
+      # assertion refuses a checkpoint whose config.json still reads
+      # LABEL_0..LABEL_3, so an unstamped ROLLBACK dir makes rollback itself
+      # fail to start -- found at the moment you least want to find it. Run
+      # `stamp_ce_labels.py --apply` against both before starting any image
+      # built after MXG-204; config.json is not covered by CE_MODEL_SHA256, so
+      # neither digest moves.
       - ${CE_MODEL_DIR:-/data/ce-service/model-d_mxg177_d_mxg66_s66-2026-08-20}:/model:ro
       # CUDA torch + tokenizers + safetensors, kept off the 88%-full root fs.
       - ${CE_RUNTIME_DIR:-/data/ce-service/runtime}:/runtime:ro

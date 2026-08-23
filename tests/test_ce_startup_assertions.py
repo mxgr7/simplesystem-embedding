@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "ce-service"))
 
 from ceserve import scorer as S  # noqa: E402
-from ceserve.constants import BACKBONE, VOCAB_SIZE  # noqa: E402
+from ceserve.constants import BACKBONE, LABELS, VOCAB_SIZE  # noqa: E402
 
 
 def _config_dict(**overrides):
@@ -31,7 +31,10 @@ def _config_dict(**overrides):
         "architectures": [BACKBONE],
         "vocab_size": VOCAB_SIZE,
         "num_labels": 4,
-        "id2label": {"0": "LABEL_0", "1": "LABEL_1", "2": "LABEL_2", "3": "LABEL_3"},
+        # The real mapping, not `num_labels=4`'s LABEL_0..LABEL_3 leftovers.
+        # MXG-204: a shipped checkpoint has to say which column is which.
+        "id2label": {"0": "E", "1": "S", "2": "C", "3": "I"},
+        "label2id": {"E": 0, "S": 1, "C": 2, "I": 3},
         "pad_token_id": 1,
         "bos_token_id": 0,
         "eos_token_id": 2,
@@ -162,6 +165,72 @@ def test_special_ids_failure_explains_why_it_matters():
         "a checkpoint with different specials splices a syntactically valid "
         "sequence — the message has to say so"
     )
+
+
+# ------------------------------------------------------- 15. the label order --
+#
+# The count check above says the head has four columns. These say what the four
+# columns MEAN. A permuted head returns four well-formed probabilities, a
+# ce_score in range and a plausible ce_p_e; the fine ranker consumes p_I as p_E
+# and the filter thresholds on it, with no error anywhere. MXG-204.
+
+def test_label_order_accepts_the_stamped_mapping():
+    S.assert_label_order({"0": "E", "1": "S", "2": "C", "3": "I"})
+    # transformers' loaded config uses int keys; config.json uses strings.
+    S.assert_label_order({0: "E", 1: "S", 2: "C", 3: "I"})
+
+
+def test_permuted_label_order_is_refused():
+    """The failure this assertion exists for: four correct classes, wrong
+    columns. Every other check in the file passes on this checkpoint."""
+    with pytest.raises(RuntimeError) as exc:
+        S.assert_config(
+            _config_dict(id2label={"0": "I", "1": "C", "2": "S", "3": "E"}), 192)
+    message = str(exc.value)
+    assert "['I', 'C', 'S', 'E']" in message, (
+        "the message has to show the order it actually found"
+    )
+    assert "CE_MODEL_DIR" in message
+    assert "p_I as p_E" in message, (
+        "naming the consequence is the point — the operator is looking at a "
+        "container that will not start and four probabilities that look fine"
+    )
+
+
+def test_generic_labels_are_refused_and_name_the_repair():
+    """`num_labels=4` leaves LABEL_0..LABEL_3 behind. That records the arity and
+    not the mapping, so it is exactly as uninformative as no labels at all —
+    and it is the shape every checkpoint predating MXG-204 carries."""
+    generic = {str(i): f"LABEL_{i}" for i in range(4)}
+    with pytest.raises(RuntimeError) as exc:
+        S.assert_config(_config_dict(id2label=generic), 192)
+    message = str(exc.value)
+    assert "generic LABEL_0..LABEL_3" in message
+    assert "stamp_ce_labels.py" in message, "point at the repair"
+    assert "CE_MODEL_SHA256" in message, (
+        "config.json is not digest-covered; the message must say so or the "
+        "reader will assume the checkpoint has to be rebuilt and re-shipped"
+    )
+
+
+def test_absent_id2label_is_refused_even_when_num_labels_is_right():
+    """`num_labels: 4` with no `id2label` passes the count check — it used to
+    be the whole of it."""
+    config = _config_dict()
+    config.pop("id2label")
+    config.pop("label2id")
+    with pytest.raises(RuntimeError) as exc:
+        S.assert_config(config, 192)
+    assert "no id2label at all" in str(exc.value)
+
+
+def test_label_order_check_follows_constants_not_a_literal():
+    """If LABELS is ever reordered, GAINS and this assertion must move with it.
+    Pinning the test to a literal would let the two drift apart silently."""
+    S.assert_label_order({str(i): name for i, name in enumerate(LABELS)})
+    with pytest.raises(RuntimeError):
+        S.assert_label_order(
+            {str(i): name for i, name in enumerate(reversed(LABELS))})
 
 
 @pytest.mark.parametrize("max_len", [4, 7, 513, 1024])

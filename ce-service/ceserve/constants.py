@@ -52,6 +52,13 @@ TOKENIZER_VERSION = os.environ.get(
 BACKBONE = "XLMRobertaForSequenceClassification"
 VOCAB_SIZE = 250_002
 NUM_LABELS = 4
+# ⚠️ POSITIONAL, and the position is the contract. GAINS below and
+# `app._build_response` (`probs[0]` -> `ce_p_e`) both index by it, so a head
+# whose columns are in another order scores plausibly and wrongly with no error
+# anywhere. Since MXG-204 the checkpoint says so itself: `train_ce.py` writes
+# this mapping into `config.json`'s id2label and `scorer.assert_label_order`
+# refuses to serve a checkpoint that disagrees. Reordering this tuple means
+# reordering GAINS and re-stamping every checkpoint.
 LABELS = ("E", "S", "C", "I")
 
 # `train_ce.py::GAINS`. ce_score = sum(softmax(logits) * GAINS) / 4 -- the number

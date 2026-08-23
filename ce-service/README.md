@@ -195,13 +195,27 @@ The incumbent's directory (`/data/ce-service/model/`, holding
 target: rollback is `git revert` of the pin commit + `up -d`. Do not
 `docker image prune` on this box.
 
+⚠️ **Both model dirs must carry the stamped `id2label` before any image built
+after MXG-204 is started** — the live one *and* the rollback one. The boot
+assertion refuses a checkpoint whose `config.json` predates the stamp, so an
+unstamped rollback dir turns `git revert` + `up -d` into a service that will not
+start, discovered at the worst possible moment. It is one file per directory:
+
+```bash
+python3 stamp_ce_labels.py /data/ce-service/model-d_mxg177_d_mxg66_s66-2026-08-20
+python3 stamp_ce_labels.py /data/ce-service/model
+# then --apply, and re-verify both digests from inside the container:
+# config.json is not covered by them, so they must be unchanged.
+```
+
 `docker compose -f compose.t4.yaml --env-file .env up -d`.
 
 ## Startup assertions
 
 The process refuses to start on any of these, with a message naming the env var
 that pins it: nested/incomplete model dir · weights sha256 · tokenizer sha256 ·
-blank tokenizer version · backbone / vocab / label count / **special ids**
+blank tokenizer version · backbone / vocab / label count / **label order** /
+**special ids**
 (`assemble` hardcodes `BOS=0, EOS=2, PAD=1`; a checkpoint with different ones
 would splice a syntactically valid, semantically wrong sequence) · `max_len`
 inside `[8, max_position_embeddings − 2]` · CPU without `CE_ALLOW_CPU` ·
@@ -210,6 +224,17 @@ compute capability < 7.0 · **bf16 without native bf16** · an inconsistent
 **the query contract** (the fold_de training table and a no-prefix encode
 through the loaded tokenizer — the golden fixture stores precomputed queryIds,
 so it alone would not catch a resurrected prefix) · the warmup forward.
+
+The **label order** check is `id2label` reading `E, S, C, I` left to right, and
+it is separate from the label *count* on purpose. `ce_score` applies
+`GAINS = [4, 2, 1, 0]` positionally and `/rerank` serves `probs[0]` as `ce_p_e`;
+a head exported under a permuted order returns four well-formed probabilities, a
+`ce_score` in the right range and a plausible `ce_p_e`, the fine ranker consumes
+p_I as p_E and the five-input filter thresholds on it — no error anywhere.
+`train_ce.py` stamps the mapping since MXG-204; older checkpoints are repaired
+in place with `pipeline/stamp_ce_labels.py` (stdlib only, so it runs on the box).
+`config.json` is covered by neither `CE_MODEL_SHA256` nor
+`CE_TOKENIZER_SHA256`, so the repair needs no re-ship of the weights.
 
 The bf16 guard exists because on sm_75 `torch.cuda.is_bf16_supported()` answers
 **True** — it defaults to `including_emulation=True` — so without it the process

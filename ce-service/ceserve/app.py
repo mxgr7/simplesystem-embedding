@@ -282,6 +282,9 @@ def _build_response(scorer, query_ids, ids, counts, probs, skipped, max_len,
     nq = int(min(query_ids.shape[0], max(1, max_len - HEAD_EXTRA - 1)))
     budget = max(1, max_len - nq - HEAD_EXTRA)
     scores = ce_score(probs) if len(ids) else np.zeros(0)
+    # probs[i][0..3] is E/S/C/I positionally — the same convention GAINS is
+    # applied under. `scorer.assert_label_order` is what makes that a checked
+    # fact about the loaded checkpoint rather than an assumption (MXG-204).
     results = [
         {
             "id": cid,
