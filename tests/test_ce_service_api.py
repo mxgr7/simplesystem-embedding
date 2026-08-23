@@ -2,9 +2,10 @@
 
 No checkpoint, no GPU: what is under test here is the request/response contract
 and the disposition of every candidate, not the model. The model's own numbers
-are covered by `test_ce_splice_parity.py` (the splice) and — in intent only —
-`test_ce_score_agreement.py` (the scores), which has never been written
-(MXG-219). Nothing currently compares a served score to a trained one.
+are covered by `test_ce_splice_parity.py` (the splice) and, from the research
+repo and against a running service, `pipeline/ce_service_agreement.py` (the
+scores). The latter used to be cited here as `test_ce_score_agreement.py`, a
+path in this repo that has never existed — MXG-219.
 
 The contract this pins, in one sentence: **every input id comes back exactly
 once, in `results` or in `skipped`, in request order**. A response that silently

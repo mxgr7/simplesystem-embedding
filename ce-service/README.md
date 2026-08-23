@@ -210,6 +210,22 @@ python3 stamp_ce_labels.py /data/ce-service/model
 
 `docker compose -f compose.t4.yaml --env-file .env up -d`.
 
+Then, **before the deploy is called done**, run the agreement gate from the
+research repo against the service you just started:
+
+```bash
+/workspace/.venv/bin/python pipeline/ce_service_agreement.py \
+    --url http://127.0.0.1:8140 --pairs 2000
+```
+
+It scores the same pairs two ways — through the service over HTTP from the
+blobs stored in ES, and through the offline scorer in-process from the same
+checkpoint — and exits non-zero on a disagreement in magnitude or in ranking. A
+wrong splice, a wrong decode, a wrong dtype and a wrong score formula all
+produce plausible scores rather than an error, so this is the only step that
+can tell you the deployed service computes the number the offline stack ranks
+by. It is a step of the deploy, not an optional check afterwards. MXG-204.
+
 ## Startup assertions
 
 The process refuses to start on any of these, with a message naming the env var
@@ -253,12 +269,15 @@ the same contract an H100 would.
 loop `CeTokenizer.encodePacked → ES binary → ce-service` without either side
 trusting a description of the other. It skips if `/next-gen` is not checked out.
 
-⚠️ **`tests/test_ce_score_agreement.py` does not exist.** It is meant to be the
-deploy gate — served scores against `train_ce.py --score-only` on the same
-pairs, which needs the box — and it has never been written. Nothing here
-currently compares a served number to a trained number: the suite above covers
-the request contract, a frozen-input splice replay and the boot assertions.
-MXG-219.
+The deploy gate is **`pipeline/ce_service_agreement.py`, in the research repo,
+not a test in this one** — it scores the same pairs through the service over
+HTTP and through the offline scorer in-process, and diffs. It needs the box, the
+live index and a checkpoint, which is why it is a script and not a `pytest`
+member. Nothing under `tests/` here compares a served number to a trained one;
+that check lives there. Run it as a named step of every deploy — see
+§Deployment. (Earlier revisions of this file, `constants.py` and
+`tests/test_ce_service_api.py` all pointed at a `tests/test_ce_score_agreement.py`
+that has never existed; the gate was real, the path was not. MXG-219.)
 
 `ceserve/bench_ce_service.py` is the client-side k-sweep — run it idle **and**
 with splade under load, since these are co-tenants.
