@@ -11,6 +11,13 @@ MXG-203 added the third one, a floor below the first two: a backend can disagree
 with *itself*. `/encode` and `/encode-packed` are one encoder under one
 `document_encoding_version`, so the pool's checks are only worth what the
 agreement between the two transports is worth.
+
+The transport tests below use a tiny checkpoint stub on CPU. The real-checkpoint
+probe in `test_splade_checkpoint_parity.py` self-skips unless
+`SPLADE_PARITY_CHECKPOINT` names a checkpoint. The CUDA backstop is the box-side
+`/workspace/pipeline/mxg111_dtype_parity.py compare --mode pair --tag <candidate>
+--against prodt4` agreement gate. A green stub run does not claim bit-identical
+CUDA output.
 """
 import asyncio
 import importlib
