@@ -37,6 +37,9 @@ class HealthPolicy:
         # Hard ceiling on one probe. httpx timeouts do not cover every way a
         # poisoned connection pool can block, so the loop enforces its own.
         probe_round_timeout_s=10.0,
+        # Run one real query encode every N probe rounds. Metadata proves
+        # identity, while this canary proves the shared compute path still works.
+        compute_probe_every=12,
         # Minimum spacing between half-open trial requests, per backend.
         half_open_interval_s=5.0,
         # How long a backend stays unhealthy before its client is replaced.
@@ -51,6 +54,9 @@ class HealthPolicy:
         self.probe_interval_s = probe_interval_s
         self.probe_timeout_s = probe_timeout_s
         self.probe_round_timeout_s = probe_round_timeout_s
+        if compute_probe_every < 1:
+            raise ValueError("compute_probe_every must be at least 1")
+        self.compute_probe_every = compute_probe_every
         self.half_open_interval_s = half_open_interval_s
         self.client_recycle_after_s = client_recycle_after_s
         self.pool_timeout_recycle_after = pool_timeout_recycle_after
@@ -120,6 +126,12 @@ class Backend:
         # "restored after X" line.
         self.unhealthy_since = None
         self.last_probe_error = None
+        # Monotonic count of real healthy/unhealthy transitions. The initial
+        # registration confirmation is not an incident and does not count.
+        self.health_transitions = 0
+        # A failed compute canary stays latched. Metadata-only probes must not
+        # promote a backend that can identify itself but cannot encode.
+        self.compute_probe_failed = False
         # Half-open bookkeeping: at most one trial in flight per backend, at most
         # one per `half_open_interval_s`.
         self.trial_inflight = False
@@ -181,6 +193,7 @@ class Backend:
                 # First confirmation after being added: not an incident.
                 log.info("backend %s (%s) healthy (via %s)", self.id, self.url, source)
             else:
+                self.health_transitions += 1
                 # WARNING, not INFO: a restore line nobody reads is how a
                 # four-hour outage gets diagnosed from the wrong end.
                 log.warning(
@@ -190,8 +203,12 @@ class Backend:
         self.healthy = True
         self.unhealthy_since = None
 
-    def mark_failure(self, exc=None, source="request"):
+    def mark_failure(self, exc=None, source="request", immediate=False):
         self.consecutive_failures += 1
+        if immediate:
+            self.consecutive_failures = max(
+                self.consecutive_failures, self.health.unhealthy_after
+            )
         if isinstance(exc, httpx.PoolTimeout):
             self.consecutive_pool_timeouts += 1
         else:
@@ -202,6 +219,7 @@ class Backend:
             )
         if self.consecutive_failures >= self.health.unhealthy_after:
             if self.healthy:
+                self.health_transitions += 1
                 log.warning(
                     "backend %s (%s) marked unhealthy after %d failures (%s: %s)",
                     self.id, self.url, self.consecutive_failures, source,
@@ -309,13 +327,29 @@ class Backend:
                 self.metadata = previous
                 raise
 
-    async def probe(self):
+    async def probe(self, check_compute=False):
         try:
             await self.verify()
-            self.mark_success(source="probe")
         except Exception as exc:
             self.mark_failure(exc, source="probe")
-            log.debug("backend %s probe failed: %s", self.id, exc)
+            log.debug("backend %s metadata probe failed: %s", self.id, exc)
+            return
+
+        if check_compute or self.compute_probe_failed:
+            try:
+                vectors = await self.encode(["splade health probe"], document=False)
+                if not vectors[0]:
+                    raise ValueError("compute probe returned an empty vector")
+            except Exception as exc:
+                self.compute_probe_failed = True
+                # A health canary is already the confirmation. Demote on its
+                # first failure rather than waiting for unrelated traffic.
+                self.mark_failure(exc, source="compute-probe", immediate=True)
+                log.debug("backend %s compute probe failed: %s", self.id, exc)
+                return
+            self.compute_probe_failed = False
+
+        self.mark_success(source="probe")
 
     async def encode(self, texts, document=True):
         admission = self.document_sem if document else self.query_sem
@@ -351,6 +385,7 @@ class Backend:
             "unhealthy_for_s": round(self.unhealthy_for(), 1),
             "last_probe_error": self.last_probe_error,
             "client_generation": self.client_generation,
+            "health_transitions": self.health_transitions,
         }
 
 
@@ -368,6 +403,7 @@ class BackendPool:
         # forever and the outage reads as steady state.
         self.probe_loop_last_iteration_at = 0.0
         self.probe_loop_errors = 0
+        self.probe_rounds = 0
 
     async def add(
         self,
@@ -619,9 +655,12 @@ class BackendPool:
                     # verify() first: a trial that promoted on a bare /encode
                     # success would readmit a backend serving a different
                     # checkpoint, which is the one thing this pool exists to stop.
+                    # Promotion waits until the encode succeeds too, so a latched
+                    # compute failure cannot flap healthy between the two calls.
                     await backend.verify()
-                    backend.mark_success(source="trial")
                 vectors = await backend.encode(chunk, document=document)
+                if trial:
+                    backend.compute_probe_failed = False
                 backend.mark_success(source="trial" if trial else "request")
                 return vectors
             except Exception as exc:
@@ -711,7 +750,11 @@ class BackendPool:
                     for backend in backends:
                         if backend.recycle_due(now):
                             backend.recycle_client()
-                    await self._probe_round(backends)
+                    self.probe_rounds += 1
+                    check_compute = (
+                        self.probe_rounds % self.health.compute_probe_every == 0
+                    )
+                    await self._probe_round(backends, check_compute)
                 self.probe_loop_last_iteration_at = time.time()
             except asyncio.CancelledError:
                 raise
@@ -722,13 +765,16 @@ class BackendPool:
                 self.probe_loop_last_iteration_at = time.time()
                 log.exception("probe round failed -- continuing")
 
-    async def _probe_round(self, backends):
+    async def _probe_round(self, backends, check_compute=False):
         await asyncio.gather(
-            *(self._bounded_probe(backend) for backend in backends),
+            *(
+                self._bounded_probe(backend, check_compute)
+                for backend in backends
+            ),
             return_exceptions=True,
         )
 
-    async def _bounded_probe(self, backend):
+    async def _bounded_probe(self, backend, check_compute=False):
         """One probe, bounded outside the client.
 
         Per backend rather than one budget shared across the round: a shared
@@ -740,7 +786,7 @@ class BackendPool:
         """
         try:
             await asyncio.wait_for(
-                backend.probe(), self.health.probe_round_timeout_s
+                backend.probe(check_compute), self.health.probe_round_timeout_s
             )
         except asyncio.TimeoutError:
             self.probe_loop_errors += 1

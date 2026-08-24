@@ -14,9 +14,13 @@ window and look perfectly healthy.
 
 MXG-144.
 """
+import asyncio
 import base64
 import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -132,6 +136,7 @@ def client(scorer, monkeypatch):
     monkeypatch.setenv("CE_ALLOW_CPU", "1")
     monkeypatch.setenv("CE_DEVICE", "cpu")
     monkeypatch.setattr(appmod, "CrossEncoderScorer", lambda config: scorer)
+    monkeypatch.setattr(appmod, "_exit_process", lambda: None)
     with TestClient(appmod.app) as test_client:
         yield test_client
 
@@ -140,6 +145,7 @@ def client(scorer, monkeypatch):
 def keyed_client(scorer, monkeypatch):
     monkeypatch.setenv("API_KEY", "s3cret")
     monkeypatch.setattr(appmod, "CrossEncoderScorer", lambda config: scorer)
+    monkeypatch.setattr(appmod, "_exit_process", lambda: None)
     with TestClient(appmod.app) as test_client:
         yield test_client
 
@@ -425,6 +431,68 @@ def test_at_capacity_returns_429(client, monkeypatch):
     assert response.json()["error"] == "at_capacity"
 
 
+def test_timeout_keeps_gpu_capacity_until_the_worker_stops(client, scorer):
+    started = threading.Event()
+    release = threading.Event()
+    score = scorer.score
+
+    def blocked_score(*args):
+        started.set()
+        assert release.wait(1)
+        return score(*args)
+
+    scorer.score = blocked_score
+    client.app.state.config.max_inflight = 1
+    client.app.state.config.request_budget_s = 0.01
+
+    response = post(client)
+    assert response.status_code == 504
+    assert started.is_set()
+    assert client.app.state.inflight == 1, (
+        "the response timed out, but its GPU worker still owns the slot"
+    )
+
+    refused = post(client)
+    assert refused.status_code == 429
+    assert scorer.calls == 0, "no second forward may start over the orphan"
+
+    release.set()
+    deadline = time.monotonic() + 1
+    while client.app.state.inflight and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.app.state.inflight == 0
+    assert scorer.calls == 1
+
+
+def test_failure_after_timeout_still_requests_a_restart(client, scorer):
+    started = threading.Event()
+    release = threading.Event()
+
+    def late_failure(*args):
+        started.set()
+        assert release.wait(1)
+        raise RuntimeError("late CUDA failure")
+
+    scorer.score = late_failure
+    client.app.state.config.request_budget_s = 0.01
+
+    response = post(client)
+    assert response.status_code == 504
+    assert started.is_set()
+    assert not client.app.state.restart_requested.is_set()
+
+    release.set()
+    deadline = time.monotonic() + 1
+    while (
+        not client.app.state.restart_requested.is_set()
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    assert client.app.state.restart_requested.is_set()
+    assert scorer.degraded
+    assert client.app.state.inflight == 0
+
+
 def test_inference_failure_degrades_the_service(client, scorer):
     scorer.raises = RuntimeError("CUDA error: an illegal memory access")
     response = post(client)
@@ -434,6 +502,7 @@ def test_inference_failure_degrades_the_service(client, scorer):
         "a poisoned CUDA context must stop the process answering — one that "
         "keeps going serves garbage"
     )
+    assert client.app.state.restart_requested.is_set()
     assert client.get("/readyz").status_code == 503
     assert post(client).status_code == 503
     assert post(client).json()["error"] == "model_not_ready"
@@ -443,6 +512,39 @@ def test_inflight_is_released_after_a_failure(client, scorer):
     scorer.raises = RuntimeError("boom")
     post(client)
     assert client.app.state.inflight == 0
+
+
+def test_restart_watchdog_exits_after_degradation(monkeypatch):
+    called = []
+    app = SimpleNamespace(
+        state=SimpleNamespace(restart_requested=asyncio.Event())
+    )
+    monkeypatch.setattr(appmod, "RESTART_GRACE_S", 0)
+    monkeypatch.setattr(appmod, "_exit_process", lambda: called.append(True))
+
+    async def run():
+        task = asyncio.create_task(appmod._restart_when_requested(app))
+        app.state.restart_requested.set()
+        await task
+
+    asyncio.run(run())
+    assert called == [True]
+
+
+def test_request_outcomes_separate_scoring_declines_and_errors(client):
+    counters = {
+        outcome: appmod.RERANKS.labels(outcome)
+        for outcome in ("scored", "ce_declined", "ce_error")
+    }
+    before = {name: counter._value.get() for name, counter in counters.items()}
+
+    assert post(client).status_code == 200
+    assert post(client, query="́̈").status_code == 200
+    assert post(client, query="").status_code == 400
+
+    assert counters["scored"]._value.get() == before["scored"] + 1
+    assert counters["ce_declined"]._value.get() == before["ce_declined"] + 1
+    assert counters["ce_error"]._value.get() == before["ce_error"] + 1
 
 
 # ------------------------------------------------------------ the endpoints --
@@ -475,7 +577,8 @@ def test_metrics_exposes_the_runtime_collector(client):
     post(client)
     text = client.get("/metrics").text
     for name in ("ce_service_ready", "ce_service_requests_total",
-                 "ce_service_candidates_total", "ce_service_padded_width",
+                 "ce_service_rerank_total", "ce_service_candidates_total",
+                 "ce_service_padded_width",
                  "ce_service_candidates_per_request"):
         assert name in text, name
 

@@ -22,6 +22,10 @@ services:
     ports:
       - "8080:80"
     volumes:
+      # Identity cannot be checked through TEI. Verified on the live 1.8.3
+      # replica on 2026-08-24: /info reports model_id "/model" and model_sha
+      # null. Any checkpoint mounted here reports the same values, so pinning
+      # "/model" at boot would certify the mount path rather than the model.
       - ${TEI_MODEL_DIR:-/data/tei-models/useful-cub-58-st}:/model:ro
     # Modern compose GPU access via nvidia-container-toolkit. Requires
     # `nvidia-ctk runtime configure --runtime=docker` on the host.
@@ -62,6 +66,10 @@ services:
     ports:
       - "8081:80"
     volumes:
+      # Identity cannot be checked through TEI. Verified on the live 1.9.3
+      # replica on 2026-08-24: /info reports model_id "/model", served_model_name
+      # "/model", and model_sha null. Those values do not identify the mounted
+      # useful-cub checkpoint.
       - ${TEI_MODEL_DIR:-/data/tei-models/useful-cub-58-st}:/model:ro
     deploy:
       resources:

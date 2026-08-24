@@ -147,6 +147,18 @@ groups:
           description: "The frontend on :8137 has no working encoder. Indexing cannot commit a document without a SPLADE vector."
           action: "curl -s localhost:8137/readyz; docker logs --tail 50 splade-service-splade-backend-t4-1"
 
+      - alert: SpladeBackendFlapping
+        # The health gauge can return to 1 between scrapes and hide both edges.
+        # The transition counter preserves every state change in the process.
+        expr: increase(splade_service_backend_health_transitions_total[15m]) >= 4
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SPLADE backend {{ $labels.backend }} is repeatedly changing health"
+          description: "At least four healthy/unhealthy transitions occurred in 15 minutes. A backend that identifies itself but cannot encode must stay out of rotation instead of flapping back after metadata probes."
+          action: "curl -s localhost:8137/admin/backends | python3 -m json.tool; docker logs --tail 200 splade-service-splade-service-t4-1 | grep -E 'marked unhealthy|restored|compute probe'"
+
       - alert: SpladeNoBackendAtAll
         # Only the absent case -- a backend that is registered but failing is
         # SpladeBackendUnhealthy above, and paging twice for one event is how a board
@@ -280,17 +292,16 @@ groups:
           action: "docker compose -f /data/ce-service/src/compose.t4.yaml ps; ss -lntp | grep 814"
 
       - alert: CeServiceDegraded
-        # Set by an inference exception. A CUDA OOM or an illegal memory access poisons the
-        # context, and a process that keeps answering afterwards serves garbage, so the service
-        # marks itself degraded and stops accepting work rather than continuing.
+        # A failed forward now exits the process and Compose restarts it. Remaining degraded for
+        # one minute means that restart path failed, rather than that an operator has not noticed.
         expr: ce_service_degraded == 1
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "ce-service marked itself degraded after an inference failure"
-          description: "A forward raised; the CUDA context is presumed poisoned. It will 503 until restarted."
-          action: "docker logs --tail 100 src-ce-service-t4-1 | grep -A20 'inference failed'; then restart it."
+          summary: "ce-service stayed degraded instead of restarting"
+          description: "A forward raised and the CUDA context is presumed poisoned. The process should exit within 100 ms, so this state persisting for one minute means the restart path failed."
+          action: "docker logs --tail 100 src-ce-service-t4-1 | grep -A20 'inference failed'; docker inspect src-ce-service-t4-1 | grep -E 'RestartCount|RestartPolicy'"
 
       - alert: CeFineRankerBudgetBreached
         # The 150 ms fine-ranker budget, at the window the query service actually sends.

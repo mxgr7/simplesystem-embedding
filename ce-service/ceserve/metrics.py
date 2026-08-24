@@ -17,6 +17,11 @@ LATENCY_BUCKETS = (0.005, 0.01, 0.02, 0.04, 0.08, 0.12, 0.15, 0.25, 0.5, 1.0)
 REQUESTS = Counter(
     "ce_service_requests_total", "Rerank requests by response status", ("status",)
 )
+RERANKS = Counter(
+    "ce_service_rerank_total",
+    "Rerank requests by semantic outcome",
+    ("outcome",),  # scored | ce_declined | ce_error
+)
 CANDIDATES = Counter(
     "ce_service_candidates_total",
     "Candidates by disposition",

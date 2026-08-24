@@ -127,9 +127,18 @@ a temperature-scaled score is recoverable from `ce_p_*` and irrecoverable from
 
 Errors are `{"error": code, "detail": …}`: 400 `invalid_request` (request
 *shape* only), 401, 413 `too_many_candidates`, 429 `at_capacity`, 503
-`model_not_ready`, 504 `request_budget_exhausted`, 500 `inference_failed` (which
-also marks the service degraded — a CUDA OOM poisons the context and a process
-that keeps answering serves garbage).
+`model_not_ready`, 504 `request_budget_exhausted`, 500 `inference_failed`. An
+inference failure marks the process degraded and wakes a restart watchdog. The
+watchdog exits with status 1 after the error response has had 100 ms to leave,
+then Compose's `restart: unless-stopped` starts a clean CUDA context.
+
+`ce_service_rerank_total` separates `scored`, `ce_declined` and `ce_error`.
+An empty folded query and a response with skipped candidates are declines, not
+failures. `ce_service_requests_total{status}` remains the HTTP-status meter.
+
+A request timeout does not release `ce_service_inflight` while the scorer thread
+is still running. The forward task owns that slot until the worker stops, so a
+504 cannot admit another GPU forward above `MAX_INFLIGHT`.
 
 A **single** corrupt blob is a `skipped` entry, never a 400: one bad `_source`
 must not fail a 120-candidate window. Only a decode-failure rate above

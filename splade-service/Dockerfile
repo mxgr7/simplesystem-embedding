@@ -10,7 +10,9 @@ RUN uv pip install --system --no-cache \
       "prometheus-fastapi-instrumentator>=7,<8"
 COPY . /app
 EXPOSE 8137
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--no-access-log"]
+# A high HTTP airbag above app-level encoder admission. This bounds cache hits
+# and waiting requests without rejecting priority queries behind document work.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--limit-concurrency", "512", "--no-access-log"]
 
 FROM frontend AS backend
 ENV PYTHONPATH=/runtime

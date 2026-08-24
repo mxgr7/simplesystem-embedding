@@ -54,6 +54,7 @@ class StubBackend:
 
     def __init__(self, mode="ok", metadata_overrides=None):
         self.mode = mode
+        self.encode_mode = None
         self.metadata_overrides = metadata_overrides or {}
         self.metadata_calls = 0
         self.encode_calls = 0
@@ -70,9 +71,10 @@ class StubBackend:
             self.metadata_calls += 1
         else:
             self.encode_calls += 1
-        if self.mode == "hang":
+        mode = self.mode if is_metadata or self.encode_mode is None else self.encode_mode
+        if mode == "hang":
             await asyncio.sleep(3600)
-        if self.mode == "fail":
+        if mode == "fail":
             return httpx.Response(503, text="backend down")
         if is_metadata:
             return httpx.Response(200, json=self.payload())
@@ -182,6 +184,42 @@ def test_probe_loop_restores_a_backend_without_traffic():
             stub.mode = "ok"
             assert await _wait_until(lambda: backend.healthy)
             assert stub.encode_calls == 0, "recovery must not need traffic"
+            await pool.aclose()
+
+    asyncio.run(body())
+
+
+def test_compute_failure_stays_demoted_until_an_encode_succeeds():
+    stub = StubBackend()
+
+    async def body():
+        with stubbed(stub):
+            pool = await _make_pool()
+            backend = _only(pool)
+            assert backend.healthy
+
+            stub.encode_mode = "fail"
+            await backend.probe(check_compute=True)
+            assert not backend.healthy
+            assert backend.compute_probe_failed
+            assert backend.health_transitions == 1
+
+            metadata_calls = stub.metadata_calls
+            encode_calls = stub.encode_calls
+            await backend.probe(check_compute=False)
+            assert stub.metadata_calls == metadata_calls + 1
+            assert stub.encode_calls == encode_calls + 1, (
+                "a latched compute failure must re-run the canary every round"
+            )
+            assert not backend.healthy, (
+                "metadata success must not re-promote a compute-broken backend"
+            )
+
+            stub.encode_mode = "ok"
+            await backend.probe(check_compute=False)
+            assert backend.healthy
+            assert not backend.compute_probe_failed
+            assert backend.health_transitions == 2
             await pool.aclose()
 
     asyncio.run(body())

@@ -216,6 +216,7 @@ class StubPool:
                 "draining": False,
                 "inflight": 0,
                 "max_client_batch": 32,
+                "health_transitions": 0,
             }
         ]
 
@@ -500,6 +501,12 @@ def test_config_reads_pool_shape_from_the_environment(monkeypatch):
     assert (default.backend_max_client_batch, default.backend_pool_concurrency) == (64, 3)
 
 
+def test_compute_probe_cadence_is_configurable(monkeypatch):
+    assert config_module.Config().compute_probe_every == 12
+    monkeypatch.setenv("BACKEND_COMPUTE_PROBE_EVERY", "3")
+    assert config_module.Config().compute_probe_every == 3
+
+
 def test_admin_lists_backends(service_client):
     client, _, pool = service_client
     response = client.get("/admin/backends")
@@ -587,6 +594,12 @@ def test_probe_loop_liveness_is_scraped_off_the_pool(service_client):
     assert _metric_lines(client, "splade_service_backend_client_generation{") == [
         'splade_service_backend_client_generation{backend="b1",url="http://backend-1:8138"} 0.0'
     ]
+    assert _metric_lines(
+        client, "splade_service_backend_health_transitions_total{"
+    ) == [
+        "splade_service_backend_health_transitions_total{"
+        'backend="b1",url="http://backend-1:8138"} 0.0'
+    ]
 
 
 def test_backend_healthy_metric_survives_a_short_snapshot(service_client):
@@ -596,6 +609,34 @@ def test_backend_healthy_metric_survives_a_short_snapshot(service_client):
     response = client.get("/metrics")
     assert response.status_code == 200
     assert 'splade_service_backend_healthy{backend="b2",url=""} 0.0' in response.text
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/embed", {"inputs": make_input()}),
+        ("/embed-query", {"inputs": "kuehlschrank"}),
+    ],
+)
+def test_unhandled_encode_errors_are_counted_as_500(
+    monkeypatch, path, payload
+):
+    cache = StubCache()
+    pool = StubPool()
+
+    async def fail_encode(*args, **kwargs):
+        raise ValueError("broken backend response")
+
+    pool.encode = fail_encode
+    monkeypatch.setattr(main, "Config", StubConfig)
+    monkeypatch.setattr(main, "SparseCache", lambda *args: cache)
+    monkeypatch.setattr(main, "BackendPool", lambda *args: pool)
+    counter = main.REQUESTS.labels("500")
+    before = counter._value.get()
+    with TestClient(main.app, raise_server_exceptions=False) as client:
+        response = client.post(path, json=payload)
+    assert response.status_code == 500
+    assert counter._value.get() == before + 1
 
 
 def test_backend_health_collector_unregisters_on_shutdown(monkeypatch):

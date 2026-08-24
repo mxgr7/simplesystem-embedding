@@ -217,6 +217,9 @@ services:
     # numpy array. splade takes 1gb because it batches 64 documents through a
     # tokenizer; this batches ids that arrived pre-tokenized.
     shm_size: 256m
+    # A failed forward wakes the in-process watchdog, which exits status 1 after
+    # the 500 response leaves. This policy then starts a clean CUDA context.
+    # The healthcheck alone cannot restart an unhealthy Compose container.
     restart: unless-stopped
     healthcheck:
       # /readyz, NOT /healthz. MXG-111's lesson: splade-backend kept /health,

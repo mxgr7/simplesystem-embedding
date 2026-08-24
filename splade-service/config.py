@@ -48,6 +48,12 @@ class Config:
         self.probe_round_timeout_s = float(
             os.environ.get("BACKEND_PROBE_ROUND_TIMEOUT_S", "10")
         )
+        # One real one-input query encode per minute at the default five-second probe
+        # cadence. A compute failure latches, so every later round runs the
+        # canary until the backend can encode again.
+        self.compute_probe_every = int(
+            os.environ.get("BACKEND_COMPUTE_PROBE_EVERY", "12")
+        )
         self.unhealthy_after = int(
             os.environ.get("BACKEND_UNHEALTHY_AFTER", "2")
         )

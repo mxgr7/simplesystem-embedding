@@ -167,15 +167,16 @@
     {
       "type": "timeseries",
       "id": 10,
-      "title": "Request rate by status",
-      "description": "429 here is the same capacity gate as SPLADE's, and it has its own alert (CeServiceAtCapacity).",
+      "title": "Request rate by status and outcome",
+      "description": "HTTP status keeps the capacity and error view. The outcome series separates scoring, query declines and CE errors.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
       "targets": [
-        {"expr": "sum by (status) (rate(ce_service_requests_total[1m]))", "legendFormat": "{{status}}", "refId": "A"}
+        {"expr": "sum by (status) (rate(ce_service_requests_total[1m]))", "legendFormat": "status={{status}}", "refId": "A"},
+        {"expr": "sum by (outcome) (rate(ce_service_rerank_total[1m]))", "legendFormat": "outcome={{outcome}}", "refId": "B"}
       ],
       "fieldConfig": {
-        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 25, "stacking": {"mode": "normal"}}},
+        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 12, "stacking": {"mode": "none"}}},
         "overrides": []
       }
     },
@@ -207,7 +208,7 @@
       "type": "timeseries",
       "id": 12,
       "title": "Ready / degraded",
-      "description": "ready = model loaded and warm. degraded = a forward raised and the CUDA context is presumed poisoned, which does not clear by itself.",
+      "description": "ready = model loaded and warm. A forward failure sets degraded briefly, then the process exits and Compose starts a clean CUDA context.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 34},
       "targets": [

@@ -60,7 +60,9 @@ porting the dense wrapper's MXG-159 fix):
   charged as a failure -- httpx's own timeout provably does not bound a wedged
   connection pool. Without this, one silent probe stops recovery for good and
   `splade_service_backend_healthy` freezes at its last value, so the outage reads
-  as steady state.
+  as steady state. Every twelfth round also runs one real query encode. A
+  failed compute canary stays latched, so metadata-only success cannot put a
+  compute-broken backend back into rotation.
 * The HTTP client is recycled after a backend has been unhealthy for
   `BACKEND_CLIENT_RECYCLE_AFTER_S`, or after
   `BACKEND_POOL_TIMEOUT_RECYCLE_AFTER` consecutive `PoolTimeout`s. A poisoned
@@ -79,6 +81,7 @@ unhandled 500, and is counted as `splade_service_requests_total{status="503"}`.
 | `BACKEND_PROBE_INTERVAL_S` | 5 | probe cadence |
 | `BACKEND_PROBE_TIMEOUT_S` | 2 | httpx timeout on one `/metadata` probe |
 | `BACKEND_PROBE_ROUND_TIMEOUT_S` | 10 | hard bound outside httpx; silence is a failure |
+| `BACKEND_COMPUTE_PROBE_EVERY` | 12 | run a one-input query encode every N probe rounds; repeat every round after a failure |
 | `BACKEND_UNHEALTHY_AFTER` | 2 | consecutive failures before a backend leaves the pool |
 | `BACKEND_HALF_OPEN_INTERVAL_S` | 5 | spacing of half-open trials, per backend |
 | `BACKEND_CLIENT_RECYCLE_AFTER_S` | 60 | unhealthy duration before the client is replaced |

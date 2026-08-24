@@ -207,8 +207,11 @@ services:
       # Also mandatory: the frontend->backend hop is credentialed independently
       # of the client-facing one, and the backend is loopback-only anyway.
       BACKEND_API_KEY: ${SPLADE_BACKEND_API_KEY:?set SPLADE_BACKEND_API_KEY}
-    # Admission lives in the app. Uvicorn must not reject queued queries first.
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--no-access-log"]
+    # The app reserves encoder work for queries. Uvicorn's ceiling is therefore
+    # set far above MAX_INFLIGHT so it cannot reject a queued query behind
+    # document work, while still bounding cache hits and requests waiting on the
+    # unauthenticated host-network listener.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8137", "--limit-concurrency", "512", "--no-access-log"]
     depends_on:
       splade-backend-t4:
         condition: service_healthy

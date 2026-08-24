@@ -30,6 +30,8 @@ services:
       # The INNER directory: ship_mxg84.sh nests the run name inside the dated
       # release dir, and resolve_model_dir will tell you so if you get it wrong.
       - ${CE_MODEL_DIR:-/checkpoints/cross-encoder/d_mxg84_new108t_mxg66_s68-2026-08-14/d_mxg84_new108t_mxg66_s68}:/model:ro
+    # The service exits after an inference failure. This policy starts a clean
+    # process; the healthcheck by itself would only mark the container unhealthy.
     restart: unless-stopped
     healthcheck:
       # /readyz, not /healthz: /healthz is liveness only and would go green

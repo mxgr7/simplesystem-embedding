@@ -32,7 +32,11 @@ PUBLIC_PATHS = {"/healthz", "/readyz", "/metadata", "/metrics", "/docs", "/opena
 REQUESTS = Counter("splade_service_requests_total", "Requests", ("status",))
 CACHE_HITS = Counter("splade_service_cache_hits_total", "Cache hits")
 CACHE_MISSES = Counter("splade_service_cache_misses_total", "Cache misses")
-INFLIGHT = Gauge("splade_service_inflight", "Miss requests being processed")
+INFLIGHT = Gauge(
+    "splade_service_inflight",
+    "Document misses and query requests being processed",
+)
+ENCODE_PATHS = {"/embed", "/embed-query"}
 MAX_QUERY_CHARS = 4096
 QUERY_RESERVE = 1
 LOG_THROTTLE_S = 60.0
@@ -104,6 +108,11 @@ class BackendHealthCollector:
             "How many times this backend's HTTP client has been recycled",
             labels=["backend", "url"],
         )
+        transitions = CounterMetricFamily(
+            "splade_service_backend_health_transitions",
+            "Healthy to unhealthy and unhealthy to healthy transitions",
+            labels=["backend", "url"],
+        )
         pool = getattr(self.app.state, "pool", None)
         # `.get` on everything but the id: a KeyError in a collector makes /metrics return 500,
         # which Prometheus reads as the whole job being down -- a false alarm that would mask
@@ -113,9 +122,11 @@ class BackendHealthCollector:
             healthy.add_metric(labels, float(snapshot.get("healthy", False)))
             draining.add_metric(labels, float(snapshot.get("draining", False)))
             generation.add_metric(labels, float(snapshot.get("client_generation", 0)))
+            transitions.add_metric(labels, float(snapshot.get("health_transitions", 0)))
         yield healthy
         yield draining
         yield generation
+        yield transitions
 
         # The freshness of everything above. `healthy` is written only by the
         # probe loop, so a loop that dies leaves it frozen at its last value and
@@ -154,6 +165,7 @@ async def lifespan(app):
             probe_interval_s=config.probe_interval_s,
             probe_timeout_s=config.probe_timeout_s,
             probe_round_timeout_s=config.probe_round_timeout_s,
+            compute_probe_every=config.compute_probe_every,
             half_open_interval_s=config.half_open_interval_s,
             client_recycle_after_s=config.client_recycle_after_s,
             pool_timeout_recycle_after=config.pool_timeout_recycle_after,
@@ -194,23 +206,38 @@ Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 
 @app.middleware("http")
-async def authenticate(request, call_next):
-    if request.url.path in PUBLIC_PATHS:
-        return await call_next(request)
-    config = request.app.state.config
-    expected = (
-        config.admin_api_key or config.api_key
-        if request.url.path.startswith("/admin")
-        else config.api_key
-    )
-    if not expected:
-        return await call_next(request)
-    value = request.headers.get("authorization", "")
-    if value[:7].lower() == "bearer " and secrets.compare_digest(
-        value[7:].strip(), expected
-    ):
-        return await call_next(request)
-    return JSONResponse(status_code=401, content={"detail": "invalid api key"})
+async def authenticate_and_count(request, call_next):
+    """Authenticate, then count exactly one HTTP outcome per encode request."""
+    count_request = request.url.path in ENCODE_PATHS
+    try:
+        if request.url.path in PUBLIC_PATHS:
+            response = await call_next(request)
+        else:
+            config = request.app.state.config
+            expected = (
+                config.admin_api_key or config.api_key
+                if request.url.path.startswith("/admin")
+                else config.api_key
+            )
+            value = request.headers.get("authorization", "")
+            authorized = not expected or (
+                value[:7].lower() == "bearer "
+                and secrets.compare_digest(value[7:].strip(), expected)
+            )
+            response = (
+                await call_next(request)
+                if authorized
+                else JSONResponse(
+                    status_code=401, content={"detail": "invalid api key"}
+                )
+            )
+    except Exception:
+        if count_request:
+            REQUESTS.labels("500").inc()
+        raise
+    if count_request:
+        REQUESTS.labels(str(response.status_code)).inc()
+    return response
 
 
 def no_backend_error(config, path, exc):
@@ -222,7 +249,6 @@ def no_backend_error(config, path, exc):
     the metric disappears entirely. 503 is also the honest status, and it tells
     the indexer to retry rather than dead-letter.
     """
-    REQUESTS.labels("503").inc()
     log_throttled("no_backend", "%s rejected: %s", path, exc)
     return HTTPException(
         status_code=503,
@@ -321,7 +347,6 @@ async def embed(body: EmbedRequest, request: Request, background: BackgroundTask
             timeout=config.request_budget_s,
         )
     except asyncio.TimeoutError:
-        REQUESTS.labels("504").inc()
         raise HTTPException(status_code=504, detail="request budget exhausted")
     except NoHealthyBackendError as exc:
         raise no_backend_error(config, "/embed", exc)
@@ -371,13 +396,11 @@ async def _embed_query(body, request):
 
     texts = [fold_de(normalize_text(value)) for value in inputs]
     if any(not value for value in texts):
-        REQUESTS.labels("400").inc()
         raise HTTPException(
             status_code=400,
             detail="inputs must not contain empty queries",
         )
     if any(len(value) > MAX_QUERY_CHARS for value in texts):
-        REQUESTS.labels("413").inc()
         raise HTTPException(status_code=413, detail="query input is too long")
 
     request.app.state.inflight += 1
@@ -404,7 +427,6 @@ async def _embed_query(body, request):
                     or weight <= 0
                 ):
                     raise ValueError(f"invalid query sparse entry {token!r}: {weight!r}")
-        REQUESTS.labels("200").inc()
         return vectors
     finally:
         request.app.state.inflight -= 1
@@ -421,7 +443,6 @@ async def _embed(body, request, background):
     try:
         canonical = [canonical_input(value) for value in inputs]
     except ValueError as exc:
-        REQUESTS.labels("400").inc()
         raise HTTPException(status_code=400, detail=str(exc))
 
     hashes = [input_hash(value) for value in canonical]
@@ -432,7 +453,6 @@ async def _embed(body, request, background):
 
     document_limit = max(0, config.max_inflight - QUERY_RESERVE)
     if missing and request.app.state.inflight >= document_limit:
-        REQUESTS.labels("429").inc()
         raise HTTPException(
             status_code=429,
             detail="SPLADE service at concurrency limit",
@@ -466,7 +486,6 @@ async def _embed(body, request, background):
         output = []
         for value_hash, packed in zip(hashes, cached):
             output.append(unpack_sparse(packed or new_values[value_hash]))
-        REQUESTS.labels("200").inc()
         return output
     finally:
         request.app.state.inflight -= int(bool(missing))

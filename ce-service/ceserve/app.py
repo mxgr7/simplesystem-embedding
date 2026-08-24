@@ -9,6 +9,7 @@ split is a refactor rather than a wire change.
 """
 import asyncio
 import logging
+import os
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -37,6 +38,7 @@ from ceserve.metrics import (
     INFLIGHT,
     PADDED_WIDTH,
     REQUESTS,
+    RERANKS,
     TOTAL_MS,
     CeRuntimeCollector,
 )
@@ -63,6 +65,19 @@ _SKIP_METRIC = {
     SKIP_DECODE: "skipped_decode",
     SKIP_VERSION: "skipped_version",
 }
+RESTART_GRACE_S = 0.1
+
+
+def _exit_process():
+    """Exit the one-process service so Compose starts a clean CUDA context."""
+    os._exit(1)
+
+
+async def _restart_when_requested(app):
+    await app.state.restart_requested.wait()
+    # Give the error response and log record time to reach their consumers.
+    await asyncio.sleep(RESTART_GRACE_S)
+    _exit_process()
 
 
 class RequestError(Exception):
@@ -89,6 +104,7 @@ def _json(payload, status=200):
 
 def _error(status, code, detail):
     REQUESTS.labels(str(status)).inc()
+    RERANKS.labels("ce_error").inc()
     return _json({"error": code, "detail": detail}, status=status)
 
 
@@ -108,6 +124,8 @@ async def lifespan(app):
     app.state.config = config
     app.state.scorer = scorer
     app.state.inflight = 0
+    app.state.restart_requested = asyncio.Event()
+    restart_task = asyncio.create_task(_restart_when_requested(app))
     # Registered here, not at import, so repeated app construction in tests does
     # not collide on the default registry — and unregistered on the way out for
     # the same reason.
@@ -116,6 +134,8 @@ async def lifespan(app):
     try:
         yield
     finally:
+        restart_task.cancel()
+        await asyncio.gather(restart_task, return_exceptions=True)
         REGISTRY.unregister(collector)
 
 
@@ -355,6 +375,30 @@ async def rerank(request: Request):
         TOTAL_MS.observe(time.perf_counter() - started)
 
 
+def _consume_forward_result(task):
+    """Retrieve a late result so an orphaned failure is not logged twice."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _run_forward(app, scorer, query_ids, arts, max_len):
+    """Own GPU capacity until the worker thread actually stops."""
+    started = time.perf_counter()
+    try:
+        return await asyncio.to_thread(scorer.score, query_ids, arts, max_len)
+    except Exception:
+        # CUDA failures can arrive after the caller already received a 504.
+        # The worker still marks degradation and wakes the restart watchdog.
+        scorer.degraded = True
+        app.state.restart_requested.set()
+        log.exception("inference failed; exiting for a clean CUDA context")
+        raise
+    finally:
+        FORWARD_MS.observe(time.perf_counter() - started)
+        app.state.inflight -= 1
+        INFLIGHT.set(app.state.inflight)
+
+
 async def _rerank(request, config):
     scorer = request.app.state.scorer
     if scorer is None or not scorer.warmed_up or scorer.degraded:
@@ -378,6 +422,7 @@ async def _rerank(request, config):
         # input id comes back exactly once" contract; callers branch on
         # `declined_reason`. The ticket names the exact reason string.
         REQUESTS.labels("200").inc()
+        RERANKS.labels("ce_declined").inc()
         return _json({
             "model_id": MODEL_ID,
             "model_sha256": MODEL_SHA256,
@@ -411,23 +456,18 @@ async def _rerank(request, config):
     if ids:
         request.app.state.inflight += 1
         INFLIGHT.set(request.app.state.inflight)
-        t1 = time.perf_counter()
+        forward = asyncio.create_task(
+            _run_forward(request.app, scorer, query_ids, arts, max_len)
+        )
+        # A request timeout stops awaiting this task but not its worker thread.
+        # Retrieve any late exception after the task releases its own capacity.
+        forward.add_done_callback(_consume_forward_result)
         try:
-            probs, stats = await asyncio.to_thread(
-                scorer.score, query_ids, arts, max_len)
+            probs, stats = await asyncio.shield(forward)
             padded_width = stats["padded_width"]
         except Exception as exc:
-            # A CUDA OOM or an illegal memory access poisons the context, and a
-            # process that keeps answering afterwards serves garbage. Mark
-            # degraded so /readyz 503s and the orchestrator restarts us.
-            scorer.degraded = True
-            log.exception("inference failed; marking the service degraded")
             raise RequestError(f"inference failed: {exc}", status=500,
                                code="inference_failed") from None
-        finally:
-            FORWARD_MS.observe(time.perf_counter() - t1)
-            request.app.state.inflight -= 1
-            INFLIGHT.set(request.app.state.inflight)
         PADDED_WIDTH.observe(padded_width)
 
     response = _build_response(scorer, query_ids, ids, counts, probs, skipped,
@@ -437,6 +477,7 @@ async def _rerank(request, config):
     for entry in skipped:
         CANDIDATES.labels(_SKIP_METRIC[entry["reason"]]).inc()
     REQUESTS.labels("200").inc()
+    RERANKS.labels("ce_declined" if skipped else "scored").inc()
     if payload.get("debug"):
         response["timings"] = {
             "decode_ms": round((time.perf_counter() - t0) * 1000, 3),
