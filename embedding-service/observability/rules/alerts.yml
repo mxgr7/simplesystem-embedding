@@ -44,9 +44,8 @@ groups:
     rules:
       - alert: TargetDown
         # 15m, not 5m: a container restart or a compose recreate is not an incident, and this
-        # box's whole problem is a board nobody trusts. `indexer` is excluded and handled
-        # below -- it is legitimately absent until MXG-112 wires it.
-        expr: up{job!="indexer"} == 0
+        # box's whole problem is a board nobody trusts.
+        expr: up == 0
         for: 15m
         labels:
           severity: critical
@@ -54,18 +53,6 @@ groups:
           summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
           description: "Target has been unreachable for 15 minutes. Everything downstream of this job is now unmonitored."
           action: "docker ps -a | grep -i {{ $labels.job }}; docker logs --tail 50 <container>"
-
-      - alert: IndexerTargetDown
-        # Separate and only a warning, because until the indexer starts writing this is the
-        # expected state. Once it is live, promote this to critical and delete the note.
-        expr: up{job="indexer"} == 0
-        for: 1h
-        labels:
-          severity: warning
-        annotations:
-          summary: "article-search-indexer is not being scraped"
-          description: "Expected while MXG-112 is unfinished. After the indexer goes live this means it is down, and with SPLADE_REQUIRED=true a down indexer is a stalled pipeline, not a slow one."
-          action: "Check the indexer container on this host; ACTUATOR_PORT must be 9091."
 
   - name: gpu
     interval: 30s
