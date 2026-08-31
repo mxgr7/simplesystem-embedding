@@ -82,18 +82,38 @@ services:
       # runs on a bridge network and reaches the host as `host.docker.internal`,
       # which resolves to 172.17.0.1 — a loopback-only publish is invisible to it
       # (`dial tcp 172.17.0.1:8140: connect: connection refused`). splade-service
-      # does not hit this because it uses host networking and binds 0.0.0.0:8137;
-      # this keeps the CE off every external interface instead, which is the point
-      # while it is dark.
+      # does not hit this because it uses host networking and binds 0.0.0.0:8137.
+      # Publishing per address rather than on 0.0.0.0 is still deliberate: it keeps
+      # the port off every interface that nothing named here needs. It is no longer
+      # what keeps the CE private -- see the next publish; the service stopped being
+      # dark on 2026-08-28.
       #
       # ⚠️ If the daemon's default bridge ever moves off 172.17/16 this line stops
       # binding and the scrape goes dark — but self-detecting: CeServiceAbsent
       # fires within 5m. (Bridge subnets do move here: a 172.19/16 bridge once
       # collided with an Atlas PrivateLink route.)
       - "172.17.0.1:8140:8140"
-      # Query-service experiment host. The host firewall admits only
-      # 172.16.20.115/32 on this interface; keep the source rule paired with
-      # this publish when moving the service.
+      # VPC interface, reached by the query service in the prod cluster -- the only
+      # consumer of this port. (The indexer's `s2ng-article-search.ce.*` keys are a
+      # local tokenizer, not a client; its network arms are 8137 and 9000.)
+      #
+      # No host firewall rule guards it, by decision: S2-149 removed the
+      # DOCKER-USER ACCEPT/DROP pair for 8140 on 2026-08-31 and left the chain
+      # empty. There is nothing here to filter, so there is also nothing to persist
+      # across a reboot -- the boot state IS the intended state, which is what the
+      # hand-added rules never were (the box has no netfilter-persistent).
+      #
+      # The security group is the gate, and it was always narrower than those rules:
+      # measured 2026-08-31, hosts inside all three pod subnets (172.16.10.55,
+      # 172.16.11.129, 172.16.12.14) and the jumphost (172.16.0.242) cannot reach
+      # 8137 or 8140 while they do reach 8080 and 9000. So 8137/8140 are admitted by
+      # source security group -- the EKS node SG plus the dev box -- not by CIDR.
+      # 8137 is the honest control for that probe: INPUT is empty with policy
+      # ACCEPT, so it has never carried host filtering of any kind.
+      #
+      # ⚠️ The CE serves unauthenticated (API_KEY below is blank) and that is the
+      # decision rather than an oversight: reachable and open is the chosen posture
+      # for both encoders on this box (S2-149, 2026-08-31).
       - "172.16.10.92:8140:8140"
     environment:
       # The INNER directory. ship_mxg84.sh nests the run name inside the dated
